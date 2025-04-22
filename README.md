@@ -101,7 +101,7 @@ npm run deploy
 
 ## License
 
-MIT
+GPLv3
 
 ## Contributing
 
