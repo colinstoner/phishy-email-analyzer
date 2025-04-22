@@ -1,0 +1,41 @@
+{
+  "name": "phishy-email-analyzer",
+  "version": "1.0.0",
+  "description": "AI-powered phishing email analysis tool using Claude to evaluate suspicious emails",
+  "main": "index.js",
+  "scripts": {
+    "test": "jest",
+    "deploy": "zip -r function.zip index.js node_modules package.json && aws lambda update-function-code --function-name phishy --zip-file fileb://function.zip",
+    "lint": "eslint ."
+  },
+  "keywords": [
+    "security",
+    "phishing",
+    "email",
+    "analysis",
+    "claude",
+    "aws",
+    "lambda"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.787.0",
+    "@aws-sdk/client-ses": "^3.418.0",
+    "axios": "^1.5.0"
+  },
+  "devDependencies": {
+    "eslint": "^8.49.0",
+    "jest": "^29.6.4"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/phishy-email-analyzer.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yourusername/phishy-email-analyzer/issues"
+  }
+}
