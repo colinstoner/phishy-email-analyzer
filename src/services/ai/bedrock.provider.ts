@@ -133,9 +133,11 @@ export class BedrockProvider implements AIProvider {
     // Future enhancement: add AbortController support for per-request timeout
     void (options?.timeout ?? this.timeout);
 
-    logger.debug('Sending prompt to Bedrock', {
+    // Log at INFO level for visibility during debugging
+    logger.info('Sending prompt to Bedrock', {
       model: this.model,
       promptLength: prompt.length,
+      promptSizeKB: Math.round(prompt.length / 1024),
       maxTokens,
     });
 

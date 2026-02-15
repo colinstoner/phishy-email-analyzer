@@ -7,6 +7,9 @@ import { ExtractedEmailData } from '../../types';
 import { EnterpriseProfile } from '../../models/profile.model';
 import { analyzeRecipientContext, formatRecipientContextForPrompt } from '../../utils/signature';
 
+// Maximum characters for email body to prevent token overflow
+const MAX_BODY_LENGTH = 50000;
+
 /**
  * Build phishing analysis prompt for email
  */
@@ -17,10 +20,18 @@ export function buildPhishingAnalysisPrompt(
 ): string {
   const linksSection =
     emailData.links.length > 0
-      ? `--- LINKS IN EMAIL ---\n${emailData.links.join('\n')}\n\n`
+      ? `--- LINKS IN EMAIL ---\n${emailData.links.slice(0, 50).join('\n')}\n\n`
       : '';
 
   const profileSection = profile ? buildProfileSection(profile) : buildDefaultSystemsSection();
+
+  // Truncate body if too large
+  let bodyText = emailData.text || 'No text content';
+  let truncationNote = '';
+  if (bodyText.length > MAX_BODY_LENGTH) {
+    bodyText = bodyText.substring(0, MAX_BODY_LENGTH);
+    truncationNote = '\n[... body truncated for analysis ...]';
+  }
 
   // Analyze recipient context from signature
   const recipientContext = analyzeRecipientContext(emailData.text, emailData.originalForwarder);
@@ -32,7 +43,7 @@ export function buildPhishingAnalysisPrompt(
 From: ${emailData.from_email}
 Subject: ${emailData.subject}
 Body:
-${emailData.text || 'No text content'}
+${bodyText}${truncationNote}
 
 ${linksSection}--- HEADERS ---
 ${JSON.stringify(essentialHeaders, null, 2)}
