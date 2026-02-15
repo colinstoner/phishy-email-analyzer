@@ -125,7 +125,7 @@ function getDefaultConfig(): PartialPhishyConfig {
       },
       bedrock: {
         region: 'us-east-1',
-        modelId: 'anthropic.claude-sonnet-4-5-20250929-v1:0',
+        modelId: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
         maxTokens: 4096,
         timeout: 60000,
       },

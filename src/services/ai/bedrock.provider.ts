@@ -7,8 +7,6 @@ import {
   BedrockRuntimeClient,
   InvokeModelCommand,
 } from '@aws-sdk/client-bedrock-runtime';
-import { NodeHttpHandler } from '@smithy/node-http-handler';
-import * as https from 'https';
 import {
   AIProvider,
   AnalysisOptions,
@@ -32,8 +30,8 @@ const logger = createLogger('bedrock-provider');
  */
 export const BEDROCK_CLAUDE_MODELS = {
   // Claude 4.5 models (recommended)
-  CLAUDE_SONNET_4_5: 'anthropic.claude-sonnet-4-5-20250929-v1:0',
-  CLAUDE_HAIKU_4_5: 'anthropic.claude-haiku-4-5-20250929-v1:0',
+  CLAUDE_SONNET_4_5: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
+  CLAUDE_HAIKU_4_5: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
   // Claude 4 models
   CLAUDE_OPUS_4: 'anthropic.claude-opus-4-20250514-v1:0',
   CLAUDE_SONNET_4: 'anthropic.claude-sonnet-4-20250514-v1:0',
@@ -69,23 +67,7 @@ export class BedrockProvider implements AIProvider {
     essentialHeadersExtractor: (headers: Record<string, string>) => Record<string, string>,
     profile?: EnterpriseProfile
   ) {
-    // Configure HTTP handler with HTTP/1.1 and keepalive to avoid VPC endpoint HTTP/2 stream issues
-    const requestHandler = new NodeHttpHandler({
-      httpsAgent: new https.Agent({
-        keepAlive: true,
-        keepAliveMsecs: 10000,
-        timeout: 120000,
-        // Force HTTP/1.1 by disabling ALPN negotiation
-        ALPNProtocols: ['http/1.1'],
-      }),
-      connectionTimeout: 10000,
-      requestTimeout: 120000,
-    });
-
-    this.client = new BedrockRuntimeClient({
-      region: config.region,
-      requestHandler,
-    });
+    this.client = new BedrockRuntimeClient({ region: config.region });
     this.model = config.modelId ?? DEFAULT_MODEL;
     this.maxTokens = config.maxTokens ?? DEFAULT_MAX_TOKENS;
     this.timeout = config.timeout ?? DEFAULT_TIMEOUT_MS;

@@ -238,6 +238,10 @@ function createAIProvider(
     if (!config.ai.bedrock) {
       throw new Error('Bedrock configuration required when provider is bedrock');
     }
+    logger.info('Creating Bedrock provider', {
+      region: config.ai.bedrock.region,
+      modelId: config.ai.bedrock.modelId,
+    });
     return new BedrockProvider(
       {
         region: config.ai.bedrock.region,
