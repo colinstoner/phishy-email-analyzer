@@ -6,8 +6,12 @@ This document provides step-by-step instructions for deploying Phishy on AWS.
 
 - AWS account with administrator access
 - Domain name you control (for receiving emails)
-- Anthropic API key for Claude
+- **Either**:
+  - Anthropic API key for Claude (direct API), OR
+  - AWS Bedrock access (no external API key needed)
 - Node.js and npm installed (for package preparation)
+
+> **Quick Start**: See [docs/QUICK_START.md](docs/QUICK_START.md) for a 15-minute setup guide.
 
 ## AWS Service Setup
 
@@ -136,6 +140,29 @@ This document provides step-by-step instructions for deploying Phishy on AWS.
    ```
    - Replace `YOUR-EMAIL-BUCKET-NAME` with the bucket name you created in step 4
 5. Name the policy "PhishyPermissions" and create
+
+### 7b. (Optional) Use AWS Bedrock Instead of Anthropic API
+
+If you prefer to use AWS Bedrock instead of the Anthropic API, add this permission:
+
+```json
+{
+    "Effect": "Allow",
+    "Action": ["bedrock:InvokeModel"],
+    "Resource": ["arn:aws:bedrock:*::foundation-model/anthropic.claude-*"]
+}
+```
+
+Then set these environment variables instead:
+- `PHISHY_AI_PROVIDER`: Set to `bedrock`
+- `BEDROCK_REGION`: Your AWS region (e.g., `us-east-1`)
+- Remove `ANTHROPIC_API_KEY` - not needed with Bedrock
+
+**Benefits of Bedrock**:
+- No external API key to manage
+- Data stays within your AWS account
+- Uses IAM for authentication
+- Better audit trails via CloudTrail
 
 ### 8. Understanding Email Content Handling
 

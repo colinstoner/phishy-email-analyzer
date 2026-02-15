@@ -1,0 +1,67 @@
+{
+  "Records": [
+    {
+      "eventSource": "aws:ses",
+      "eventVersion": "1.0",
+      "ses": {
+        "mail": {
+          "timestamp": "2024-01-15T15:30:00.000Z",
+          "source": "sender@example.com",
+          "messageId": "test-message-id-12345",
+          "destination": ["recipient@example.com"],
+          "headers": [
+            {
+              "name": "From",
+              "value": "Sender Name <sender@example.com>"
+            },
+            {
+              "name": "To",
+              "value": "recipient@example.com"
+            },
+            {
+              "name": "Subject",
+              "value": "Test Email Subject"
+            },
+            {
+              "name": "Message-ID",
+              "value": "<test-message-id-12345@example.com>"
+            },
+            {
+              "name": "Content-Type",
+              "value": "text/plain; charset=utf-8"
+            }
+          ],
+          "commonHeaders": {
+            "from": ["Sender Name <sender@example.com>"],
+            "to": ["recipient@example.com"],
+            "subject": "Test Email Subject"
+          }
+        },
+        "receipt": {
+          "timestamp": "2024-01-15T15:30:01.000Z",
+          "processingTimeMillis": 100,
+          "action": {
+            "type": "S3",
+            "bucketName": "test-phishy-bucket",
+            "objectKey": "emails/test-message-id-12345"
+          },
+          "spamVerdict": {
+            "status": "PASS"
+          },
+          "virusVerdict": {
+            "status": "PASS"
+          },
+          "spfVerdict": {
+            "status": "PASS"
+          },
+          "dkimVerdict": {
+            "status": "PASS"
+          },
+          "dmarcVerdict": {
+            "status": "PASS"
+          }
+        }
+      }
+    }
+  ]
+}

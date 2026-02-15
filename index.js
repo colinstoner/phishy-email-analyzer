@@ -1,14 +1,32 @@
 /**
  * Phishy Email Analyzer
- * 
+ *
  * An AI-powered phishing email analysis tool that uses Claude to
  * evaluate suspicious emails and provide detailed security reports.
- * 
- * @license MIT
+ *
+ * This file provides backwards compatibility with v1.x deployments.
+ * For new deployments, use the TypeScript version in dist/.
+ *
+ * @license GPL-3.0
  */
 
 'use strict';
 
+// Try to use the new TypeScript handler if available
+try {
+  const distHandler = require('./dist/handlers/lambda.handler');
+  if (distHandler && distHandler.handler) {
+    console.log('Phishy: Using TypeScript handler from dist/');
+    module.exports.handler = distHandler.handler;
+    // Export TypeScript version if available
+    return;
+  }
+} catch (e) {
+  // TypeScript build not available, fall back to legacy handler
+  console.log('Phishy: TypeScript build not found, using legacy handler');
+}
+
+// Legacy implementation follows...
 const { parse } = require('querystring');
 const { SES } = require('@aws-sdk/client-ses');
 const axios = require('axios');

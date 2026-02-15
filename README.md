@@ -7,19 +7,22 @@ AI-powered phishing email analysis tool that uses Claude to evaluate suspicious 
 Phishy is a serverless application that:
 
 1. Receives emails via AWS SES
-2. Analyzes them for phishing indicators using Anthropic's Claude
+2. Analyzes them for phishing indicators using Claude (via Anthropic API or AWS Bedrock)
 3. Delivers a detailed security report back to the sender
 
 Perfect for security teams, IT departments, or anyone who needs to verify suspicious emails.
 
 ## Features
 
-- 🛡️ **Robust Analysis**: Uses Claude AI to evaluate email senders, content, links, and attachments
+- 🛡️ **Robust Analysis**: Uses Claude AI (Sonnet 4.5/Haiku 4.5) to evaluate email senders, content, links, and attachments
 - ⚡ **Serverless Architecture**: Runs on AWS Lambda for zero-maintenance operation
 - 🔄 **Easy Workflow**: Just forward suspicious emails to your designated address
 - 📊 **Detailed Reports**: Get comprehensive security analysis with recommendations
 - 🔒 **Secure Processing**: Only processes emails from trusted domains
 - 🔧 **Customizable**: Configure trusted domains, senders, and security team distribution
+- 🏢 **Enterprise Profiles**: Organization-specific context for better detection (VIPs, partners, known threats)
+- ☁️ **Flexible AI Backend**: Use Anthropic API or AWS Bedrock (no external API key needed)
+- 📈 **Threat Intelligence** (optional): Track patterns, extract IOCs, integrate with SIEM
 
 ## How It Works
 
@@ -43,26 +46,34 @@ User → SES → S3 (stores raw email)
 
 ## Setup
 
-See the [AWS.md](AWS.md) file for detailed setup instructions.
+**Quick Start**: See [docs/QUICK_START.md](docs/QUICK_START.md) for a 15-minute setup guide.
+
+**Full Setup**: See [AWS.md](AWS.md) for detailed AWS configuration instructions.
 
 ### Quick Start
 
 1. Clone this repository
 2. Install dependencies: `npm install`
-3. Follow the AWS setup guide to configure SES and Lambda
-4. Deploy to AWS Lambda
+3. Build: `npm run build`
+4. Follow the AWS setup guide to configure SES and Lambda
+5. Deploy to AWS Lambda
 
-### Environment Variables
+### Minimum Environment Variables
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `ANTHROPIC_API_KEY` | Your Claude API key | (Required) |
-| `SAFE_DOMAINS` | Comma-separated list of trusted domains | `example.com` |
-| `SAFE_SENDERS` | Comma-separated list of trusted email addresses | `trusted-sender@example.com` |
-| `SENDER_EMAIL` | Email address used to send analysis reports | `noreply@yourdomain.com` |
-| `SECURITY_TEAM_DISTRIBUTION` | Comma-separated list of security team emails | (Empty) |
-| `PHISHY_AWS_REGION` | AWS region for AWS services | Lambda's region |
-| `S3_BUCKET_NAME` | Override S3 bucket for email storage (optional) | Uses SES rule bucket |
+```bash
+# Option 1: Anthropic API
+ANTHROPIC_API_KEY=sk-ant-...
+
+# Option 2: AWS Bedrock (no API key needed)
+PHISHY_AI_PROVIDER=bedrock
+
+# Required for both
+S3_BUCKET_NAME=my-phishy-emails
+SENDER_EMAIL=phishy@yourdomain.com
+SECURITY_TEAM_DISTRIBUTION=security@yourdomain.com
+```
+
+See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for all configuration options.
 
 > **Note**: This application requires an S3 bucket configured with SES for storing raw emails. See [AWS.md](AWS.md) for detailed setup instructions.
 
@@ -76,27 +87,37 @@ The analysis report includes:
 - Recommended actions
 - Original email details
 
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [docs/QUICK_START.md](docs/QUICK_START.md) | 15-minute setup guide |
+| [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | All configuration options |
+| [docs/INTELLIGENCE.md](docs/INTELLIGENCE.md) | Threat intelligence features |
+| [AWS.md](AWS.md) | Detailed AWS setup |
+
 ## Development
 
 ### Prerequisites
 
 - Node.js 18+
 - AWS account with SES access
-- Anthropic API key
+- Anthropic API key OR AWS Bedrock access
 
 ### Local Testing
 
-Create a `.env` file with the required environment variables, then run:
-
 ```bash
 npm install
-node test/local.js
+npm run build
+npm test
 ```
 
 ### Deployment
 
 ```bash
-npm run deploy
+npm run build
+zip -r phishy.zip dist/ node_modules/ package.json
+# Upload to Lambda
 ```
 
 ## License

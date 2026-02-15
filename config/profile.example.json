@@ -1,0 +1,75 @@
+{
+  "name": "Example Corporation",
+  "organization": {
+    "name": "Example Corporation",
+    "domains": ["example.com", "example.io"],
+    "aliases": ["Example Corp", "Example Inc"]
+  },
+  "systems": {
+    "email": {
+      "providers": ["Microsoft 365"],
+      "legitimateServices": ["mailchimp.com", "sendgrid.net"]
+    },
+    "authentication": {
+      "providers": ["Okta"],
+      "ssoEnabled": true,
+      "mfaRequired": true
+    },
+    "storage": {
+      "providers": ["OneDrive", "SharePoint"]
+    },
+    "businessApps": [
+      {
+        "name": "Salesforce",
+        "domain": "salesforce.com",
+        "category": "crm"
+      },
+      {
+        "name": "Slack",
+        "domain": "slack.com",
+        "category": "communication"
+      }
+    ],
+    "communication": ["Slack", "Microsoft Teams", "Zoom"]
+  },
+  "vips": [
+    {
+      "name": "Jane CEO",
+      "title": "CEO",
+      "email": "jane.ceo@example.com",
+      "aliases": ["Jane", "J CEO", "Jane C"],
+      "impersonationRisk": "critical"
+    },
+    {
+      "name": "John CFO",
+      "title": "CFO",
+      "email": "john.cfo@example.com",
+      "aliases": ["John", "J CFO"],
+      "impersonationRisk": "critical"
+    }
+  ],
+  "trustedPartners": [
+    {
+      "name": "Legal Partners LLP",
+      "domains": ["legalpartners.com"],
+      "relationship": "vendor"
+    }
+  ],
+  "customPatterns": {
+    "highRiskKeywords": ["wire transfer", "urgent payment", "gift cards"],
+    "legitimateKeywords": ["quarterly report", "board meeting"],
+    "knownBadDomains": ["example-secure.com", "examp1e.com"],
+    "recentThreats": [
+      {
+        "description": "CEO impersonation requesting wire transfers",
+        "indicators": ["wire transfer", "confidential", "urgent"],
+        "dateReported": "2024-01-15"
+      }
+    ]
+  },
+  "analysisConfig": {
+    "sensitivityLevel": "high",
+    "autoEscalateThreshold": 0.8,
+    "additionalPromptContext": "Our organization frequently receives emails about software licenses."
+  }
+}
