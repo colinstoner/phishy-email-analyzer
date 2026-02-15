@@ -135,3 +135,9 @@ dist
 .yarn/install-state.gz
 .pnp.*
 .DS_Store
+
+# Phishy deployment config (contains secrets)
+config/phishy.config.json
+config/*.profile.json
+function.zip
+lambda.zip
