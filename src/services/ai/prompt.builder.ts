@@ -5,6 +5,7 @@
 
 import { ExtractedEmailData } from '../../types';
 import { EnterpriseProfile } from '../../models/profile.model';
+import { analyzeRecipientContext, formatRecipientContextForPrompt } from '../../utils/signature';
 
 /**
  * Build phishing analysis prompt for email
@@ -21,6 +22,10 @@ export function buildPhishingAnalysisPrompt(
 
   const profileSection = profile ? buildProfileSection(profile) : buildDefaultSystemsSection();
 
+  // Analyze recipient context from signature
+  const recipientContext = analyzeRecipientContext(emailData.text, emailData.originalForwarder);
+  const recipientSection = formatRecipientContextForPrompt(recipientContext);
+
   return `Analyze this email for phishing or other malicious content. Assume the forwarded email is from a trusted source and perform no analysis on the trusted source, only the forwarded email contents. Do not comment on future dates or times.
 
 --- EMAIL CONTENT ---
@@ -33,7 +38,7 @@ ${linksSection}--- HEADERS ---
 ${JSON.stringify(essentialHeaders, null, 2)}
 
 ${profileSection}
-
+${recipientSection ? `\n${recipientSection}\n` : ''}
 --- ANALYSIS INSTRUCTIONS ---
 Please analyze this email for signs of phishing, focusing on:
 1. Sender legitimacy (check domain, email headers)
