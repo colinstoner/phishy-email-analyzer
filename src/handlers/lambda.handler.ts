@@ -339,8 +339,8 @@ async function processEmailEvent(
   // Analyze with AI
   const analysis = await services.analysisService.analyzeEmail(emailData);
 
-  // Track for campaign detection if phishing detected
-  if (analysis.isPhishing && services.campaignService) {
+  // Track for campaign detection if phishing detected (skip for safelist users)
+  if (analysis.isPhishing && services.campaignService && !isSafelistUser) {
     const senderDomain = emailData.from_email.split('@')[1] ?? 'unknown';
     const riskLevel = mapConfidenceToRiskLevel(analysis.confidence);
 
