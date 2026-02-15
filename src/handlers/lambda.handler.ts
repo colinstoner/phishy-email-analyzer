@@ -21,6 +21,10 @@ import {
 } from '../types';
 import { createLogger } from '../utils/logger';
 import { extractEmailAddress, domainMatches } from '../utils/validation';
+import {
+  IntelligenceDatabaseService,
+  CampaignAlertService,
+} from '../services/intelligence';
 
 const logger = createLogger('lambda-handler');
 
@@ -40,6 +44,8 @@ let cachedServices: {
   emailParser: EmailParserService;
   sesNotifier: SESNotifier;
   analysisService: AnalysisService;
+  campaignService?: CampaignAlertService;
+  intelligenceDb?: IntelligenceDatabaseService;
 } | null = null;
 
 /**
@@ -175,17 +181,43 @@ async function initializeServices(): Promise<{
     configSet: config.notification.sesConfigSet,
   });
 
+  // Initialize intelligence and campaign services if enabled
+  let intelligenceDb: IntelligenceDatabaseService | undefined;
+  let campaignService: CampaignAlertService | undefined;
+
+  if (config.intelligence?.enabled && config.intelligence.connectionString) {
+    intelligenceDb = new IntelligenceDatabaseService(config.intelligence.connectionString);
+    await intelligenceDb.initialize();
+
+    if (config.campaignAlerts?.enabled && config.campaignAlerts.distributionList) {
+      campaignService = new CampaignAlertService(intelligenceDb, {
+        enabled: true,
+        distributionList: config.campaignAlerts.distributionList,
+        senderEmail: config.notification.senderEmail,
+        senderName: 'Phishy',
+        region: config.storage.region,
+      });
+      logger.info('Campaign alert service initialized', {
+        distributionList: config.campaignAlerts.distributionList,
+      });
+    }
+  }
+
   cachedServices = {
     s3Service,
     emailParser,
     sesNotifier,
     analysisService,
+    intelligenceDb,
+    campaignService,
   };
 
   logger.info('Services initialized', {
     provider: config.ai.provider,
     safeDomains: config.email.safeDomains.length,
     hasProfile: !!cachedProfile,
+    intelligenceEnabled: !!intelligenceDb,
+    campaignAlertsEnabled: !!campaignService,
   });
 
   return { config, services: cachedServices };
@@ -306,6 +338,30 @@ async function processEmailEvent(
 
   // Analyze with AI
   const analysis = await services.analysisService.analyzeEmail(emailData);
+
+  // Track for campaign detection if phishing detected
+  if (analysis.isPhishing && services.campaignService) {
+    const senderDomain = emailData.from_email.split('@')[1] ?? 'unknown';
+    const riskLevel = mapConfidenceToRiskLevel(analysis.confidence);
+
+    try {
+      const alertSent = await services.campaignService.processDetection(
+        senderDomain,
+        emailData.subject,
+        emailData.originalForwarder ?? emailData.from_email,
+        riskLevel,
+        analysis.indicators
+      );
+
+      if (alertSent) {
+        logger.info('Campaign alert sent', { senderDomain, subject: emailData.subject });
+      }
+    } catch (error) {
+      logger.error('Campaign tracking failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
 
   // Determine recipient
   const recipient = determineRecipient(emailData);
@@ -438,6 +494,19 @@ function isValidEmailRecipient(email: string): boolean {
     !email.includes('noreply') &&
     !email.includes('no-reply')
   );
+}
+
+/**
+ * Map analysis confidence to risk level for campaign tracking
+ */
+function mapConfidenceToRiskLevel(
+  confidence: string
+): 'critical' | 'high' | 'medium' | 'low' {
+  const normalized = confidence.toLowerCase();
+  if (normalized.includes('very high')) return 'critical';
+  if (normalized.includes('high')) return 'high';
+  if (normalized.includes('medium')) return 'medium';
+  return 'low';
 }
 
 /**

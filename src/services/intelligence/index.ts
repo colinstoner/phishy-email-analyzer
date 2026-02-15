@@ -7,9 +7,16 @@ export {
   EmailAnalysisRecord,
   ThreatIndicatorRecord,
   DetectedPatternRecord,
+  CampaignRecord,
+  CampaignMatch,
   AnalysisSearchFilters,
   IntelligenceStats,
 } from './database.service';
+
+export {
+  CampaignAlertService,
+  CampaignAlertConfig,
+} from './campaign.service';
 
 export {
   extractIOCs,

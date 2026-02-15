@@ -65,6 +65,37 @@ export interface DetectedPatternRecord {
 }
 
 /**
+ * Campaign record for tracking phishing campaigns
+ */
+export interface CampaignRecord {
+  id?: string;
+  campaignSignature: string;
+  senderDomain: string;
+  subjectPattern: string;
+  detectionCount: number;
+  uniqueRecipients: string[];
+  riskLevel: 'critical' | 'high' | 'medium' | 'low';
+  sampleIndicators: string[];
+  firstSeenAt: Date;
+  lastSeenAt: Date;
+  alertSentAt?: Date;
+  isActive: boolean;
+}
+
+/**
+ * Campaign match result
+ */
+export interface CampaignMatch {
+  campaignId: string;
+  signature: string;
+  detectionCount: number;
+  uniqueRecipientCount: number;
+  hoursActive: number;
+  shouldAlert: boolean;
+  alertSentAt?: Date;
+}
+
+/**
  * Search filters for analyses
  */
 export interface AnalysisSearchFilters {
@@ -199,6 +230,30 @@ export class IntelligenceDatabaseService {
 
         CREATE INDEX IF NOT EXISTS idx_detected_patterns_type ON detected_patterns(pattern_type);
         CREATE INDEX IF NOT EXISTS idx_detected_patterns_confirmed ON detected_patterns(is_confirmed_threat);
+      `);
+
+      // Create campaigns table for flood/campaign detection
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS campaigns (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          campaign_signature VARCHAR(64) NOT NULL UNIQUE,
+          sender_domain VARCHAR(255) NOT NULL,
+          subject_pattern VARCHAR(500),
+          detection_count INTEGER DEFAULT 1,
+          unique_recipients TEXT[] DEFAULT '{}',
+          risk_level VARCHAR(20) NOT NULL,
+          sample_indicators TEXT[] DEFAULT '{}',
+          first_seen_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+          last_seen_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+          alert_sent_at TIMESTAMP WITH TIME ZONE,
+          is_active BOOLEAN DEFAULT TRUE,
+
+          CONSTRAINT valid_campaign_risk CHECK (risk_level IN ('critical', 'high', 'medium', 'low'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_campaigns_signature ON campaigns(campaign_signature);
+        CREATE INDEX IF NOT EXISTS idx_campaigns_active ON campaigns(is_active) WHERE is_active = TRUE;
+        CREATE INDEX IF NOT EXISTS idx_campaigns_last_seen ON campaigns(last_seen_at DESC);
       `);
 
       await client.query('COMMIT');
@@ -534,6 +589,162 @@ export class IntelligenceDatabaseService {
     );
 
     return result.rows.length > 0;
+  }
+
+  /**
+   * Track a detection for campaign analysis
+   * Returns campaign match info if alert threshold is met
+   */
+  async trackCampaignDetection(
+    senderDomain: string,
+    subject: string,
+    recipientEmail: string,
+    riskLevel: CampaignRecord['riskLevel'],
+    indicators: string[]
+  ): Promise<CampaignMatch | null> {
+    await this.initialize();
+
+    // Generate campaign signature from sender domain + normalized subject
+    const normalizedSubject = this.normalizeSubjectForCampaign(subject);
+    const signature = createHash('sha256')
+      .update(`${senderDomain.toLowerCase()}:${normalizedSubject}`)
+      .digest('hex')
+      .substring(0, 16);
+
+    const client = await this.pool.connect();
+
+    try {
+      await client.query('BEGIN');
+
+      // Upsert campaign record
+      const result = await client.query(
+        `INSERT INTO campaigns
+         (campaign_signature, sender_domain, subject_pattern, detection_count,
+          unique_recipients, risk_level, sample_indicators, first_seen_at, last_seen_at)
+         VALUES ($1, $2, $3, 1, ARRAY[$4], $5, $6, NOW(), NOW())
+         ON CONFLICT (campaign_signature)
+         DO UPDATE SET
+           detection_count = campaigns.detection_count + 1,
+           unique_recipients = CASE
+             WHEN $4 = ANY(campaigns.unique_recipients) THEN campaigns.unique_recipients
+             ELSE array_append(campaigns.unique_recipients, $4)
+           END,
+           risk_level = CASE
+             WHEN $5 = 'critical' THEN 'critical'
+             WHEN campaigns.risk_level = 'critical' THEN 'critical'
+             WHEN $5 = 'high' OR campaigns.risk_level = 'high' THEN 'high'
+             ELSE campaigns.risk_level
+           END,
+           last_seen_at = NOW(),
+           is_active = TRUE
+         RETURNING id, campaign_signature, detection_count, unique_recipients,
+                   first_seen_at, alert_sent_at`,
+        [signature, senderDomain.toLowerCase(), normalizedSubject, recipientEmail.toLowerCase(),
+         riskLevel, indicators.slice(0, 5)]
+      );
+
+      const row = result.rows[0];
+      const campaignId = row.id as string;
+      const detectionCount = row.detection_count as number;
+      const uniqueRecipients = row.unique_recipients as string[];
+      const firstSeenAt = row.first_seen_at as Date;
+      const alertSentAt = row.alert_sent_at as Date | null;
+
+      await client.query('COMMIT');
+
+      // Calculate hours since first detection
+      const hoursActive = (Date.now() - firstSeenAt.getTime()) / (1000 * 60 * 60);
+
+      // Determine if we should alert
+      // Criteria: ≥3 detections, ≥2 unique recipients, within 4 hours, not alerted in last 24h
+      const shouldAlert =
+        detectionCount >= 3 &&
+        uniqueRecipients.length >= 2 &&
+        hoursActive <= 4 &&
+        (riskLevel === 'high' || riskLevel === 'critical') &&
+        (!alertSentAt || (Date.now() - alertSentAt.getTime()) > 24 * 60 * 60 * 1000);
+
+      return {
+        campaignId,
+        signature,
+        detectionCount,
+        uniqueRecipientCount: uniqueRecipients.length,
+        hoursActive,
+        shouldAlert,
+        alertSentAt: alertSentAt ?? undefined,
+      };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      logger.error('Failed to track campaign detection', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Mark a campaign as alerted
+   */
+  async markCampaignAlerted(campaignId: string): Promise<void> {
+    await this.initialize();
+
+    await this.pool.query(
+      'UPDATE campaigns SET alert_sent_at = NOW() WHERE id = $1',
+      [campaignId]
+    );
+
+    logger.info('Marked campaign as alerted', { campaignId });
+  }
+
+  /**
+   * Get campaign details for alert generation
+   */
+  async getCampaignDetails(campaignId: string): Promise<CampaignRecord | null> {
+    await this.initialize();
+
+    const result = await this.pool.query(
+      'SELECT * FROM campaigns WHERE id = $1',
+      [campaignId]
+    );
+
+    if (result.rows.length === 0) {
+      return null;
+    }
+
+    const row = result.rows[0];
+    return {
+      id: row.id as string,
+      campaignSignature: row.campaign_signature as string,
+      senderDomain: row.sender_domain as string,
+      subjectPattern: row.subject_pattern as string,
+      detectionCount: row.detection_count as number,
+      uniqueRecipients: row.unique_recipients as string[],
+      riskLevel: row.risk_level as CampaignRecord['riskLevel'],
+      sampleIndicators: row.sample_indicators as string[],
+      firstSeenAt: row.first_seen_at as Date,
+      lastSeenAt: row.last_seen_at as Date,
+      alertSentAt: row.alert_sent_at as Date | undefined,
+      isActive: row.is_active as boolean,
+    };
+  }
+
+  /**
+   * Normalize subject line for campaign matching
+   * Strips numbers, dates, invoice numbers, etc. to group similar subjects
+   */
+  private normalizeSubjectForCampaign(subject: string): string {
+    return subject
+      .toLowerCase()
+      .replace(/re:\s*/gi, '')
+      .replace(/fw:\s*/gi, '')
+      .replace(/fwd:\s*/gi, '')
+      .replace(/\d+/g, '#')          // Replace numbers with #
+      .replace(/[^\w\s#]/g, '')       // Remove special chars except #
+      .replace(/\s+/g, ' ')           // Normalize whitespace
+      .trim()
+      .substring(0, 100);             // Limit length
   }
 
   /**

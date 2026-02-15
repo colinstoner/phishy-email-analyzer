@@ -68,6 +68,14 @@ const IntelligenceConfigSchema = z.object({
 });
 
 /**
+ * Campaign alert configuration schema
+ */
+const CampaignAlertConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  distributionList: z.string().email().optional(),
+});
+
+/**
  * Complete Phishy configuration schema
  */
 export const PhishyConfigSchema = z.object({
@@ -77,6 +85,7 @@ export const PhishyConfigSchema = z.object({
   storage: StorageConfigSchema,
   profile: z.string().optional(), // Profile ID or S3 path
   intelligence: IntelligenceConfigSchema.optional(),
+  campaignAlerts: CampaignAlertConfigSchema.optional(),
   logLevel: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   version: z.string().optional(),
 });
@@ -92,6 +101,7 @@ export type EmailConfig = z.infer<typeof EmailConfigSchema>;
 export type NotificationConfig = z.infer<typeof NotificationConfigSchema>;
 export type StorageConfig = z.infer<typeof StorageConfigSchema>;
 export type IntelligenceConfig = z.infer<typeof IntelligenceConfigSchema>;
+export type CampaignAlertConfig = z.infer<typeof CampaignAlertConfigSchema>;
 
 /**
  * Partial configuration for merging

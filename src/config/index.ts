@@ -53,6 +53,10 @@ const ENV_MAPPINGS: Record<string, string> = {
   PHISHY_INTELLIGENCE_ENABLED: 'intelligence.enabled',
   PHISHY_DB_CONNECTION: 'intelligence.connectionString',
 
+  // Campaign Alerts
+  PHISHY_CAMPAIGN_ALERTS_ENABLED: 'campaignAlerts.enabled',
+  PHISHY_CAMPAIGN_ALERTS_DISTRIBUTION: 'campaignAlerts.distributionList',
+
   // Profile
   PHISHY_PROFILE: 'profile',
 
