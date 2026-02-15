@@ -217,9 +217,9 @@ export class BedrockProvider implements AIProvider {
   }
 
   /**
-   * Update the enterprise profile
+   * Set or clear the enterprise profile
    */
-  setProfile(profile: EnterpriseProfile): void {
+  setProfile(profile?: EnterpriseProfile): void {
     this.profile = profile;
   }
 }

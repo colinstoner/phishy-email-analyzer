@@ -4,6 +4,7 @@
  */
 
 import { AnalysisResult, ExtractedEmailData } from '../../types';
+import { EnterpriseProfile } from '../../models/profile.model';
 
 /**
  * Options for AI analysis
@@ -52,6 +53,11 @@ export interface AIProvider {
    * Get provider health status
    */
   healthCheck(): Promise<ProviderHealth>;
+
+  /**
+   * Set or clear the enterprise profile for analysis
+   */
+  setProfile(profile?: EnterpriseProfile): void;
 }
 
 /**

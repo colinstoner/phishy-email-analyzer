@@ -34,6 +34,7 @@ const CACHE_MAX_SIZE = 100;
  * Cached configuration and services
  */
 let cachedConfig: PhishyConfig | null = null;
+let cachedProfile: EnterpriseProfile | undefined;
 let cachedServices: {
   s3Service: S3Service;
   emailParser: EmailParserService;
@@ -126,10 +127,9 @@ async function initializeServices(): Promise<{
   cachedConfig = config;
 
   // Load enterprise profile if configured
-  let profile: EnterpriseProfile | undefined;
   if (config.profile) {
     try {
-      profile = await loadProfile(config.profile, config.storage.region);
+      cachedProfile = await loadProfile(config.profile, config.storage.region);
     } catch (error) {
       logger.warn('Failed to load enterprise profile', {
         path: config.profile,
@@ -149,7 +149,7 @@ async function initializeServices(): Promise<{
   );
 
   // Create AI provider(s)
-  const primaryProvider = createAIProvider(config, emailParser, profile);
+  const primaryProvider = createAIProvider(config, emailParser, cachedProfile);
   let fallbackProvider: AIProvider | undefined;
 
   if (config.ai.fallbackProvider) {
@@ -157,7 +157,7 @@ async function initializeServices(): Promise<{
       ...config,
       ai: { ...config.ai, provider: config.ai.fallbackProvider },
     };
-    fallbackProvider = createAIProvider(fallbackConfig, emailParser, profile);
+    fallbackProvider = createAIProvider(fallbackConfig, emailParser, cachedProfile);
   }
 
   // Create analysis service
@@ -185,7 +185,7 @@ async function initializeServices(): Promise<{
   logger.info('Services initialized', {
     provider: config.ai.provider,
     safeDomains: config.email.safeDomains.length,
-    hasProfile: !!profile,
+    hasProfile: !!cachedProfile,
   });
 
   return { config, services: cachedServices };
@@ -291,7 +291,18 @@ async function processEmailEvent(
     return validationResult;
   }
 
-  logger.info('Processing validated email', { from: emailData.from_email });
+  // Check if sender is a safelist user (not enterprise domain)
+  // Safelist users bypass enterprise profile for basic analysis
+  const isSafelistUser = config.email.safeSenders.some(
+    s => s.toLowerCase() === emailData.from_email.toLowerCase()
+  );
+
+  if (isSafelistUser) {
+    logger.info('Safelist user - bypassing enterprise profile', { from: emailData.from_email });
+    services.analysisService.setProfile(undefined);
+  } else if (cachedProfile) {
+    services.analysisService.setProfile(cachedProfile);
+  }
 
   // Analyze with AI
   const analysis = await services.analysisService.analyzeEmail(emailData);

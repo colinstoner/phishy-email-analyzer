@@ -51,7 +51,7 @@ const ENV_MAPPINGS: Record<string, string> = {
 
   // Intelligence
   PHISHY_INTELLIGENCE_ENABLED: 'intelligence.enabled',
-  PHISHY_DB_CONNECTION_STRING: 'intelligence.connectionString',
+  PHISHY_DB_CONNECTION: 'intelligence.connectionString',
 
   // Profile
   PHISHY_PROFILE: 'profile',

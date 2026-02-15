@@ -4,6 +4,7 @@
  */
 
 import { AIProvider, ProviderHealth } from './provider.interface';
+import { EnterpriseProfile } from '../../models/profile.model';
 import { AnalysisResult, ExtractedEmailData } from '../../types';
 import { createLogger } from '../../utils/logger';
 
@@ -103,6 +104,14 @@ export class AnalysisService {
    */
   getActiveModel(): string {
     return this.primaryProvider.model;
+  }
+
+  /**
+   * Set or clear the enterprise profile for analysis
+   */
+  setProfile(profile?: EnterpriseProfile): void {
+    this.primaryProvider.setProfile(profile);
+    this.fallbackProvider?.setProfile(profile);
   }
 
   /**
