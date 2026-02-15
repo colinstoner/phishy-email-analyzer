@@ -30,17 +30,8 @@ const TrustedPartnerSchema = z.object({
  */
 const BusinessAppSchema = z.object({
   name: z.string(),
-  domain: z.string(),
-  category: z.enum([
-    'productivity',
-    'communication',
-    'crm',
-    'hr',
-    'finance',
-    'engineering',
-    'security',
-    'other',
-  ]),
+  domains: z.array(z.string()),
+  category: z.string(),
 });
 
 /**
@@ -190,10 +181,10 @@ export const EXAMPLE_PROFILE: EnterpriseProfile = {
       providers: ['OneDrive', 'SharePoint', 'Box'],
     },
     businessApps: [
-      { name: 'Salesforce', domain: 'salesforce.com', category: 'crm' },
-      { name: 'Workday', domain: 'workday.com', category: 'hr' },
-      { name: 'Slack', domain: 'slack.com', category: 'communication' },
-      { name: 'Zoom', domain: 'zoom.us', category: 'communication' },
+      { name: 'Salesforce', domains: ['salesforce.com'], category: 'crm' },
+      { name: 'Workday', domains: ['workday.com'], category: 'hr' },
+      { name: 'Slack', domains: ['slack.com'], category: 'communication' },
+      { name: 'Zoom', domains: ['zoom.us'], category: 'communication' },
     ],
     communication: ['Slack', 'Microsoft Teams', 'Zoom'],
   },

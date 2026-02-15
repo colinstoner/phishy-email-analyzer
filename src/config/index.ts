@@ -119,13 +119,13 @@ function getDefaultConfig(): PartialPhishyConfig {
       provider: 'anthropic',
       anthropic: {
         apiKey: '',
-        model: 'claude-3-sonnet-20240229',
+        model: 'claude-sonnet-4-5-20250514',
         maxTokens: 4096,
         timeout: 60000,
       },
       bedrock: {
         region: 'us-east-1',
-        modelId: 'anthropic.claude-3-5-sonnet-20241022-v2:0',
+        modelId: 'us.anthropic.claude-sonnet-4-5-20250514-v1:0',
         maxTokens: 4096,
         timeout: 60000,
       },
