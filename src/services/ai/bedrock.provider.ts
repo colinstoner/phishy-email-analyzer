@@ -30,8 +30,8 @@ const logger = createLogger('bedrock-provider');
  */
 export const BEDROCK_CLAUDE_MODELS = {
   // Claude 4.5 models (recommended)
-  CLAUDE_SONNET_4_5: 'us.anthropic.claude-sonnet-4-5-20250514-v1:0',
-  CLAUDE_HAIKU_4_5: 'us.anthropic.claude-haiku-4-5-20250514-v1:0',
+  CLAUDE_SONNET_4_5: 'anthropic.claude-sonnet-4-5-20250929-v1:0',
+  CLAUDE_HAIKU_4_5: 'anthropic.claude-haiku-4-5-20250929-v1:0',
   // Claude 4 models
   CLAUDE_OPUS_4: 'anthropic.claude-opus-4-20250514-v1:0',
   CLAUDE_SONNET_4: 'anthropic.claude-sonnet-4-20250514-v1:0',
