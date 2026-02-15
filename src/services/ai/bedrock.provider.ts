@@ -7,6 +7,8 @@ import {
   BedrockRuntimeClient,
   InvokeModelCommand,
 } from '@aws-sdk/client-bedrock-runtime';
+import { NodeHttpHandler } from '@smithy/node-http-handler';
+import * as https from 'https';
 import {
   AIProvider,
   AnalysisOptions,
@@ -67,7 +69,23 @@ export class BedrockProvider implements AIProvider {
     essentialHeadersExtractor: (headers: Record<string, string>) => Record<string, string>,
     profile?: EnterpriseProfile
   ) {
-    this.client = new BedrockRuntimeClient({ region: config.region });
+    // Configure HTTP handler with HTTP/1.1 and keepalive to avoid VPC endpoint HTTP/2 stream issues
+    const requestHandler = new NodeHttpHandler({
+      httpsAgent: new https.Agent({
+        keepAlive: true,
+        keepAliveMsecs: 10000,
+        timeout: 120000,
+        // Force HTTP/1.1 by disabling ALPN negotiation
+        ALPNProtocols: ['http/1.1'],
+      }),
+      connectionTimeout: 10000,
+      requestTimeout: 120000,
+    });
+
+    this.client = new BedrockRuntimeClient({
+      region: config.region,
+      requestHandler,
+    });
     this.model = config.modelId ?? DEFAULT_MODEL;
     this.maxTokens = config.maxTokens ?? DEFAULT_MAX_TOKENS;
     this.timeout = config.timeout ?? DEFAULT_TIMEOUT_MS;
