@@ -7,8 +7,10 @@
  * @license GPL-3.0
  */
 
-// Export main handler
-export { handler } from './handlers/lambda.handler';
+// Export handlers
+export { handler } from './handlers/unified.handler';
+export { handler as sesHandler } from './handlers/lambda.handler';
+export { handler as apiHandler } from './handlers/api.handler';
 
 // Export types
 export * from './types';
