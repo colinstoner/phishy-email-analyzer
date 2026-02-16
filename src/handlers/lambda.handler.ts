@@ -25,6 +25,7 @@ import {
   IntelligenceDatabaseService,
   CampaignAlertService,
 } from '../services/intelligence';
+import { extractIOCs } from '../services/intelligence/ioc.extractor';
 
 const logger = createLogger('lambda-handler');
 
@@ -343,6 +344,50 @@ async function processEmailEvent(
   // Analyze with AI
   const analysis = await services.analysisService.analyzeEmail(emailData);
 
+  // Store analysis in intelligence database (only for enterprise users, not safelist)
+  if (services.intelligenceDb && !isSafelistUser) {
+    try {
+      const senderDomain = emailData.from_email.split('@')[1] ?? 'unknown';
+      await services.intelligenceDb.storeAnalysis({
+        messageId: msg.messageId ?? `${Date.now()}-${Math.random().toString(36).substring(7)}`,
+        fromEmail: emailData.from_email,
+        fromDomain: senderDomain,
+        subject: emailData.subject,
+        isPhishing: analysis.isPhishing,
+        confidenceScore: normalizeConfidenceToNumber(analysis.confidence),
+        riskLevel: mapConfidenceToRiskLevel(analysis.confidence),
+        analysisResult: analysis,
+        indicators: analysis.indicators ?? [],
+        vipImpersonationDetected: false,
+        aiProvider: analysis.provider ?? 'unknown',
+        aiModel: analysis.model ?? 'unknown',
+        processingTimeMs: analysis.processingTimeMs ?? 0,
+      });
+      logger.info('Stored analysis in intelligence database');
+
+      // Extract and store IOCs if phishing detected
+      if (analysis.isPhishing) {
+        const iocs = extractIOCs(emailData, analysis);
+        logger.info('Extracted IOCs', { count: iocs.length });
+
+        for (const ioc of iocs) {
+          try {
+            await services.intelligenceDb.upsertIndicator(ioc);
+          } catch (iocError) {
+            logger.warn('Failed to store IOC', {
+              type: ioc.indicatorType,
+              error: iocError instanceof Error ? iocError.message : String(iocError),
+            });
+          }
+        }
+      }
+    } catch (error) {
+      logger.error('Failed to store analysis in intelligence database', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   // Track for campaign detection if phishing detected (skip for safelist users)
   if (analysis.isPhishing && services.campaignService && !isSafelistUser) {
     const senderDomain = emailData.from_email.split('@')[1] ?? 'unknown';
@@ -511,6 +556,21 @@ function mapConfidenceToRiskLevel(
   if (normalized.includes('high')) return 'high';
   if (normalized.includes('medium')) return 'medium';
   return 'low';
+}
+
+/**
+ * Convert confidence string to numeric score (0-100)
+ */
+function normalizeConfidenceToNumber(confidence: string): number {
+  const normalized = confidence.toLowerCase();
+  if (normalized.includes('very high')) return 95;
+  if (normalized.includes('high')) return 85;
+  if (normalized.includes('medium')) return 60;
+  if (normalized.includes('low')) return 30;
+  // Try to parse as number if it's already numeric
+  const parsed = parseInt(confidence, 10);
+  if (!isNaN(parsed)) return Math.min(100, Math.max(0, parsed));
+  return 50; // Default to medium
 }
 
 /**
