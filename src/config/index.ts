@@ -128,12 +128,8 @@ function getDefaultConfig(): PartialPhishyConfig {
   return {
     ai: {
       provider: 'anthropic',
-      anthropic: {
-        apiKey: '',
-        model: 'claude-sonnet-4-5-20250514',
-        maxTokens: 4096,
-        timeout: 60000,
-      },
+      // Note: anthropic.apiKey is NOT set here - it must come from env or config
+      // This allows bedrock provider to work without requiring an Anthropic key
       bedrock: {
         region: 'us-east-1',
         modelId: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
