@@ -212,7 +212,8 @@ function parseEnvValue(key: string, value: string): unknown {
   if (
     key.includes('DOMAINS') ||
     key.includes('SENDERS') ||
-    key.includes('DISTRIBUTION')
+    key.includes('DISTRIBUTION') ||
+    key.includes('SAFE_SENDER_SECURITY')
   ) {
     return value.split(',').map(s => s.trim()).filter(Boolean);
   }

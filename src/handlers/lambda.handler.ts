@@ -25,7 +25,7 @@ import {
   IntelligenceDatabaseService,
   CampaignAlertService,
 } from '../services/intelligence';
-import { extractIOCs } from '../services/intelligence/ioc.extractor';
+import { extractIOCs, IOCSourceContext } from '../services/intelligence/ioc.extractor';
 
 const logger = createLogger('lambda-handler');
 
@@ -348,8 +348,10 @@ async function processEmailEvent(
   if (services.intelligenceDb && !isSafelistUser) {
     try {
       const senderDomain = emailData.from_email.split('@')[1] ?? 'unknown';
-      await services.intelligenceDb.storeAnalysis({
-        messageId: msg.messageId ?? `${Date.now()}-${Math.random().toString(36).substring(7)}`,
+      const messageId = msg.messageId ?? `${Date.now()}-${Math.random().toString(36).substring(7)}`;
+
+      const analysisId = await services.intelligenceDb.storeAnalysis({
+        messageId,
         fromEmail: emailData.from_email,
         fromDomain: senderDomain,
         subject: emailData.subject,
@@ -363,12 +365,21 @@ async function processEmailEvent(
         aiModel: analysis.model ?? 'unknown',
         processingTimeMs: analysis.processingTimeMs ?? 0,
       });
-      logger.info('Stored analysis in intelligence database');
+      logger.info('Stored analysis in intelligence database', { analysisId });
 
       // Extract and store IOCs if phishing detected
       if (analysis.isPhishing) {
-        const iocs = extractIOCs(emailData, analysis);
-        logger.info('Extracted IOCs', { count: iocs.length });
+        // Build source context for IOC provenance tracking
+        const sourceContext: IOCSourceContext = {
+          analysisId,
+          messageId,
+          fromEmail: emailData.from_email,
+          fromDomain: senderDomain,
+          subject: emailData.subject,
+        };
+
+        const iocs = extractIOCs(emailData, analysis, {}, sourceContext);
+        logger.info('Extracted IOCs', { count: iocs.length, analysisId });
 
         for (const ioc of iocs) {
           try {
@@ -565,18 +576,18 @@ function mapConfidenceToRiskLevel(
 }
 
 /**
- * Convert confidence string to numeric score (0-100)
+ * Convert confidence string to numeric score (0-1 scale for database storage)
  */
 function normalizeConfidenceToNumber(confidence: string): number {
   const normalized = confidence.toLowerCase();
-  if (normalized.includes('very high')) return 95;
-  if (normalized.includes('high')) return 85;
-  if (normalized.includes('medium')) return 60;
-  if (normalized.includes('low')) return 30;
-  // Try to parse as number if it's already numeric
+  if (normalized.includes('very high')) return 0.95;
+  if (normalized.includes('high')) return 0.85;
+  if (normalized.includes('medium')) return 0.60;
+  if (normalized.includes('low')) return 0.30;
+  // Try to parse as number if it's already numeric (assume 0-100 scale)
   const parsed = parseInt(confidence, 10);
-  if (!isNaN(parsed)) return Math.min(100, Math.max(0, parsed));
-  return 50; // Default to medium
+  if (!isNaN(parsed)) return Math.min(1, Math.max(0, parsed / 100));
+  return 0.50; // Default to medium
 }
 
 /**

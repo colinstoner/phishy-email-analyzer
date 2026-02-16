@@ -21,6 +21,7 @@ export {
 export {
   extractIOCs,
   IOCExtractionOptions,
+  IOCSourceContext,
 } from './ioc.extractor';
 
 export {

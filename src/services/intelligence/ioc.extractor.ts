@@ -37,6 +37,17 @@ export interface IOCExtractionOptions {
   minConfidence?: number;
 }
 
+/**
+ * Source context for IOC provenance tracking
+ */
+export interface IOCSourceContext {
+  analysisId: string;
+  messageId: string;
+  fromEmail: string;
+  fromDomain: string;
+  subject: string;
+}
+
 const DEFAULT_OPTIONS: IOCExtractionOptions = {
   extractUrls: true,
   extractDomains: true,
@@ -52,7 +63,8 @@ const DEFAULT_OPTIONS: IOCExtractionOptions = {
 export function extractIOCs(
   emailData: ExtractedEmailData,
   analysis: AnalysisResult,
-  options: IOCExtractionOptions = {}
+  options: IOCExtractionOptions = {},
+  sourceContext?: IOCSourceContext
 ): ThreatIndicatorRecord[] {
   const opts = { ...DEFAULT_OPTIONS, ...options };
   const indicators: ThreatIndicatorRecord[] = [];
@@ -61,6 +73,16 @@ export function extractIOCs(
   // Only extract IOCs if analysis indicates suspicious activity
   const baseConfidence = analysis.isPhishing ? 0.7 : 0.3;
   const severity = determineSeverity(analysis);
+
+  // Build base metadata for provenance tracking
+  const baseMetadata: Record<string, unknown> = {};
+  if (sourceContext) {
+    baseMetadata.sourceAnalysisId = sourceContext.analysisId;
+    baseMetadata.sourceMessageId = sourceContext.messageId;
+    baseMetadata.sourceFromEmail = sourceContext.fromEmail;
+    baseMetadata.sourceFromDomain = sourceContext.fromDomain;
+    baseMetadata.sourceSubject = sourceContext.subject.substring(0, 100);
+  }
 
   // Combine all text content for analysis
   const allContent = [
@@ -72,31 +94,31 @@ export function extractIOCs(
 
   // Extract URLs
   if (opts.extractUrls) {
-    const urls = extractUrlIOCs(allContent, baseConfidence, severity, now);
+    const urls = extractUrlIOCs(allContent, baseConfidence, severity, now, baseMetadata);
     indicators.push(...urls);
   }
 
   // Extract domains
   if (opts.extractDomains) {
-    const domains = extractDomainIOCs(emailData, allContent, baseConfidence, severity, now);
+    const domains = extractDomainIOCs(emailData, allContent, baseConfidence, severity, now, baseMetadata);
     indicators.push(...domains);
   }
 
   // Extract IPs
   if (opts.extractIPs) {
-    const ips = extractIPIOCs(allContent, baseConfidence, severity, now);
+    const ips = extractIPIOCs(allContent, baseConfidence, severity, now, baseMetadata);
     indicators.push(...ips);
   }
 
   // Extract hashes
   if (opts.extractHashes) {
-    const hashes = extractHashIOCs(allContent, baseConfidence, severity, now);
+    const hashes = extractHashIOCs(allContent, baseConfidence, severity, now, baseMetadata);
     indicators.push(...hashes);
   }
 
   // Extract suspicious email addresses
   if (opts.extractEmails) {
-    const emails = extractEmailIOCs(emailData, baseConfidence, severity, now);
+    const emails = extractEmailIOCs(emailData, baseConfidence, severity, now, baseMetadata);
     indicators.push(...emails);
   }
 
@@ -107,6 +129,7 @@ export function extractIOCs(
     total: indicators.length,
     filtered: filtered.length,
     isPhishing: analysis.isPhishing,
+    hasSourceContext: !!sourceContext,
   });
 
   return filtered;
@@ -119,7 +142,8 @@ function extractUrlIOCs(
   content: string,
   baseConfidence: number,
   severity: ThreatIndicatorRecord['severity'],
-  now: Date
+  now: Date,
+  baseMetadata: Record<string, unknown>
 ): ThreatIndicatorRecord[] {
   const urls = extractUrls(content);
   const indicators: ThreatIndicatorRecord[] = [];
@@ -146,6 +170,7 @@ function extractUrlIOCs(
       firstSeenAt: now,
       lastSeenAt: now,
       isActive: true,
+      metadata: { ...baseMetadata, extractionContext: 'url_in_content' },
     });
   }
 
@@ -160,15 +185,16 @@ function extractDomainIOCs(
   content: string,
   baseConfidence: number,
   severity: ThreatIndicatorRecord['severity'],
-  now: Date
+  now: Date,
+  baseMetadata: Record<string, unknown>
 ): ThreatIndicatorRecord[] {
-  const domains = new Set<string>();
+  const domainContexts = new Map<string, string>();
   const indicators: ThreatIndicatorRecord[] = [];
 
   // Extract from sender
   const senderDomain = extractDomain(emailData.from_email);
   if (senderDomain && !isSafeDomain(senderDomain)) {
-    domains.add(senderDomain);
+    domainContexts.set(senderDomain, 'sender_domain');
   }
 
   // Extract from URLs
@@ -178,7 +204,10 @@ function extractDomainIOCs(
       const urlObj = new URL(url);
       const domain = urlObj.hostname.toLowerCase();
       if (!isSafeDomain(domain)) {
-        domains.add(domain);
+        // Don't overwrite sender_domain context if already set
+        if (!domainContexts.has(domain)) {
+          domainContexts.set(domain, 'url_domain');
+        }
       }
     } catch {
       // Skip invalid URLs
@@ -186,7 +215,7 @@ function extractDomainIOCs(
   }
 
   // Create indicators
-  for (const domain of domains) {
+  for (const [domain, context] of domainContexts) {
     let confidence = baseConfidence;
 
     // Increase confidence for suspicious domains
@@ -204,6 +233,7 @@ function extractDomainIOCs(
       firstSeenAt: now,
       lastSeenAt: now,
       isActive: true,
+      metadata: { ...baseMetadata, extractionContext: context },
     });
   }
 
@@ -217,7 +247,8 @@ function extractIPIOCs(
   content: string,
   baseConfidence: number,
   severity: ThreatIndicatorRecord['severity'],
-  now: Date
+  now: Date,
+  baseMetadata: Record<string, unknown>
 ): ThreatIndicatorRecord[] {
   const matches = content.match(IP_REGEX) ?? [];
   const uniqueIPs = [...new Set(matches)];
@@ -237,6 +268,7 @@ function extractIPIOCs(
       firstSeenAt: now,
       lastSeenAt: now,
       isActive: true,
+      metadata: { ...baseMetadata, extractionContext: 'ip_in_content' },
     });
   }
 
@@ -250,7 +282,8 @@ function extractHashIOCs(
   content: string,
   baseConfidence: number,
   severity: ThreatIndicatorRecord['severity'],
-  now: Date
+  now: Date,
+  baseMetadata: Record<string, unknown>
 ): ThreatIndicatorRecord[] {
   const indicators: ThreatIndicatorRecord[] = [];
 
@@ -269,7 +302,7 @@ function extractHashIOCs(
         firstSeenAt: now,
         lastSeenAt: now,
         isActive: true,
-        metadata: { hashType },
+        metadata: { ...baseMetadata, extractionContext: 'hash_in_content', hashType },
       });
     }
   }
@@ -284,7 +317,8 @@ function extractEmailIOCs(
   emailData: ExtractedEmailData,
   baseConfidence: number,
   severity: ThreatIndicatorRecord['severity'],
-  now: Date
+  now: Date,
+  baseMetadata: Record<string, unknown>
 ): ThreatIndicatorRecord[] {
   const indicators: ThreatIndicatorRecord[] = [];
 
@@ -308,6 +342,7 @@ function extractEmailIOCs(
       firstSeenAt: now,
       lastSeenAt: now,
       isActive: true,
+      metadata: { ...baseMetadata, extractionContext: 'sender_email' },
     });
   }
 
