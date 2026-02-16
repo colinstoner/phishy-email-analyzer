@@ -72,8 +72,26 @@ export PHISHY_DB_CONNECTION=postgresql://user:pass@host:5432/phishy
 When intelligence is enabled, these tables are created on first run:
 
 - `email_analyses` - Every analyzed email with results
-- `threat_indicators` - Extracted IOCs (domains, IPs, URLs, hashes)
-- `detected_patterns` - Identified attack campaigns/patterns
+- `threat_indicators` - Extracted IOCs (domains, IPs, URLs, hashes) with provenance metadata
+- `campaigns` - Coordinated attack tracking (same sender pattern across multiple recipients)
+- `detected_patterns` - Identified attack patterns (reserved for future use)
+
+### IOC Provenance
+
+Each threat indicator includes metadata linking back to its source:
+
+```json
+{
+  "sourceAnalysisId": "uuid-of-analysis",
+  "sourceMessageId": "email-message-id",
+  "sourceFromEmail": "attacker@malicious.com",
+  "sourceFromDomain": "malicious.com",
+  "sourceSubject": "Urgent: Verify your account",
+  "extractionContext": "url_in_content"
+}
+```
+
+Extraction contexts: `sender_email`, `sender_domain`, `url_domain`, `url_in_content`, `ip_in_content`, `hash_in_content`
 
 ## API Endpoints
 
@@ -129,6 +147,34 @@ curl -X POST https://your-api/api/v1/webhooks \
   }
 }
 ```
+
+## Campaign Flood Detection
+
+When multiple phishing emails with similar patterns hit your organization, Phishy can alert your security team automatically.
+
+### Enabling Campaign Alerts
+
+```bash
+export PHISHY_CAMPAIGN_ALERTS_ENABLED=true
+export PHISHY_CAMPAIGN_ALERTS_DISTRIBUTION=security@yourcompany.com
+```
+
+### Alert Triggers
+
+An alert is sent when ALL of these conditions are met:
+
+- ≥3 detections with the same sender domain + subject pattern
+- ≥2 unique recipients targeted
+- Within a 4-hour window
+- Risk level is high or critical
+- No alert sent for this campaign in the last 24 hours
+
+### How It Works
+
+1. Subject lines are normalized (numbers stripped, prefixes removed) to group similar emails
+2. A campaign signature is generated from sender domain + normalized subject
+3. Each detection updates the campaign record
+4. When thresholds are met, an email alert is sent with campaign details
 
 ## Privacy & Compliance
 

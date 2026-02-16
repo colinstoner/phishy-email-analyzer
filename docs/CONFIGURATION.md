@@ -59,7 +59,8 @@ When the same setting is defined in multiple places, Phishy uses this priority (
 |----------|---------|-------------|
 | `SENDER_EMAIL` | - | From address for notification emails |
 | `SENDER_NAME` | `Phishy Security` | Display name for notifications |
-| `SECURITY_TEAM_DISTRIBUTION` | - | Comma-separated alert recipients |
+| `SECURITY_TEAM_DISTRIBUTION` | - | Comma-separated CC recipients for enterprise users |
+| `SAFE_SENDER_SECURITY` | - | Comma-separated CC recipients for safelist users (optional, separate from enterprise) |
 | `SES_CONFIG_SET` | - | Optional SES configuration set |
 
 ### Storage Settings
@@ -75,9 +76,11 @@ When the same setting is defined in multiple places, Phishy uses this priority (
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PHISHY_CONFIG_S3` | - | S3 path to config file |
-| `PHISHY_PROFILE` | - | S3 path to enterprise profile |
+| `PHISHY_PROFILE` | - | S3 path or JSON of enterprise profile |
 | `PHISHY_INTELLIGENCE_ENABLED` | `false` | Enable threat intelligence DB |
 | `PHISHY_DB_CONNECTION` | - | PostgreSQL connection string |
+| `PHISHY_CAMPAIGN_ALERTS_ENABLED` | `false` | Enable campaign flood detection alerts |
+| `PHISHY_CAMPAIGN_ALERTS_DISTRIBUTION` | - | Email to receive campaign alerts |
 
 ### Logging
 
