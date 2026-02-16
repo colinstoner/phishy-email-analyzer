@@ -48,6 +48,7 @@ export interface ExtractedEmailData {
   text: string;
   html: string;
   headers: Record<string, string>;
+  forwardedHeaders: Record<string, string>;
   attachments: EmailAttachment[];
   sender: string;
   to: string;

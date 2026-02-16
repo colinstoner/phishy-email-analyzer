@@ -441,6 +441,7 @@ export class EmailParserService {
       text: msg.text ?? '',
       html: msg.html ?? '',
       headers: msg.headers ?? {},
+      forwardedHeaders: {},
       attachments: msg.attachments ?? [],
       sender: msg.from_email ?? '',
       to: this.normalizeRecipients(msg.to),
@@ -451,6 +452,7 @@ export class EmailParserService {
 
     emailData.originalForwarder = this.findOriginalForwarder(msg, emailData.headers);
     emailData.links = this.extractLinks(emailData.html || emailData.text);
+    emailData.forwardedHeaders = this.extractForwardedHeaders(emailData.text);
 
     return emailData;
   }
@@ -563,5 +565,65 @@ export class EmailParserService {
     }
 
     return null;
+  }
+
+  /**
+   * Extract headers from forwarded email content
+   * Parses the embedded headers from "---------- Forwarded message ---------" sections
+   */
+  extractForwardedHeaders(emailText: string): Record<string, string> {
+    const forwardedHeaders: Record<string, string> = {};
+
+    if (!emailText) return forwardedHeaders;
+
+    // Look for forwarded message markers
+    const forwardedPatterns = [
+      /---------- Forwarded message ---------\s*\n([\s\S]*?)(?:\n\n|\r\n\r\n)/i,
+      /-------- Original Message --------\s*\n([\s\S]*?)(?:\n\n|\r\n\r\n)/i,
+      /Begin forwarded message:\s*\n([\s\S]*?)(?:\n\n|\r\n\r\n)/i,
+      /From:.*\nSent:.*\nTo:.*\nSubject:/i, // Outlook style
+    ];
+
+    let headerBlock = '';
+
+    for (const pattern of forwardedPatterns) {
+      const match = emailText.match(pattern);
+      if (match) {
+        headerBlock = match[1] || match[0];
+        break;
+      }
+    }
+
+    if (!headerBlock) {
+      // Try to extract inline headers at the start of forwarded content
+      const inlineMatch = emailText.match(/^From:\s*(.+?)(?:\r?\n|$)/im);
+      if (inlineMatch) {
+        headerBlock = emailText.substring(0, 500); // Take first 500 chars
+      }
+    }
+
+    if (!headerBlock) return forwardedHeaders;
+
+    // Parse header lines
+    const headerPatterns: Record<string, RegExp> = {
+      'Original-From': /From:\s*(.+?)(?:\r?\n|$)/i,
+      'Original-To': /To:\s*(.+?)(?:\r?\n|$)/i,
+      'Original-Date': /Date:\s*(.+?)(?:\r?\n|$)/i,
+      'Original-Subject': /Subject:\s*(.+?)(?:\r?\n|$)/i,
+      'Original-Reply-To': /Reply-To:\s*(.+?)(?:\r?\n|$)/i,
+      'Original-Sent': /Sent:\s*(.+?)(?:\r?\n|$)/i, // Outlook style
+    };
+
+    for (const [headerName, pattern] of Object.entries(headerPatterns)) {
+      const match = headerBlock.match(pattern);
+      if (match && match[1]) {
+        // Clean up the value - remove HTML entities and extra whitespace
+        let value = match[1].trim();
+        value = value.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+        forwardedHeaders[headerName] = value;
+      }
+    }
+
+    return forwardedHeaders;
   }
 }

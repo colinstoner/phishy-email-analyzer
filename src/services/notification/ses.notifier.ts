@@ -33,6 +33,12 @@ export class SESNotifier {
     this.senderName = config.senderName ?? 'Phishy';
     this.securityTeamDistribution = config.securityTeamDistribution ?? [];
     this.configSet = config.configSet;
+
+    logger.info('SES Notifier initialized', {
+      senderEmail: this.senderEmail,
+      securityTeamDistribution: this.securityTeamDistribution,
+      hasSecurityTeam: this.securityTeamDistribution.length > 0,
+    });
   }
 
   /**
@@ -47,6 +53,7 @@ export class SESNotifier {
       recipient,
       subject: emailData.subject,
       isPhishing: analysis.isPhishing,
+      ccSecurityTeam: this.securityTeamDistribution,
     });
 
     try {

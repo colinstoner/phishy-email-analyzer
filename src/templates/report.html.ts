@@ -23,6 +23,16 @@ const SECURITY_HEADERS = [
   'Authentication-Results',
 ];
 
+/** Headers extracted from forwarded message content */
+const FORWARDED_HEADERS = [
+  'Original-From',
+  'Original-To',
+  'Original-Date',
+  'Original-Subject',
+  'Original-Reply-To',
+  'Original-Sent',
+];
+
 /**
  * Build complete HTML email for analysis report
  */
@@ -354,6 +364,7 @@ function escapeHtml(text: string): string {
  * Build the original email section for HTML report
  */
 function buildOriginalEmailSection(emailData: ExtractedEmailData): string {
+  const forwardedHeadersHtml = formatForwardedHeadersForDisplay(emailData.forwardedHeaders);
   const headersHtml = formatHeadersForDisplay(emailData.headers);
   const linksHtml = formatLinksForDisplay(emailData.links);
   const attachmentsHtml = formatAttachmentsForDisplay(emailData.attachments);
@@ -365,9 +376,19 @@ function buildOriginalEmailSection(emailData: ExtractedEmailData): string {
       ? emailData.text.replace(/\n/g, '<br>')
       : '<em>No email content available</em>';
 
+  // Only show forwarded headers section if we found any
+  const forwardedHeadersSection = Object.keys(emailData.forwardedHeaders || {}).length > 0
+    ? `
+                <div class="email-section email-forwarded-headers" style="background-color: #fff3cd; border: 1px solid #ffc107;">
+                    <h3>Original Sender Info (from forwarded message)</h3>
+                    ${forwardedHeadersHtml}
+                </div>`
+    : '';
+
   return `
             <div class="original-email">
                 <h2>Original Email for IT Review</h2>
+                ${forwardedHeadersSection}
 
                 <div class="email-section email-content">
                     <h3>Original Email Content</h3>
@@ -377,7 +398,7 @@ function buildOriginalEmailSection(emailData: ExtractedEmailData): string {
                 </div>
 
                 <div class="email-section email-headers">
-                    <h3>Security-Relevant Headers</h3>
+                    <h3>Envelope Headers (forwarder)</h3>
                     ${headersHtml}
                 </div>
 
@@ -499,6 +520,27 @@ function getSecurityHeaders(headers: Record<string, string>): Array<[string, str
   }
 
   return result;
+}
+
+/**
+ * Format forwarded headers for HTML display
+ */
+function formatForwardedHeadersForDisplay(headers: Record<string, string>): string {
+  if (!headers || Object.keys(headers).length === 0) {
+    return '<p class="no-items">No forwarded headers found</p>';
+  }
+
+  let html = '<table>';
+  for (const headerName of FORWARDED_HEADERS) {
+    if (headers[headerName]) {
+      // Display without "Original-" prefix for cleaner look
+      const displayName = headerName.replace('Original-', '');
+      html += `<tr><td>${escapeHtml(displayName)}</td><td>${escapeHtml(headers[headerName])}</td></tr>`;
+    }
+  }
+  html += '</table>';
+
+  return html;
 }
 
 /**

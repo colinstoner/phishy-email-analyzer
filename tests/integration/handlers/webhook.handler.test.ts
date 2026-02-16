@@ -46,6 +46,7 @@ describe('Webhook Handler Integration', () => {
       'Message-ID': '<test-123@phishing-site.com>',
       From: 'attacker@phishing-site.com',
     },
+    forwardedHeaders: {},
     attachments: [],
     sender: 'attacker@phishing-site.com',
     to: 'victim@company.com',

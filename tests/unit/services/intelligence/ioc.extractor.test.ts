@@ -12,6 +12,7 @@ describe('extractIOCs', () => {
     text: 'Test email body',
     html: '<p>Test email body</p>',
     headers: {},
+    forwardedHeaders: {},
     attachments: [],
     sender: 'sender@example.com',
     to: 'recipient@test.org',
