@@ -37,12 +37,14 @@
     "@aws-sdk/client-bedrock-runtime": "^3.787.0",
     "@aws-sdk/client-rds-data": "^3.787.0",
     "@aws-sdk/client-s3": "^3.787.0",
+    "@aws-sdk/client-secrets-manager": "^3.990.0",
     "@aws-sdk/client-ses": "^3.787.0",
     "axios": "^1.7.0",
     "pg": "^8.13.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@eslint/js": "^9.17.0",
     "@smithy/util-stream": "^4.5.12",
     "@types/aws-lambda": "^8.10.145",
     "@types/jest": "^30.0.0",
@@ -57,8 +59,7 @@
     "prettier": "^3.4.0",
     "ts-jest": "^29.2.0",
     "typescript": "^5.7.0",
-    "typescript-eslint": "^8.18.0",
-    "@eslint/js": "^9.17.0"
+    "typescript-eslint": "^8.18.0"
   },
   "engines": {
     "node": ">=18.0.0"

@@ -78,9 +78,25 @@ When the same setting is defined in multiple places, Phishy uses this priority (
 | `PHISHY_CONFIG_S3` | - | S3 path to config file |
 | `PHISHY_PROFILE` | - | S3 path or JSON of enterprise profile |
 | `PHISHY_INTELLIGENCE_ENABLED` | `false` | Enable threat intelligence DB |
-| `PHISHY_DB_CONNECTION` | - | PostgreSQL connection string |
+| `PHISHY_DB_CONNECTION` | - | PostgreSQL connection string or Secrets Manager ARN |
 | `PHISHY_CAMPAIGN_ALERTS_ENABLED` | `false` | Enable campaign flood detection alerts |
 | `PHISHY_CAMPAIGN_ALERTS_DISTRIBUTION` | - | Email to receive campaign alerts |
+
+### AWS Secrets Manager Integration
+
+Instead of storing database credentials in environment variables, you can use AWS Secrets Manager:
+
+```bash
+# Use Secrets Manager ARN instead of raw connection string
+PHISHY_DB_CONNECTION=arn:aws:secretsmanager:us-west-2:123456789:secret:phishy/db-credentials
+
+# The secret can be stored as:
+# 1. Raw connection string: "postgresql://user:pass@host:5432/db"
+# 2. JSON with connectionString key: {"connectionString": "postgresql://..."}
+# 3. JSON with components: {"username": "...", "password": "...", "host": "...", "port": "5432", "database": "phishy"}
+```
+
+The Lambda execution role needs `secretsmanager:GetSecretValue` permission for the secret ARN.
 
 ### Logging
 

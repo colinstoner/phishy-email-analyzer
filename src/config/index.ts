@@ -4,6 +4,10 @@
  */
 
 import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
+import {
+  SecretsManagerClient,
+  GetSecretValueCommand,
+} from '@aws-sdk/client-secrets-manager';
 import { Readable } from 'stream';
 import {
   PhishyConfig,
@@ -13,6 +17,9 @@ import {
 import { createLogger } from '../utils/logger';
 
 const logger = createLogger('config');
+
+/** Cache for secrets to avoid repeated API calls */
+let cachedDbConnectionString: string | null = null;
 
 /**
  * Configuration priority (highest to lowest):
@@ -92,6 +99,9 @@ export async function loadConfig(): Promise<PhishyConfig> {
   // Apply environment variable overrides
   config = applyEnvironmentOverrides(config);
 
+  // Resolve secrets from AWS Secrets Manager if configured
+  config = await resolveSecrets(config);
+
   // Validate final configuration
   const validation = safeValidateConfig(config);
 
@@ -153,6 +163,87 @@ function getDefaultConfig(): PartialPhishyConfig {
     },
     logLevel: 'info',
   };
+}
+
+/**
+ * Resolve secrets from AWS Secrets Manager
+ * If intelligence.connectionString starts with 'arn:aws:secretsmanager:',
+ * fetch the actual value from Secrets Manager
+ */
+async function resolveSecrets(config: PartialPhishyConfig): Promise<PartialPhishyConfig> {
+  const connectionString = config.intelligence?.connectionString;
+
+  if (!connectionString?.startsWith('arn:aws:secretsmanager:')) {
+    return config;
+  }
+
+  // Use cached value if available
+  if (cachedDbConnectionString) {
+    return {
+      ...config,
+      intelligence: {
+        ...config.intelligence,
+        connectionString: cachedDbConnectionString,
+      },
+    };
+  }
+
+  try {
+    logger.info('Fetching database credentials from Secrets Manager');
+
+    const region = process.env.AWS_REGION ?? 'us-east-1';
+    const client = new SecretsManagerClient({ region });
+
+    const response = await client.send(
+      new GetSecretValueCommand({ SecretId: connectionString })
+    );
+
+    let resolvedConnectionString: string;
+
+    if (response.SecretString) {
+      // Try to parse as JSON (Secrets Manager often stores key-value pairs)
+      try {
+        const secret = JSON.parse(response.SecretString) as Record<string, string>;
+        // Support common formats: { connectionString: "..." } or { url: "..." } or { password: "..." }
+        if (secret.connectionString) {
+          resolvedConnectionString = secret.connectionString;
+        } else if (secret.url) {
+          resolvedConnectionString = secret.url;
+        } else if (secret.password && secret.username && secret.host) {
+          // Build connection string from components
+          const port = secret.port ?? '5432';
+          const database = secret.database ?? secret.dbname ?? 'phishy';
+          resolvedConnectionString = `postgresql://${secret.username}:${secret.password}@${secret.host}:${port}/${database}`;
+        } else {
+          // Use raw secret string
+          resolvedConnectionString = response.SecretString;
+        }
+      } catch {
+        // Not JSON, use raw string
+        resolvedConnectionString = response.SecretString;
+      }
+    } else {
+      throw new Error('Secret has no string value');
+    }
+
+    // Cache for subsequent calls
+    cachedDbConnectionString = resolvedConnectionString;
+
+    logger.info('Database credentials resolved from Secrets Manager');
+
+    return {
+      ...config,
+      intelligence: {
+        ...config.intelligence,
+        connectionString: resolvedConnectionString,
+      },
+    };
+  } catch (error) {
+    logger.error('Failed to fetch secret from Secrets Manager', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw new Error(`Failed to resolve database secret: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 /**
