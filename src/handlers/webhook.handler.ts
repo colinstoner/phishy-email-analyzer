@@ -63,15 +63,75 @@ export interface WebhookDeliveryResult {
   retries: number;
 }
 
+/**
+ * Private/internal IP ranges that should be blocked for SSRF protection
+ */
+const BLOCKED_IP_RANGES = [
+  /^10\./,                          // 10.0.0.0/8
+  /^172\.(1[6-9]|2[0-9]|3[0-1])\./,  // 172.16.0.0/12
+  /^192\.168\./,                     // 192.168.0.0/16
+  /^127\./,                          // 127.0.0.0/8 (loopback)
+  /^169\.254\./,                     // 169.254.0.0/16 (link-local, AWS metadata)
+  /^0\./,                            // 0.0.0.0/8
+];
+
+const BLOCKED_HOSTNAMES = [
+  'localhost',
+  'metadata.google.internal',
+  'metadata',
+];
+
 export class WebhookService {
   private webhooks: WebhookConfig[];
   private defaultRetries: number;
   private defaultTimeoutMs: number;
 
   constructor(webhooks: WebhookConfig[] = []) {
-    this.webhooks = webhooks.filter(w => w.enabled);
+    // Filter to enabled webhooks and validate URLs for SSRF
+    this.webhooks = webhooks
+      .filter(w => w.enabled)
+      .filter(w => this.isUrlSafe(w.url));
     this.defaultRetries = 3;
     this.defaultTimeoutMs = 10000;
+  }
+
+  /**
+   * Check if a webhook URL is safe (not targeting internal resources)
+   */
+  private isUrlSafe(url: string): boolean {
+    try {
+      const parsed = new URL(url);
+
+      // Only allow HTTPS for security (except in development)
+      if (parsed.protocol !== 'https:' && process.env.NODE_ENV !== 'development') {
+        logger.warn('Webhook URL rejected: HTTPS required', { url: this.sanitizeUrl(url) });
+        return false;
+      }
+
+      // Block internal hostnames
+      const hostname = parsed.hostname.toLowerCase();
+      if (BLOCKED_HOSTNAMES.includes(hostname)) {
+        logger.warn('Webhook URL rejected: blocked hostname', { hostname });
+        return false;
+      }
+
+      // Check if hostname is an IP address
+      const ipMatch = hostname.match(/^(\d{1,3}\.){3}\d{1,3}$/);
+      if (ipMatch) {
+        // Block private/internal IP ranges
+        for (const range of BLOCKED_IP_RANGES) {
+          if (range.test(hostname)) {
+            logger.warn('Webhook URL rejected: private IP range', { hostname });
+            return false;
+          }
+        }
+      }
+
+      return true;
+    } catch {
+      logger.warn('Webhook URL rejected: invalid URL', { url });
+      return false;
+    }
   }
 
   /**

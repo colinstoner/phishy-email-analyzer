@@ -177,11 +177,49 @@ Sensitivity: ${profile.analysisConfig.sensitivityLevel}
 Auto-escalate threshold: ${profile.analysisConfig.autoEscalateThreshold ?? 'Default'}`);
 
     if (profile.analysisConfig.additionalPromptContext) {
-      sections.push(`\nAdditional context: ${profile.analysisConfig.additionalPromptContext}`);
+      // Sanitize additional context to prevent prompt injection
+      // Limit length and remove potentially dangerous patterns
+      const sanitizedContext = sanitizePromptContext(profile.analysisConfig.additionalPromptContext);
+      if (sanitizedContext) {
+        sections.push(`\nAdditional context: ${sanitizedContext}`);
+      }
     }
   }
 
   return sections.join('\n');
+}
+
+/**
+ * Sanitize additional prompt context to prevent prompt injection
+ * Limits length and removes patterns that could manipulate AI behavior
+ */
+function sanitizePromptContext(context: string): string {
+  if (!context) return '';
+
+  // Limit to 500 characters
+  let sanitized = context.substring(0, 500);
+
+  // Remove patterns that could be used for prompt injection
+  // These patterns attempt to override system instructions
+  const dangerousPatterns = [
+    /ignore\s+(previous|above|all)\s+(instructions?|prompts?)/gi,
+    /disregard\s+(previous|above|all)/gi,
+    /forget\s+(previous|above|all)/gi,
+    /new\s+instructions?:/gi,
+    /system\s*:/gi,
+    /assistant\s*:/gi,
+    /human\s*:/gi,
+    /\[\s*INST\s*\]/gi,
+    /<\/?system>/gi,
+    /<\/?user>/gi,
+    /<\/?assistant>/gi,
+  ];
+
+  for (const pattern of dangerousPatterns) {
+    sanitized = sanitized.replace(pattern, '[FILTERED]');
+  }
+
+  return sanitized.trim();
 }
 
 /**

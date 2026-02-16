@@ -2,11 +2,17 @@
  * Validation utilities for Phishy Email Analyzer
  */
 
+/** Maximum input lengths to prevent ReDoS and memory issues */
+const MAX_EMAIL_LENGTH = 254; // RFC 5321
+const MAX_URL_LENGTH = 2048; // Common browser limit
+const MAX_CONTENT_LENGTH = 1_000_000; // 1MB for content parsing
+
 /**
  * Validate email address format
  */
 export function isValidEmail(email: string): boolean {
   if (!email || typeof email !== 'string') return false;
+  if (email.length > MAX_EMAIL_LENGTH) return false;
 
   // Basic email regex - covers most common cases
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -69,6 +75,7 @@ export function domainMatches(domain: string, pattern: string): boolean {
  */
 export function isValidUrl(url: string): boolean {
   if (!url || typeof url !== 'string') return false;
+  if (url.length > MAX_URL_LENGTH) return false;
 
   try {
     new URL(url);
@@ -84,14 +91,22 @@ export function isValidUrl(url: string): boolean {
 export function extractUrls(content: string): string[] {
   if (!content) return [];
 
+  // Limit content length to prevent ReDoS
+  const safeContent = content.length > MAX_CONTENT_LENGTH
+    ? content.substring(0, MAX_CONTENT_LENGTH)
+    : content;
+
   const urls: Set<string> = new Set();
 
   // Match URLs with http/https protocol
   const urlRegex = /https?:\/\/[^\s<>"'`)\]]+/gi;
-  const matches = content.match(urlRegex);
+  const matches = safeContent.match(urlRegex);
 
   if (matches) {
     for (const match of matches) {
+      // Skip overly long URLs
+      if (match.length > MAX_URL_LENGTH) continue;
+
       // Clean up trailing punctuation
       const cleaned = match.replace(/[.,;:!?)\]]+$/, '');
       if (isValidUrl(cleaned)) {
@@ -109,13 +124,18 @@ export function extractUrls(content: string): string[] {
 export function extractHrefUrls(html: string): string[] {
   if (!html) return [];
 
+  // Limit content length to prevent ReDoS
+  const safeHtml = html.length > MAX_CONTENT_LENGTH
+    ? html.substring(0, MAX_CONTENT_LENGTH)
+    : html;
+
   const urls: Set<string> = new Set();
   const hrefRegex = /<a\s+(?:[^>]*?\s+)?href=["']([^"']*)["'][^>]*>/gi;
   let match;
 
-  while ((match = hrefRegex.exec(html)) !== null) {
+  while ((match = hrefRegex.exec(safeHtml)) !== null) {
     const url = match[1];
-    if (url && isValidUrl(url)) {
+    if (url && url.length <= MAX_URL_LENGTH && isValidUrl(url)) {
       urls.add(url);
     }
   }

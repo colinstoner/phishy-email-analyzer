@@ -76,13 +76,16 @@ export async function handler(
 
     return createResponse(404, { error: 'Not found' });
   } catch (error) {
+    // Log detailed error server-side for debugging
     logger.error('API error', {
       error: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
     });
 
+    // Return generic error to client - don't expose internal details
     return createResponse(500, {
       error: 'Internal server error',
-      message: error instanceof Error ? error.message : String(error),
+      requestId: _context.awsRequestId,
     });
   }
 }

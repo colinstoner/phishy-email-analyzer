@@ -361,6 +361,28 @@ function escapeHtml(text: string): string {
 }
 
 /**
+ * Strip HTML tags and convert to plain text for safe display
+ * This prevents XSS from malicious email content
+ */
+function stripHtmlForDisplay(html: string): string {
+  if (!html) return '';
+  return html
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>/gi, '\n\n')
+    .replace(/<\/div>/gi, '\n')
+    .replace(/<\/li>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/**
  * Build the original email section for HTML report
  */
 function buildOriginalEmailSection(emailData: ExtractedEmailData): string {
@@ -369,11 +391,12 @@ function buildOriginalEmailSection(emailData: ExtractedEmailData): string {
   const linksHtml = formatLinksForDisplay(emailData.links);
   const attachmentsHtml = formatAttachmentsForDisplay(emailData.attachments);
 
-  // Format email content - use HTML if available, otherwise text with line breaks
-  const emailContent = emailData.html
-    ? emailData.html
-    : emailData.text
-      ? emailData.text.replace(/\n/g, '<br>')
+  // Format email content - sanitize HTML to prevent XSS from malicious emails
+  // Use text-only display since this is analyzing potentially malicious content
+  const emailContent = emailData.text
+    ? escapeHtml(emailData.text).replace(/\n/g, '<br>')
+    : emailData.html
+      ? escapeHtml(stripHtmlForDisplay(emailData.html)).replace(/\n/g, '<br>')
       : '<em>No email content available</em>';
 
   // Only show forwarded headers section if we found any
