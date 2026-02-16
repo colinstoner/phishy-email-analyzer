@@ -367,6 +367,35 @@ async function processEmailEvent(
       });
       logger.info('Stored analysis in intelligence database', { analysisId });
 
+      // Store AI usage for cost tracking
+      if (analysis.tokenUsage) {
+        try {
+          // Calculate estimated cost (Claude Sonnet 4.5 pricing: $3/1M input, $15/1M output)
+          const inputCost = (analysis.tokenUsage.inputTokens / 1_000_000) * 3;
+          const outputCost = (analysis.tokenUsage.outputTokens / 1_000_000) * 15;
+          const estimatedCostUsd = inputCost + outputCost;
+
+          await services.intelligenceDb.storeAIUsage({
+            analysisId,
+            provider: analysis.provider ?? 'bedrock',
+            model: analysis.model ?? 'unknown',
+            inputTokens: analysis.tokenUsage.inputTokens,
+            outputTokens: analysis.tokenUsage.outputTokens,
+            totalTokens: analysis.tokenUsage.totalTokens,
+            estimatedCostUsd,
+          });
+          logger.debug('Stored AI usage', {
+            analysisId,
+            totalTokens: analysis.tokenUsage.totalTokens,
+            estimatedCostUsd,
+          });
+        } catch (usageError) {
+          logger.warn('Failed to store AI usage', {
+            error: usageError instanceof Error ? usageError.message : String(usageError),
+          });
+        }
+      }
+
       // Extract and store IOCs if phishing detected
       if (analysis.isPhishing) {
         // Build source context for IOC provenance tracking

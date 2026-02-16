@@ -123,6 +123,45 @@ export interface IntelligenceStats {
   riskDistribution: Record<string, number>;
 }
 
+/**
+ * AI usage record for cost tracking
+ */
+export interface AIUsageRecord {
+  id?: string;
+  analysisId?: string;
+  provider: string;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  estimatedCostUsd?: number;
+  createdAt?: Date;
+}
+
+/**
+ * AI usage statistics
+ */
+export interface AIUsageStats {
+  totalRequests: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalTokens: number;
+  estimatedTotalCostUsd: number;
+  avgInputTokensPerRequest: number;
+  avgOutputTokensPerRequest: number;
+  avgCostPerRequest: number;
+  requestsLast24h: number;
+  requestsLast7d: number;
+  costLast24h: number;
+  costLast7d: number;
+  usageByModel: Array<{
+    model: string;
+    requests: number;
+    totalTokens: number;
+    estimatedCostUsd: number;
+  }>;
+}
+
 export class IntelligenceDatabaseService {
   private pool: Pool;
   private initialized: boolean = false;
@@ -254,6 +293,25 @@ export class IntelligenceDatabaseService {
         CREATE INDEX IF NOT EXISTS idx_campaigns_signature ON campaigns(campaign_signature);
         CREATE INDEX IF NOT EXISTS idx_campaigns_active ON campaigns(is_active) WHERE is_active = TRUE;
         CREATE INDEX IF NOT EXISTS idx_campaigns_last_seen ON campaigns(last_seen_at DESC);
+      `);
+
+      // Create ai_usage table for cost tracking
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS ai_usage (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          analysis_id UUID REFERENCES email_analyses(id) ON DELETE SET NULL,
+          provider VARCHAR(50) NOT NULL,
+          model VARCHAR(100) NOT NULL,
+          input_tokens INTEGER NOT NULL,
+          output_tokens INTEGER NOT NULL,
+          total_tokens INTEGER NOT NULL,
+          estimated_cost_usd DECIMAL(10,6),
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_ai_usage_created_at ON ai_usage(created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_ai_usage_model ON ai_usage(model);
+        CREATE INDEX IF NOT EXISTS idx_ai_usage_analysis_id ON ai_usage(analysis_id);
       `);
 
       await client.query('COMMIT');
@@ -745,6 +803,98 @@ export class IntelligenceDatabaseService {
       .replace(/\s+/g, ' ')           // Normalize whitespace
       .trim()
       .substring(0, 100);             // Limit length
+  }
+
+  /**
+   * Store AI usage record for cost tracking
+   */
+  async storeAIUsage(record: AIUsageRecord): Promise<string> {
+    await this.initialize();
+
+    const result = await this.pool.query(
+      `INSERT INTO ai_usage
+       (analysis_id, provider, model, input_tokens, output_tokens, total_tokens, estimated_cost_usd)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id`,
+      [
+        record.analysisId ?? null,
+        record.provider,
+        record.model,
+        record.inputTokens,
+        record.outputTokens,
+        record.totalTokens,
+        record.estimatedCostUsd ?? null,
+      ]
+    );
+
+    const id = result.rows[0].id as string;
+    logger.debug('Stored AI usage record', {
+      id,
+      model: record.model,
+      totalTokens: record.totalTokens,
+    });
+
+    return id;
+  }
+
+  /**
+   * Get AI usage statistics
+   */
+  async getAIUsageStats(): Promise<AIUsageStats> {
+    await this.initialize();
+
+    // Get aggregate stats
+    const statsResult = await this.pool.query(`
+      SELECT
+        COUNT(*) as total_requests,
+        COALESCE(SUM(input_tokens), 0) as total_input_tokens,
+        COALESCE(SUM(output_tokens), 0) as total_output_tokens,
+        COALESCE(SUM(total_tokens), 0) as total_tokens,
+        COALESCE(SUM(estimated_cost_usd), 0) as total_cost,
+        COALESCE(AVG(input_tokens), 0) as avg_input_tokens,
+        COALESCE(AVG(output_tokens), 0) as avg_output_tokens,
+        COALESCE(AVG(estimated_cost_usd), 0) as avg_cost,
+        (SELECT COUNT(*) FROM ai_usage WHERE created_at > NOW() - INTERVAL '24 hours') as requests_24h,
+        (SELECT COUNT(*) FROM ai_usage WHERE created_at > NOW() - INTERVAL '7 days') as requests_7d,
+        (SELECT COALESCE(SUM(estimated_cost_usd), 0) FROM ai_usage WHERE created_at > NOW() - INTERVAL '24 hours') as cost_24h,
+        (SELECT COALESCE(SUM(estimated_cost_usd), 0) FROM ai_usage WHERE created_at > NOW() - INTERVAL '7 days') as cost_7d
+      FROM ai_usage
+    `);
+
+    const row = statsResult.rows[0];
+
+    // Get usage by model
+    const modelResult = await this.pool.query(`
+      SELECT
+        model,
+        COUNT(*) as requests,
+        SUM(total_tokens) as total_tokens,
+        COALESCE(SUM(estimated_cost_usd), 0) as estimated_cost
+      FROM ai_usage
+      GROUP BY model
+      ORDER BY total_tokens DESC
+    `);
+
+    return {
+      totalRequests: parseInt(row.total_requests, 10),
+      totalInputTokens: parseInt(row.total_input_tokens, 10),
+      totalOutputTokens: parseInt(row.total_output_tokens, 10),
+      totalTokens: parseInt(row.total_tokens, 10),
+      estimatedTotalCostUsd: parseFloat(row.total_cost),
+      avgInputTokensPerRequest: parseFloat(row.avg_input_tokens),
+      avgOutputTokensPerRequest: parseFloat(row.avg_output_tokens),
+      avgCostPerRequest: parseFloat(row.avg_cost),
+      requestsLast24h: parseInt(row.requests_24h, 10),
+      requestsLast7d: parseInt(row.requests_7d, 10),
+      costLast24h: parseFloat(row.cost_24h),
+      costLast7d: parseFloat(row.cost_7d),
+      usageByModel: modelResult.rows.map(r => ({
+        model: r.model as string,
+        requests: parseInt(r.requests, 10),
+        totalTokens: parseInt(r.total_tokens, 10),
+        estimatedCostUsd: parseFloat(r.estimated_cost),
+      })),
+    };
   }
 
   /**

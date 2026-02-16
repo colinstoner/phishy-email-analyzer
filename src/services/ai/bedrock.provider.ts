@@ -92,10 +92,15 @@ export class BedrockProvider implements AIProvider {
     const essentialHeaders = this.essentialHeadersExtractor(emailData.headers);
     const prompt = buildPhishingAnalysisPrompt(emailData, essentialHeaders, this.profile);
 
-    const responseText = await this.sendPrompt(prompt, options);
+    const { text: responseText, usage } = await this.sendPromptWithUsage(prompt, options);
     const processingTimeMs = Date.now() - startTime;
 
     const result = parseAnalysisResponse(responseText, this.name, this.model, processingTimeMs);
+
+    // Add token usage to result for cost tracking
+    if (usage) {
+      result.tokenUsage = usage;
+    }
 
     logger.info('Email analysis completed', {
       isPhishing: result.isPhishing,
@@ -110,6 +115,17 @@ export class BedrockProvider implements AIProvider {
    * Send a raw prompt to Bedrock
    */
   async sendPrompt(prompt: string, options?: AnalysisOptions): Promise<string> {
+    const result = await this.sendPromptWithUsage(prompt, options);
+    return result.text;
+  }
+
+  /**
+   * Send a raw prompt to Bedrock and return both text and usage data
+   */
+  private async sendPromptWithUsage(
+    prompt: string,
+    options?: AnalysisOptions
+  ): Promise<{ text: string; usage?: { inputTokens: number; outputTokens: number; totalTokens: number } }> {
     const maxTokens = options?.maxTokens ?? this.maxTokens;
     // Note: timeout is handled by SDK defaults, not directly configurable per-request
     // Future enhancement: add AbortController support for per-request timeout
@@ -156,13 +172,27 @@ export class BedrockProvider implements AIProvider {
         }
 
         const rawResponse = new TextDecoder().decode(response.body);
-        const responseBody = parseBedrockResponse(rawResponse);
+        const parsedResponse = parseBedrockResponse(rawResponse);
+
+        // Log token usage for cost tracking
+        let usage: { inputTokens: number; outputTokens: number; totalTokens: number } | undefined;
+        if (parsedResponse.usage) {
+          usage = {
+            inputTokens: parsedResponse.usage.input_tokens,
+            outputTokens: parsedResponse.usage.output_tokens,
+            totalTokens: parsedResponse.usage.input_tokens + parsedResponse.usage.output_tokens,
+          };
+          logger.info('Bedrock token usage', {
+            ...usage,
+            model: this.model,
+          });
+        }
 
         logger.debug('Received response from Bedrock', {
-          responseLength: responseBody.length,
+          responseLength: parsedResponse.text.length,
         });
 
-        return responseBody;
+        return { text: parsedResponse.text, usage };
       },
       {
         maxRetries: 3,
@@ -260,10 +290,21 @@ interface BedrockResponse {
 }
 
 /**
- * Parse Bedrock response with robust error handling
- * Extracts text content from various response formats
+ * Parsed response with text and usage data
  */
-function parseBedrockResponse(rawResponse: string): string {
+interface ParsedBedrockResponse {
+  text: string;
+  usage?: {
+    input_tokens: number;
+    output_tokens: number;
+  };
+}
+
+/**
+ * Parse Bedrock response with robust error handling
+ * Extracts text content and usage data from various response formats
+ */
+function parseBedrockResponse(rawResponse: string): ParsedBedrockResponse {
   let parsed: BedrockResponse;
 
   try {
@@ -305,7 +346,10 @@ function parseBedrockResponse(rawResponse: string): string {
     }
 
     if (textParts.length > 0) {
-      return textParts.join('\n');
+      return {
+        text: textParts.join('\n'),
+        usage: parsed.usage,
+      };
     }
 
     // Content array exists but no text blocks found

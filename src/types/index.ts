@@ -58,6 +58,15 @@ export interface ExtractedEmailData {
 }
 
 /**
+ * Token usage for cost tracking
+ */
+export interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+}
+
+/**
  * AI analysis result structure
  */
 export interface AnalysisResult {
@@ -70,6 +79,7 @@ export interface AnalysisResult {
   processingTimeMs?: number;
   provider?: string;
   model?: string;
+  tokenUsage?: TokenUsage;
 }
 
 /**

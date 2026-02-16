@@ -70,6 +70,10 @@ export async function handler(
       return handleStatsRoute();
     }
 
+    if (path.startsWith('/api/v1/usage')) {
+      return handleUsageRoute();
+    }
+
     if (path.startsWith('/api/v1/health')) {
       return handleHealthRoute();
     }
@@ -263,6 +267,15 @@ async function handlePatternsRoute(
 async function handleStatsRoute(): Promise<APIGatewayProxyResult> {
   const db = await initializeDb();
   const stats = await db.getStats();
+  return createResponse(200, stats);
+}
+
+/**
+ * Handle /api/v1/usage routes - AI usage and cost tracking
+ */
+async function handleUsageRoute(): Promise<APIGatewayProxyResult> {
+  const db = await initializeDb();
+  const stats = await db.getAIUsageStats();
   return createResponse(200, stats);
 }
 
