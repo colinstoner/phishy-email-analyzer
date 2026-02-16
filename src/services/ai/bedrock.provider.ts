@@ -33,8 +33,8 @@ export const BEDROCK_CLAUDE_MODELS = {
   CLAUDE_SONNET_4_5: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
   CLAUDE_HAIKU_4_5: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
   // Claude 4 models
-  CLAUDE_OPUS_4: 'anthropic.claude-opus-4-20250514-v1:0',
-  CLAUDE_SONNET_4: 'anthropic.claude-sonnet-4-20250514-v1:0',
+  CLAUDE_SONNET_4: 'us.anthropic.claude-sonnet-4-20250514-v1:0',
+  CLAUDE_OPUS_4: 'us.anthropic.claude-opus-4-20250514-v1:0',
   // Legacy models (for backwards compatibility)
   CLAUDE_3_5_SONNET: 'anthropic.claude-3-5-sonnet-20241022-v2:0',
   CLAUDE_3_SONNET: 'anthropic.claude-3-sonnet-20240229-v1:0',
@@ -123,11 +123,17 @@ export class BedrockProvider implements AIProvider {
       maxTokens,
     });
 
+    // Log full prompt for debugging refusals
+    logger.info('Full prompt being sent', {
+      prompt: prompt,
+    });
+
     return withRetry(
       async () => {
         const requestBody = {
           anthropic_version: 'bedrock-2023-05-31',
           max_tokens: maxTokens,
+          system: 'You are a security analyst helping to identify phishing emails. Always provide your analysis in the requested JSON format.',
           messages: [
             {
               role: 'user',
@@ -149,31 +155,34 @@ export class BedrockProvider implements AIProvider {
           throw new Error('Empty response from Bedrock');
         }
 
-        const responseBody = JSON.parse(new TextDecoder().decode(response.body)) as {
-          content?: Array<{ text?: string }>;
-        };
-
-        const content = responseBody.content?.[0]?.text;
-        if (!content) {
-          throw new Error('Unexpected response format from Bedrock');
-        }
+        const rawResponse = new TextDecoder().decode(response.body);
+        const responseBody = parseBedrockResponse(rawResponse);
 
         logger.debug('Received response from Bedrock', {
-          responseLength: content.length,
+          responseLength: responseBody.length,
         });
 
-        return content;
+        return responseBody;
       },
       {
         maxRetries: 3,
         baseDelayMs: 1000,
         shouldRetry: error => {
+          const message = error.message || '';
           // Don't retry access denied errors
-          if (error.message.includes('AccessDeniedException')) {
+          if (message.includes('AccessDeniedException')) {
             return false;
           }
           // Don't retry model not found errors
-          if (error.message.includes('ResourceNotFoundException')) {
+          if (message.includes('ResourceNotFoundException')) {
+            return false;
+          }
+          // Don't retry Bedrock API errors (these are consistent failures)
+          if (message.includes('Bedrock error:')) {
+            return false;
+          }
+          // Don't retry invalid JSON (malformed response)
+          if (message.includes('Invalid JSON response')) {
             return false;
           }
           return isRetryableHttpError(error);
@@ -224,4 +233,96 @@ export class BedrockProvider implements AIProvider {
   setProfile(profile?: EnterpriseProfile): void {
     this.profile = profile;
   }
+}
+
+/**
+ * Bedrock response structure
+ */
+interface BedrockResponse {
+  id?: string;
+  type?: string;
+  role?: string;
+  content?: Array<{
+    type: string;
+    text?: string;
+  }>;
+  model?: string;
+  stop_reason?: string;
+  stop_sequence?: string | null;
+  usage?: {
+    input_tokens: number;
+    output_tokens: number;
+  };
+  error?: {
+    type?: string;
+    message?: string;
+  };
+}
+
+/**
+ * Parse Bedrock response with robust error handling
+ * Extracts text content from various response formats
+ */
+function parseBedrockResponse(rawResponse: string): string {
+  let parsed: BedrockResponse;
+
+  try {
+    parsed = JSON.parse(rawResponse) as BedrockResponse;
+  } catch (parseError) {
+    logger.error('Failed to parse Bedrock response as JSON', {
+      rawResponse: rawResponse.substring(0, 500),
+      error: parseError instanceof Error ? parseError.message : String(parseError),
+    });
+    throw new Error('Invalid JSON response from Bedrock');
+  }
+
+  // Check for error response
+  if (parsed.error) {
+    logger.error('Bedrock returned an error', {
+      errorType: parsed.error.type,
+      errorMessage: parsed.error.message,
+    });
+    throw new Error(`Bedrock error: ${parsed.error.message ?? 'Unknown error'}`);
+  }
+
+  // Check for refusal - Claude declined to respond
+  if (parsed.stop_reason === 'refusal') {
+    logger.error('Claude refused to analyze - logging full response for debugging', {
+      stopReason: parsed.stop_reason,
+      fullResponse: JSON.stringify(parsed),
+    });
+    throw new Error('Claude refused to respond - check logs for full prompt');
+  }
+
+  // Extract text from content array
+  if (parsed.content && Array.isArray(parsed.content)) {
+    const textParts: string[] = [];
+
+    for (const block of parsed.content) {
+      if (block.type === 'text' && block.text) {
+        textParts.push(block.text);
+      }
+    }
+
+    if (textParts.length > 0) {
+      return textParts.join('\n');
+    }
+
+    // Content array exists but no text blocks found
+    logger.warn('Bedrock response has content but no text blocks', {
+      contentTypes: parsed.content.map(b => b.type),
+      stopReason: parsed.stop_reason,
+    });
+  }
+
+  // Log detailed info for debugging
+  logger.error('Could not extract text from Bedrock response', {
+    rawResponse: rawResponse.substring(0, 1000),
+    hasContent: !!parsed.content,
+    contentLength: parsed.content?.length,
+    stopReason: parsed.stop_reason,
+    responseType: parsed.type,
+  });
+
+  throw new Error('No text content in Bedrock response');
 }

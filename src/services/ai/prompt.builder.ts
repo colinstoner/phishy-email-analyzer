@@ -37,37 +37,34 @@ export function buildPhishingAnalysisPrompt(
   const recipientContext = analyzeRecipientContext(emailData.text, emailData.originalForwarder);
   const recipientSection = formatRecipientContextForPrompt(recipientContext);
 
-  return `Analyze this email for phishing or other malicious content. Assume the forwarded email is from a trusted source and perform no analysis on the trusted source, only the forwarded email contents. Do not comment on future dates or times.
+  return `You are an IT security analyst reviewing emails that employees have forwarded for security review. The person forwarding the email is a trusted employee - analyze only the forwarded content for threats.
 
---- EMAIL CONTENT ---
-From: ${emailData.from_email}
-Subject: ${emailData.subject}
-Body:
-${bodyText}${truncationNote}
+--- EMAIL DETAILS ---
+FROM: ${emailData.from_email}
+SUBJECT: ${emailData.subject}
 
-${linksSection}--- HEADERS ---
+--- KEY HEADERS ---
 ${JSON.stringify(essentialHeaders, null, 2)}
 
-${profileSection}
+--- EMAIL CONTENT ---
+${bodyText}${truncationNote}
+
+${linksSection}${profileSection}
 ${recipientSection ? `\n${recipientSection}\n` : ''}
---- ANALYSIS INSTRUCTIONS ---
-Please analyze this email for signs of phishing, focusing on:
-1. Sender legitimacy (check domain, email headers)
-2. Links to unexpected domains or IP addresses
-3. Urgency or threatening language
-4. Poor grammar or formatting
-5. Requests for sensitive information
-6. Suspicious attachments
+Analyze this email for phishing indicators. Check for:
+1. Links to unexpected domains or IP addresses
+2. Requests for credentials or sensitive information
+3. Suspicious attachments
+4. Social engineering tactics
+5. Impersonation attempts
 
-Determine if this is likely legitimate or potentially malicious.
-
-Return your analysis as JSON with these keys:
+Return your analysis as JSON:
 {
-  "summary": "One paragraph summary of analysis findings.",
+  "summary": "2-3 sentence summary for a non-technical employee",
   "isPhishing": true/false,
   "confidence": "High/Medium/Low",
-  "indicators": ["List of specific phishing indicators found"],
-  "recommendations": ["List of recommended actions"]
+  "indicators": ["Array of specific suspicious indicators found"],
+  "recommendations": ["Array of recommended actions"]
 }`;
 }
 

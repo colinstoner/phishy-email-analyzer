@@ -40,8 +40,8 @@ describe('buildPhishingAnalysisPrompt', () => {
 
     const prompt = buildPhishingAnalysisPrompt(emailData, createMockHeaders());
 
-    expect(prompt).toContain('From: phisher@fake.com');
-    expect(prompt).toContain('Subject: Urgent Action Required');
+    expect(prompt).toContain('FROM: phisher@fake.com');
+    expect(prompt).toContain('SUBJECT: Urgent Action Required');
     expect(prompt).toContain('Please click this link immediately');
   });
 
@@ -73,7 +73,7 @@ describe('buildPhishingAnalysisPrompt', () => {
 
     const prompt = buildPhishingAnalysisPrompt(createMockEmailData(), headers);
 
-    expect(prompt).toContain('--- HEADERS ---');
+    expect(prompt).toContain('--- KEY HEADERS ---');
     expect(prompt).toContain('From');
     expect(prompt).toContain('X-Originating-IP');
   });
@@ -81,10 +81,9 @@ describe('buildPhishingAnalysisPrompt', () => {
   it('should include analysis instructions', () => {
     const prompt = buildPhishingAnalysisPrompt(createMockEmailData(), createMockHeaders());
 
-    expect(prompt).toContain('--- ANALYSIS INSTRUCTIONS ---');
-    expect(prompt).toContain('Sender legitimacy');
+    expect(prompt).toContain('Analyze this email for phishing indicators');
     expect(prompt).toContain('Links to unexpected domains');
-    expect(prompt).toContain('Urgency or threatening language');
+    expect(prompt).toContain('Social engineering tactics');
     expect(prompt).toContain('Return your analysis as JSON');
   });
 

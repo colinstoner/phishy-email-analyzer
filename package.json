@@ -17,7 +17,7 @@
     "format": "prettier --write \"src/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\"",
     "typecheck": "tsc --noEmit",
-    "deploy": "npm run build && zip -r function.zip dist node_modules package.json index.js && aws lambda update-function-code --function-name phishy --zip-file fileb://function.zip",
+    "deploy": "npm run build && zip -r function.zip dist node_modules package.json index.js && aws lambda update-function-code --function-name phishyAWS --zip-file fileb://function.zip",
     "deploy:legacy": "zip -r function.zip index.js node_modules package.json && aws lambda update-function-code --function-name phishy --zip-file fileb://function.zip"
   },
   "keywords": [

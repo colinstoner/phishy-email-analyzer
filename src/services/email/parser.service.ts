@@ -302,27 +302,20 @@ export class EmailParserService {
     try {
       // Look for text/plain part
       const textPartMatch = mimeContent.match(
-        /Content-Type: text\/plain[\s\S]*?(?=Content-Type|$)/i
+        /Content-Type: text\/plain[\s\S]*?(?=Content-Type:|--)/i
       );
       if (textPartMatch) {
-        const partContent = textPartMatch[0];
-        const bodyStartIdx = partContent.indexOf('\r\n\r\n');
-        if (bodyStartIdx !== -1) {
-          return partContent.substring(bodyStartIdx + 4).trim();
-        }
+        const text = this.extractMIMEPartContent(textPartMatch[0]);
+        if (text) return text;
       }
 
       // Fall back to HTML part
       const htmlPartMatch = mimeContent.match(
-        /Content-Type: text\/html[\s\S]*?(?=Content-Type|$)/i
+        /Content-Type: text\/html[\s\S]*?(?=Content-Type:|--)/i
       );
       if (htmlPartMatch) {
-        const partContent = htmlPartMatch[0];
-        const bodyStartIdx = partContent.indexOf('\r\n\r\n');
-        if (bodyStartIdx !== -1) {
-          const htmlContent = partContent.substring(bodyStartIdx + 4).trim();
-          return stripHtml(htmlContent);
-        }
+        const html = this.extractMIMEPartContent(htmlPartMatch[0]);
+        if (html) return stripHtml(html);
       }
 
       return '';
@@ -332,6 +325,46 @@ export class EmailParserService {
       });
       return '';
     }
+  }
+
+  /**
+   * Extract and decode content from a MIME part
+   */
+  private extractMIMEPartContent(partContent: string): string {
+    const bodyStartIdx = partContent.indexOf('\r\n\r\n');
+    if (bodyStartIdx === -1) return '';
+
+    const headers = partContent.substring(0, bodyStartIdx).toLowerCase();
+    let body = partContent.substring(bodyStartIdx + 4).trim();
+
+    // Check for base64 encoding
+    if (headers.includes('content-transfer-encoding: base64')) {
+      try {
+        // Remove line breaks and decode
+        const cleaned = body.replace(/[\r\n\s]/g, '');
+        body = Buffer.from(cleaned, 'base64').toString('utf-8');
+      } catch (e) {
+        logger.warn('Failed to decode base64 content', {
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
+    }
+
+    // Check for quoted-printable encoding
+    if (headers.includes('content-transfer-encoding: quoted-printable')) {
+      body = this.decodeQuotedPrintable(body);
+    }
+
+    return body;
+  }
+
+  /**
+   * Decode quoted-printable encoded content
+   */
+  private decodeQuotedPrintable(text: string): string {
+    return text
+      .replace(/=\r?\n/g, '') // Remove soft line breaks
+      .replace(/=([0-9A-Fa-f]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
   }
 
   /**
