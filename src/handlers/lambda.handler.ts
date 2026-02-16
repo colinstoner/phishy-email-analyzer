@@ -417,10 +417,16 @@ async function processEmailEvent(
 
   // Send analysis if we have a valid recipient
   if (isValidEmailRecipient(recipient)) {
+    // Use different CC list for safelist users vs enterprise users
+    const ccOverride = isSafelistUser
+      ? config.notification.safeSenderSecurity
+      : undefined; // undefined uses default securityTeamDistribution
+
     const emailResult = await services.sesNotifier.sendAnalysisReport(
       recipient,
       analysis,
-      emailData
+      emailData,
+      ccOverride
     );
 
     // Delete from S3 if configured

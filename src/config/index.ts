@@ -41,6 +41,7 @@ const ENV_MAPPINGS: Record<string, string> = {
   // Notification
   SENDER_EMAIL: 'notification.senderEmail',
   SECURITY_TEAM_DISTRIBUTION: 'notification.securityTeamDistribution',
+  SAFE_SENDER_SECURITY: 'notification.safeSenderSecurity',
   SES_CONFIG_SET: 'notification.sesConfigSet',
 
   // Storage
@@ -139,6 +140,7 @@ function getDefaultConfig(): PartialPhishyConfig {
       senderEmail: 'noreply@example.com',
       senderName: 'Phishy',
       securityTeamDistribution: [],
+      safeSenderSecurity: [],
     },
     storage: {
       s3Bucket: 'phishy-emails',

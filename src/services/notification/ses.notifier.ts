@@ -47,13 +47,16 @@ export class SESNotifier {
   async sendAnalysisReport(
     recipient: string,
     analysis: AnalysisResult,
-    emailData: ExtractedEmailData
+    emailData: ExtractedEmailData,
+    ccOverride?: string[]
   ): Promise<EmailSendResult> {
+    const ccAddresses = ccOverride ?? this.securityTeamDistribution;
+
     logger.info('Sending analysis report', {
       recipient,
       subject: emailData.subject,
       isPhishing: analysis.isPhishing,
-      ccSecurityTeam: this.securityTeamDistribution,
+      ccSecurityTeam: ccAddresses,
     });
 
     try {
@@ -66,7 +69,7 @@ export class SESNotifier {
         subject,
         htmlContent,
         textContent,
-        this.securityTeamDistribution
+        ccAddresses
       );
 
       logger.info('Analysis report sent successfully', {

@@ -45,6 +45,7 @@ const NotificationConfigSchema = z.object({
   senderEmail: z.string().email('Valid sender email required'),
   senderName: z.string().default('Phishy'),
   securityTeamDistribution: z.array(z.string().email()).default([]),
+  safeSenderSecurity: z.array(z.string().email()).default([]),
   sesConfigSet: z.string().optional(),
 });
 
