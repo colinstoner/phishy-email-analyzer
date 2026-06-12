@@ -40,6 +40,18 @@ Parameters:
     AllowedValues: ['true', 'false']
     Default: 'false'
     Description: Delete raw emails from S3 once processed.
+  SafeSenders:
+    Type: String
+    Default: ''
+    Description: Optional. Comma-separated individual addresses allowed to submit emails for analysis, in addition to SafeDomains.
+  SafeSenderSecurity:
+    Type: String
+    Default: ''
+    Description: Optional. Address(es) treated as the security team for the email command channel.
+  ProfileS3Uri:
+    Type: String
+    Default: ''
+    Description: Optional. s3:// URI of an enterprise profile JSON. Store it under profiles/ in this stack's email bucket so the function's IAM role can read it.
   IntelligenceDbSecretArn:
     Type: String
     Default: ''
@@ -88,12 +100,15 @@ Conditions:
   HasDatabaseSg: !And
     - !Condition UseIntelligence
     - !Not [!Equals [!Ref DatabaseSecurityGroupId, '']]
+  HasSafeSenders: !Not [!Equals [!Ref SafeSenders, '']]
+  HasSafeSenderSecurity: !Not [!Equals [!Ref SafeSenderSecurity, '']]
+  HasProfile: !Not [!Equals [!Ref ProfileS3Uri, '']]
 
 Resources:
   EmailBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Sub 'phishy-emails-${AWS::AccountId}-${AWS::Region}'
+      BucketName: !Sub '${AWS::StackName}-emails-${AWS::AccountId}-${AWS::Region}'
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
@@ -138,6 +153,8 @@ Resources:
           - src/index.ts
         External:
           - '@aws-sdk/*'
+        Loader:
+          - .pem=text
     Properties:
       Handler: index.handler
       Runtime: nodejs22.x
@@ -155,6 +172,9 @@ Resources:
           SAFE_DOMAINS: !Ref SafeDomains
           PHISHY_AWS_REGION: !Ref AWS::Region
           DELETE_EMAILS_AFTER_PROCESSING: !Ref DeleteEmailsAfterProcessing
+          SAFE_SENDERS: !If [HasSafeSenders, !Ref SafeSenders, !Ref AWS::NoValue]
+          SAFE_SENDER_SECURITY: !If [HasSafeSenderSecurity, !Ref SafeSenderSecurity, !Ref AWS::NoValue]
+          PHISHY_PROFILE: !If [HasProfile, !Ref ProfileS3Uri, !Ref AWS::NoValue]
           PHISHY_INTELLIGENCE_ENABLED: !If [UseIntelligence, 'true', !Ref AWS::NoValue]
           PHISHY_DB_CONNECTION: !If [UseIntelligence, !Ref IntelligenceDbSecretArn, !Ref AWS::NoValue]
       VpcConfig: !If
@@ -177,6 +197,11 @@ Resources:
                 - s3:GetObject
                 - s3:DeleteObject
               Resource: !Sub '${EmailBucket.Arn}/emails/*'
+            - Sid: ReadProfile
+              Effect: Allow
+              Action:
+                - s3:GetObject
+              Resource: !Sub '${EmailBucket.Arn}/profiles/*'
         - !If
           - UseBedrock
           - Statement:
@@ -187,10 +212,6 @@ Resources:
                 Resource:
                   - !Sub 'arn:aws:bedrock:*::foundation-model/anthropic.claude-*'
                   - !Sub 'arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*'
-          - !Ref AWS::NoValue
-        - !If
-          - UseIntelligence
-          - AWSLambdaVPCAccessExecutionRole
           - !Ref AWS::NoValue
         - !If
           - UseIntelligence
@@ -286,7 +307,7 @@ Resources:
   ReceiptRuleSet:
     Type: AWS::SES::ReceiptRuleSet
     Properties:
-      RuleSetName: phishy-rules
+      RuleSetName: !Sub '${AWS::StackName}-rules'
 
   # S3 action MUST come before the Lambda action: SES stores the full raw
   # email first, then the Lambda fetches it from S3 (the SES event itself
