@@ -10,7 +10,9 @@ import { ExtractedEmailData } from '../../../../src/types';
 import { EnterpriseProfile } from '../../../../src/models/profile.model';
 
 describe('buildPhishingAnalysisPrompt', () => {
-  const createMockEmailData = (overrides: Partial<ExtractedEmailData> = {}): ExtractedEmailData => ({
+  const createMockEmailData = (
+    overrides: Partial<ExtractedEmailData> = {}
+  ): ExtractedEmailData => ({
     from_email: 'sender@example.com',
     subject: 'Test Subject',
     text: 'Test email body content',
@@ -27,7 +29,7 @@ describe('buildPhishingAnalysisPrompt', () => {
   });
 
   const createMockHeaders = (): Record<string, string> => ({
-    'From': 'Sender <sender@example.com>',
+    From: 'Sender <sender@example.com>',
     'Message-ID': '<test-123@example.com>',
     'Return-Path': '<sender@example.com>',
   });
@@ -68,7 +70,7 @@ describe('buildPhishingAnalysisPrompt', () => {
 
   it('should include headers in prompt', () => {
     const headers = {
-      'From': 'Test Sender <test@sender.com>',
+      From: 'Test Sender <test@sender.com>',
       'X-Originating-IP': '10.0.0.1',
     };
 

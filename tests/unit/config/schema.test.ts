@@ -2,10 +2,7 @@
  * Configuration schema tests
  */
 
-import {
-  validateConfig,
-  safeValidateConfig,
-} from '../../../src/config/schema';
+import { validateConfig, safeValidateConfig } from '../../../src/config/schema';
 
 describe('PhishyConfigSchema', () => {
   const validConfig = {

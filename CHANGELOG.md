@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - AWS SAM template (`template.yaml`) for one-command deployment of the Lambda, S3 bucket, SES receipt rules, and IAM permissions
 - Versioned database migrations (`migrations/`) and schema documentation (`docs/DATABASE.md`)
 - Unit test suites for the email parser and analysis service
+- Email command channel (`PHISHY_EMAIL_COMMANDS_ENABLED`): the security team replies to analysis reports to correct verdicts ("confirmed phishing" / "false positive"), and Phishy executes the command and replies with completed actions. Verdicts are stored per analysis (migration 002) and immediately adjust indicator confidence via IOC provenance. Authorization is two-factor: security-team membership plus SES SPF/DKIM verification
+- SES SPF/DKIM/DMARC verdicts are now captured from receipt events and available to the pipeline
+- Reports include an `Analysis ID` line, and outbound report message IDs are stored for `In-Reply-To` thread matching
 - CloudWatch cost/usage metrics via Embedded Metric Format: every analysis emits tokens, estimated USD cost, latency, and verdict to the `Phishy` namespace, with no database or extra IAM required (`PHISHY_DISABLE_METRICS` to opt out)
 - Per-model pricing table for cost estimation, replacing hardcoded Sonnet rates; includes the 10% Bedrock regional-endpoint premium
 - Token usage capture for the Anthropic API provider (previously Bedrock-only)

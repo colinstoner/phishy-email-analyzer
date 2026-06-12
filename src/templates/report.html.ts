@@ -34,9 +34,25 @@ const FORWARDED_HEADERS = [
 ];
 
 /**
+ * Optional extras for report rendering
+ */
+export interface ReportOptions {
+  /**
+   * Intelligence database ID for this analysis. Rendered into the report so
+   * security-team replies can be matched back to the analysis (quoted reply
+   * bodies survive mail clients that strip threading headers).
+   */
+  analysisId?: string;
+}
+
+/**
  * Build complete HTML email for analysis report
  */
-export function buildEmailHtml(analysis: AnalysisResult, emailData: ExtractedEmailData): string {
+export function buildEmailHtml(
+  analysis: AnalysisResult,
+  emailData: ExtractedEmailData,
+  options?: ReportOptions
+): string {
   const timestamp = new Date().toLocaleString();
   const analysisHtml = buildAnalysisSection(analysis);
   const originalSubject = emailData.subject;
@@ -218,6 +234,7 @@ export function buildEmailHtml(analysis: AnalysisResult, emailData: ExtractedEma
                 <p><strong>From:</strong> ${escapeHtml(emailData.from_email)}</p>
                 ${analysis.provider ? `<p><strong>AI Provider:</strong> ${escapeHtml(analysis.provider)} (${escapeHtml(analysis.model ?? 'unknown')})</p>` : ''}
                 ${analysis.processingTimeMs ? `<p><strong>Processing Time:</strong> ${analysis.processingTimeMs}ms</p>` : ''}
+                ${options?.analysisId ? `<p><strong>Analysis ID:</strong> ${escapeHtml(options.analysisId)}</p>` : ''}
             </div>
             ${buildOriginalEmailSection(emailData)}
             <div class="footer">
@@ -277,7 +294,8 @@ function buildAnalysisSection(analysis: AnalysisResult): string {
  */
 export function buildPlainTextReport(
   analysis: AnalysisResult,
-  emailData: ExtractedEmailData
+  emailData: ExtractedEmailData,
+  options?: ReportOptions
 ): string {
   const lines: string[] = [];
   const divider = '='.repeat(50);
@@ -328,6 +346,10 @@ export function buildPlainTextReport(
 
   if (analysis.processingTimeMs) {
     lines.push(`  Processing Time: ${analysis.processingTimeMs}ms`);
+  }
+
+  if (options?.analysisId) {
+    lines.push(`  Analysis ID: ${options.analysisId}`);
   }
 
   lines.push('');

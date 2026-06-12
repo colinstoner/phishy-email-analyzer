@@ -18,6 +18,8 @@ import { createLogger } from '../utils/logger';
 import { extractEmailAddress, domainMatches } from '../utils/validation';
 import { estimateCostUsd } from '../utils/pricing';
 import { emitAIUsageMetric } from '../utils/metrics';
+import { ReportOptions } from '../templates/report.html';
+import { EmailCommandService } from '../services/commands/email.command.service';
 import { IntelligenceDatabaseService, CampaignAlertService } from '../services/intelligence';
 import { extractIOCs, IOCSourceContext } from '../services/intelligence/ioc.extractor';
 
@@ -41,6 +43,7 @@ let cachedServices: {
   analysisService: AnalysisService;
   campaignService?: CampaignAlertService;
   intelligenceDb?: IntelligenceDatabaseService;
+  commandService?: EmailCommandService;
 } | null = null;
 
 /**
@@ -195,6 +198,19 @@ async function initializeServices(): Promise<{
     }
   }
 
+  // Email command channel: security team replies to reports to direct Phishy
+  let commandService: EmailCommandService | undefined;
+  if (config.commands?.enabled && intelligenceDb) {
+    commandService = new EmailCommandService(
+      intelligenceDb,
+      sesNotifier,
+      config.notification.securityTeamDistribution
+    );
+    logger.info('Email command service initialized', {
+      authorizedSenders: config.notification.securityTeamDistribution.length,
+    });
+  }
+
   cachedServices = {
     s3Service,
     emailParser,
@@ -202,6 +218,7 @@ async function initializeServices(): Promise<{
     analysisService,
     intelligenceDb,
     campaignService,
+    commandService,
   };
 
   logger.info('Services initialized', {
@@ -310,6 +327,20 @@ async function processEmailEvent(
     return duplicateStatus;
   }
 
+  // Security-team correspondence: replies to Phishy's reports are commands,
+  // not new phishing reports — handle and stop before the analysis pipeline
+  if (services.commandService?.looksLikeCommand(msg, emailData)) {
+    const commandResult = await services.commandService.process(msg, emailData);
+    if (commandResult.handled) {
+      return {
+        status: 'processed',
+        recipient: emailData.from_email,
+        reason: `command:${commandResult.action}`,
+      };
+    }
+    // Not handled (e.g. failed SPF/DKIM) — fall through to the normal pipeline
+  }
+
   // Validate email for processing
   const validationResult = validateEmail(emailData, config);
   if (validationResult.status !== 'processed') {
@@ -355,6 +386,7 @@ async function processEmailEvent(
   }
 
   // Store analysis in intelligence database (only for enterprise users, not safelist)
+  let storedAnalysisId: string | undefined;
   if (services.intelligenceDb && !isSafelistUser) {
     try {
       const senderDomain = emailData.from_email.split('@')[1] ?? 'unknown';
@@ -375,6 +407,7 @@ async function processEmailEvent(
         aiModel: analysis.model ?? 'unknown',
         processingTimeMs: analysis.processingTimeMs ?? 0,
       });
+      storedAnalysisId = analysisId;
       logger.info('Stored analysis in intelligence database', { analysisId });
 
       // Store AI usage for cost tracking
@@ -465,12 +498,30 @@ async function processEmailEvent(
     // Use different CC list for safelist users vs enterprise users
     const ccOverride = isSafelistUser ? config.notification.safeSenderSecurity : undefined; // undefined uses default securityTeamDistribution
 
+    // Include the Analysis ID in the report so security-team replies can be
+    // matched back to this analysis (the email command channel)
+    const reportOptions: ReportOptions | undefined = storedAnalysisId
+      ? { analysisId: storedAnalysisId }
+      : undefined;
+
     const emailResult = await services.sesNotifier.sendAnalysisReport(
       recipient,
       analysis,
       emailData,
-      ccOverride
+      ccOverride,
+      reportOptions
     );
+
+    // Remember the outbound message ID so In-Reply-To matching works
+    if (storedAnalysisId && emailResult.messageId && services.intelligenceDb) {
+      try {
+        await services.intelligenceDb.setReportMessageId(storedAnalysisId, emailResult.messageId);
+      } catch (linkError) {
+        logger.warn('Failed to store report message ID', {
+          error: linkError instanceof Error ? linkError.message : String(linkError),
+        });
+      }
+    }
 
     // Delete from S3 if configured
     if (config.email.deleteAfterProcessing && msg.s3Location) {

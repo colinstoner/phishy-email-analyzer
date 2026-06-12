@@ -19,6 +19,12 @@ export interface EmailMessage {
   s3Location?: S3Location | null;
   attachments?: EmailAttachment[];
   rawContentSnippet?: string;
+  /** SES receipt authentication verdicts (SPF/DKIM/DMARC), when available */
+  authVerdicts?: {
+    spf?: string;
+    dkim?: string;
+    dmarc?: string;
+  };
 }
 
 /**
@@ -160,6 +166,9 @@ export interface SESReceipt {
     content?: string;
   };
   content?: string;
+  spfVerdict?: { status: string };
+  dkimVerdict?: { status: string };
+  dmarcVerdict?: { status: string };
 }
 
 /**

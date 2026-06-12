@@ -124,6 +124,19 @@ export interface IntelligenceStats {
 }
 
 /**
+ * Analyst feedback on a verdict
+ */
+export interface FeedbackRecord {
+  id?: string;
+  analysisId: string;
+  verdict: 'confirmed_phishing' | 'false_positive';
+  source: 'email_reply' | 'api';
+  submittedBy?: string;
+  notes?: string;
+  createdAt?: Date;
+}
+
+/**
  * AI usage record for cost tracking
  */
 export interface AIUsageRecord {
@@ -794,6 +807,137 @@ export class IntelligenceDatabaseService {
       .replace(/\s+/g, ' ') // Normalize whitespace
       .trim()
       .substring(0, 100); // Limit length
+  }
+
+  /**
+   * Link an outbound report email to its analysis so security-team replies
+   * can be matched via In-Reply-To. Non-fatal if the column is missing
+   * (migration 002 not yet applied).
+   */
+  async setReportMessageId(analysisId: string, sesMessageId: string): Promise<void> {
+    await this.initialize();
+
+    try {
+      await this.pool.query('UPDATE email_analyses SET report_message_id = $1 WHERE id = $2', [
+        sesMessageId,
+        analysisId,
+      ]);
+    } catch (error) {
+      // 42703 = undefined_column (migration 002 not applied)
+      if ((error as { code?: string }).code === '42703') {
+        logger.warn(
+          'report_message_id column missing — apply migrations/002_analysis_feedback.sql to enable reply matching'
+        );
+        return;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Find the analysis a reply refers to, via the SES message ID of the
+   * outbound report (matched against the reply's In-Reply-To header).
+   */
+  async findAnalysisIdByReportMessageId(sesMessageId: string): Promise<string | null> {
+    await this.initialize();
+
+    try {
+      const result = await this.pool.query(
+        'SELECT id FROM email_analyses WHERE report_message_id = $1 LIMIT 1',
+        [sesMessageId]
+      );
+      return result.rows.length > 0 ? (result.rows[0].id as string) : null;
+    } catch (error) {
+      if ((error as { code?: string }).code === '42703') {
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Record analyst feedback on a verdict (upsert — resubmitting corrects a
+   * prior answer). Requires migration 002; the table is intentionally not
+   * auto-created.
+   */
+  async recordFeedback(record: FeedbackRecord): Promise<string> {
+    await this.initialize();
+
+    try {
+      const result = await this.pool.query(
+        `INSERT INTO analysis_feedback (analysis_id, verdict, source, submitted_by, notes)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (analysis_id)
+         DO UPDATE SET
+           verdict = EXCLUDED.verdict,
+           source = EXCLUDED.source,
+           submitted_by = EXCLUDED.submitted_by,
+           notes = EXCLUDED.notes,
+           updated_at = NOW()
+         RETURNING id`,
+        [
+          record.analysisId,
+          record.verdict,
+          record.source,
+          record.submittedBy ?? null,
+          record.notes ?? null,
+        ]
+      );
+
+      const id = result.rows[0].id as string;
+      logger.info('Recorded analysis feedback', {
+        id,
+        analysisId: record.analysisId,
+        verdict: record.verdict,
+      });
+      return id;
+    } catch (error) {
+      // 42P01 = undefined_table
+      if ((error as { code?: string }).code === '42P01') {
+        throw new Error(
+          'analysis_feedback table is missing — apply migrations/002_analysis_feedback.sql before enabling feedback'
+        );
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Apply feedback to the indicators extracted from an analysis, using IOC
+   * provenance (metadata.sourceAnalysisId). Confirmation boosts confidence;
+   * a false positive decays it and deactivates indicators that fall below
+   * the floor, so they stop matching future lookups.
+   */
+  async applyFeedbackToIndicators(
+    analysisId: string,
+    verdict: FeedbackRecord['verdict']
+  ): Promise<number> {
+    await this.initialize();
+
+    const result =
+      verdict === 'confirmed_phishing'
+        ? await this.pool.query(
+            `UPDATE threat_indicators
+             SET confidence_score = LEAST(1.0, confidence_score + 0.2),
+                 last_seen_at = NOW()
+             WHERE metadata->>'sourceAnalysisId' = $1`,
+            [analysisId]
+          )
+        : await this.pool.query(
+            `UPDATE threat_indicators
+             SET confidence_score = GREATEST(0.0, confidence_score - 0.3),
+                 is_active = (confidence_score - 0.3) > 0.1
+             WHERE metadata->>'sourceAnalysisId' = $1`,
+            [analysisId]
+          );
+
+    const adjusted = result.rowCount ?? 0;
+    logger.info('Adjusted indicator confidence from feedback', {
+      analysisId,
+      verdict,
+      indicatorsAdjusted: adjusted,
+    });
+    return adjusted;
   }
 
   /**

@@ -7,7 +7,7 @@ import { SES, SendEmailCommandOutput } from '@aws-sdk/client-ses';
 import { AnalysisResult, EmailSendResult, ExtractedEmailData } from '../../types';
 import { createLogger } from '../../utils/logger';
 import { withRetry, isRetryableHttpError } from '../../utils/retry';
-import { buildEmailHtml, buildPlainTextReport } from '../../templates/report.html';
+import { buildEmailHtml, buildPlainTextReport, ReportOptions } from '../../templates/report.html';
 import { normalizeConfidence } from '../ai/provider.interface';
 
 const logger = createLogger('ses-notifier');
@@ -48,7 +48,8 @@ export class SESNotifier {
     recipient: string,
     analysis: AnalysisResult,
     emailData: ExtractedEmailData,
-    ccOverride?: string[]
+    ccOverride?: string[],
+    reportOptions?: ReportOptions
   ): Promise<EmailSendResult> {
     const ccAddresses = ccOverride ?? this.securityTeamDistribution;
 
@@ -60,8 +61,8 @@ export class SESNotifier {
     });
 
     try {
-      const htmlContent = buildEmailHtml(analysis, emailData);
-      const textContent = buildPlainTextReport(analysis, emailData);
+      const htmlContent = buildEmailHtml(analysis, emailData, reportOptions);
+      const textContent = buildPlainTextReport(analysis, emailData, reportOptions);
       const subject = `Phishing Analysis: ${emailData.subject}`;
 
       const result = await this.sendEmail(

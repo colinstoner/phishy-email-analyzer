@@ -153,6 +153,11 @@ export class EmailParserService {
             sesMailTimestamp: record.ses.mail.timestamp ?? '',
             s3Reference: s3Location ? `s3://${s3Location.bucket}/${s3Location.key}` : null,
             s3Location: s3Location ?? undefined,
+            authVerdicts: {
+              spf: record.ses.receipt?.spfVerdict?.status,
+              dkim: record.ses.receipt?.dkimVerdict?.status,
+              dmarc: record.ses.receipt?.dmarcVerdict?.status,
+            },
           };
 
           logger.debug('Processed email', {

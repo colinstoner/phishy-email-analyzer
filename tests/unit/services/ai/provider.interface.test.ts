@@ -119,7 +119,8 @@ describe('parseAnalysisResponse', () => {
   });
 
   it('should handle JSON embedded in text', () => {
-    const response = 'Here is my analysis:\n{"summary": "Test", "isPhishing": true, "confidence": "Medium"}\nDone.';
+    const response =
+      'Here is my analysis:\n{"summary": "Test", "isPhishing": true, "confidence": "Medium"}\nDone.';
 
     const result = parseAnalysisResponse(response, provider, model, processingTime);
 

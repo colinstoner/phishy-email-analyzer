@@ -36,6 +36,9 @@ Recurring patterns confirmed across multiple analyses, keyed by `(pattern_type, 
 ### `ai_usage`
 Per-request token counts and estimated cost, optionally linked to the analysis row (`ON DELETE SET NULL`). Powers the cost-analytics stats (totals, 24h/7d windows, per-model breakdown).
 
+### `analysis_feedback` *(migration 002 — not auto-created)*
+Security-team verdicts on analyses, submitted by replying to Phishy's reports (the email command channel). One row per analysis (`UNIQUE(analysis_id)`); resubmission updates in place so a correction wins. Feedback also adjusts `threat_indicators` confidence through IOC provenance (`metadata.sourceAnalysisId`). Migration 002 additionally adds `email_analyses.report_message_id`, which links each outbound report to its analysis so replies can be matched via `In-Reply-To`. Apply `migrations/002_analysis_feedback.sql` before setting `PHISHY_EMAIL_COMMANDS_ENABLED=true`.
+
 ## Privacy & Retention
 
 The database stores sender addresses, subjects, recipient addresses (in `campaigns.unique_recipients`), and AI analysis output — but **not raw email bodies** (those stay in S3 under your bucket's lifecycle rules). There is currently no built-in retention job; operators subject to data-retention policies should schedule their own cleanup, e.g.:

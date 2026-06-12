@@ -92,6 +92,17 @@ const CampaignAlertConfigSchema = z.object({
 });
 
 /**
+ * Email commands configuration schema
+ * Lets the security team reply to Phishy's reports (or email Phishy
+ * directly) to correct verdicts and trigger actions. Senders must be in
+ * notification.securityTeamDistribution AND pass SES SPF/DKIM checks.
+ * Requires the intelligence database and migration 002.
+ */
+const CommandsConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+});
+
+/**
  * Complete Phishy configuration schema
  */
 export const PhishyConfigSchema = z.object({
@@ -102,6 +113,7 @@ export const PhishyConfigSchema = z.object({
   profile: z.string().optional(), // Profile ID or S3 path
   intelligence: IntelligenceConfigSchema.optional(),
   campaignAlerts: CampaignAlertConfigSchema.optional(),
+  commands: CommandsConfigSchema.optional(),
   logLevel: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   version: z.string().optional(),
 });
@@ -118,6 +130,7 @@ export type NotificationConfig = z.infer<typeof NotificationConfigSchema>;
 export type StorageConfig = z.infer<typeof StorageConfigSchema>;
 export type IntelligenceConfig = z.infer<typeof IntelligenceConfigSchema>;
 export type CampaignAlertConfig = z.infer<typeof CampaignAlertConfigSchema>;
+export type CommandsConfig = z.infer<typeof CommandsConfigSchema>;
 
 /**
  * Partial configuration for merging

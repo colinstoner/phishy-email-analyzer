@@ -81,6 +81,25 @@ When the same setting is defined in multiple places, Phishy uses this priority (
 | `PHISHY_CAMPAIGN_ALERTS_ENABLED` | `false` | Enable campaign flood detection alerts |
 | `PHISHY_CAMPAIGN_ALERTS_DISTRIBUTION` | - | Email to receive campaign alerts |
 
+### Email Commands (Security Team Correspondence)
+
+When enabled, the security team can direct Phishy by replying to its analysis reports. Phishy matches the reply to the analysis (via the email thread or the quoted `Analysis ID:` line), executes the command, and replies with the completed actions.
+
+v1 commands — anywhere in the reply text:
+
+- **"confirmed phishing"** (or "confirm", "malicious", "agreed") — confirms the verdict and strengthens the confidence of every indicator extracted from that email
+- **"false positive"** (or "not phishing", "legit", "safe") — overturns the verdict, decays those indicators, and deactivates any that fall below the confidence floor
+
+Replying again with the other verdict corrects a mistake — the latest answer wins.
+
+**Authorization is two-factor:** the sender must be in `SECURITY_TEAM_DISTRIBUTION` *and* the inbound mail must pass SES SPF or DKIM verification, so a spoofed From header cannot issue commands. Regular employees' replies are never treated as commands.
+
+Requires the intelligence database and `migrations/002_analysis_feedback.sql`.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PHISHY_EMAIL_COMMANDS_ENABLED` | `false` | Process security-team replies as commands |
+
 ### AWS Secrets Manager Integration
 
 Instead of storing database credentials in environment variables, you can use AWS Secrets Manager:

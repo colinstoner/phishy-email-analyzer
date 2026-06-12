@@ -6,7 +6,9 @@ import { extractIOCs } from '../../../../src/services/intelligence/ioc.extractor
 import { ExtractedEmailData, AnalysisResult } from '../../../../src/types';
 
 describe('extractIOCs', () => {
-  const createMockEmailData = (overrides: Partial<ExtractedEmailData> = {}): ExtractedEmailData => ({
+  const createMockEmailData = (
+    overrides: Partial<ExtractedEmailData> = {}
+  ): ExtractedEmailData => ({
     from_email: 'sender@example.com',
     subject: 'Test Subject',
     text: 'Test email body',

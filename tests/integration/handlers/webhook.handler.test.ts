@@ -145,11 +145,7 @@ describe('Webhook Handler Integration', () => {
     });
 
     it('should send threat detected event', async () => {
-      await webhookService.sendThreatDetected(
-        'analysis-123',
-        mockEmailData,
-        mockAnalysis
-      );
+      await webhookService.sendThreatDetected('analysis-123', mockEmailData, mockAnalysis);
 
       expect(mockedAxios.post).toHaveBeenCalledTimes(1);
       const { url, payload, config } = getMockCallArgs(0);
@@ -162,33 +158,27 @@ describe('Webhook Handler Integration', () => {
     });
 
     it('should include indicators in threat payload', async () => {
-      await webhookService.sendThreatDetected(
-        'analysis-123',
-        mockEmailData,
-        mockAnalysis
-      );
+      await webhookService.sendThreatDetected('analysis-123', mockEmailData, mockAnalysis);
 
       const { payload } = getMockCallArgs(0);
       expect(payload.data.indicators).toEqual(mockAnalysis.indicators);
     });
 
     it('should set correct severity based on confidence', async () => {
-      await webhookService.sendThreatDetected(
-        'analysis-123',
-        mockEmailData,
-        { ...mockAnalysis, confidence: 'Very High' }
-      );
+      await webhookService.sendThreatDetected('analysis-123', mockEmailData, {
+        ...mockAnalysis,
+        confidence: 'Very High',
+      });
 
       const { payload } = getMockCallArgs(0);
       expect(payload.severity).toBe('critical');
     });
 
     it('should not send for non-phishing emails', async () => {
-      await webhookService.sendThreatDetected(
-        'analysis-123',
-        mockEmailData,
-        { ...mockAnalysis, isPhishing: false }
-      );
+      await webhookService.sendThreatDetected('analysis-123', mockEmailData, {
+        ...mockAnalysis,
+        isPhishing: false,
+      });
 
       expect(mockedAxios.post).not.toHaveBeenCalled();
     });
@@ -266,11 +256,7 @@ describe('Webhook Handler Integration', () => {
     });
 
     it('should send analysis completed event', async () => {
-      await webhookService.sendAnalysisCompleted(
-        'analysis-789',
-        mockEmailData,
-        mockAnalysis
-      );
+      await webhookService.sendAnalysisCompleted('analysis-789', mockEmailData, mockAnalysis);
 
       expect(mockedAxios.post).toHaveBeenCalledTimes(1);
       const { payload } = getMockCallArgs(0);
@@ -294,11 +280,7 @@ describe('Webhook Handler Integration', () => {
         enabled: true,
       });
 
-      await webhookService.sendThreatDetected(
-        'analysis-123',
-        mockEmailData,
-        mockAnalysis
-      );
+      await webhookService.sendThreatDetected('analysis-123', mockEmailData, mockAnalysis);
 
       expect(mockedAxios.post).toHaveBeenCalledTimes(1);
       expect(mockedAxios.post.mock.calls[0][0]).toBe('https://siem1.example.com/webhook');
@@ -316,11 +298,7 @@ describe('Webhook Handler Integration', () => {
         enabled: true,
       });
 
-      await webhookService.sendThreatDetected(
-        'analysis-123',
-        mockEmailData,
-        mockAnalysis
-      );
+      await webhookService.sendThreatDetected('analysis-123', mockEmailData, mockAnalysis);
 
       expect(mockedAxios.post).toHaveBeenCalledTimes(2);
     });
@@ -365,11 +343,7 @@ describe('Webhook Handler Integration', () => {
         .mockRejectedValueOnce(new Error('Retry 2 failed'))
         .mockResolvedValueOnce({ status: 200 });
 
-      await webhookService.sendThreatDetected(
-        'analysis-123',
-        mockEmailData,
-        mockAnalysis
-      );
+      await webhookService.sendThreatDetected('analysis-123', mockEmailData, mockAnalysis);
 
       // Both webhooks should be attempted (first with retries, second succeeds)
       expect(mockedAxios.post).toHaveBeenCalled();
@@ -388,11 +362,7 @@ describe('Webhook Handler Integration', () => {
         enabled: true,
       });
 
-      await webhookService.sendThreatDetected(
-        'analysis-123',
-        mockEmailData,
-        mockAnalysis
-      );
+      await webhookService.sendThreatDetected('analysis-123', mockEmailData, mockAnalysis);
 
       const { config } = getMockCallArgs(0);
       expect(config.headers?.['X-Phishy-Signature']).toMatch(/^sha256=/);
@@ -406,11 +376,7 @@ describe('Webhook Handler Integration', () => {
         // No secret
       });
 
-      await webhookService.sendThreatDetected(
-        'analysis-123',
-        mockEmailData,
-        mockAnalysis
-      );
+      await webhookService.sendThreatDetected('analysis-123', mockEmailData, mockAnalysis);
 
       const { config } = getMockCallArgs(0);
       expect(config.headers?.['X-Phishy-Signature']).toBeUndefined();
@@ -428,11 +394,7 @@ describe('Webhook Handler Integration', () => {
 
     it('should include timestamp in payload', async () => {
       const before = new Date();
-      await webhookService.sendThreatDetected(
-        'analysis-123',
-        mockEmailData,
-        mockAnalysis
-      );
+      await webhookService.sendThreatDetected('analysis-123', mockEmailData, mockAnalysis);
       const after = new Date();
 
       const { payload } = getMockCallArgs(0);
@@ -443,11 +405,7 @@ describe('Webhook Handler Integration', () => {
     });
 
     it('should include correlation fields', async () => {
-      await webhookService.sendThreatDetected(
-        'analysis-123',
-        mockEmailData,
-        mockAnalysis
-      );
+      await webhookService.sendThreatDetected('analysis-123', mockEmailData, mockAnalysis);
 
       const { payload } = getMockCallArgs(0);
       expect(payload.data.correlationFields).toBeDefined();

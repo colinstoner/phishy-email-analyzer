@@ -258,7 +258,12 @@ describe('API Handler Integration', () => {
   describe('GET /api/v1/stats', () => {
     it('should return stats endpoint', async () => {
       mockQueryResult('total_analyses', [
-        { total_analyses: '100', phishing_detected: '45', active_indicators: '50', detected_patterns: '5' },
+        {
+          total_analyses: '100',
+          phishing_detected: '45',
+          active_indicators: '50',
+          detected_patterns: '5',
+        },
       ]);
 
       const event = createApiEvent('GET', '/api/v1/stats');
