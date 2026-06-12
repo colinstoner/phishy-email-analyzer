@@ -42,6 +42,17 @@ ANTHROPIC_API_KEY=sk-ant-... npm run try examples/sample-phish.eml   # + real Cl
 
 The dry run shows exactly what the deployed Lambda would see: MIME parsing, forwarded-header extraction, SafeLinks/redirect unwrapping, and content-integrity flags — on a bundled fictional sample. Point it at any `.eml` you export from your mail client.
 
+## What Reports Look Like
+
+Every reporter gets a plain-language reply: a tone-colored verdict, a 0–100 risk score, what to do, why it was flagged, and a "how to spot this next time" tip — plus a forensic section for the security team. _(Examples below use invented data.)_
+
+| | |
+|---|---|
+| ![Business email compromise — critical](examples/report-bec.png) | ![Credential phishing — critical](examples/report-phishing.png) |
+| ![Suspicious — caution](examples/report-suspicious.png) | ![Legitimate — cleared](examples/report-legitimate.png) |
+
+Screenshots are generated from the real report template — `npm run build && npm i --no-save puppeteer-core && node scripts/render-report-samples.js`.
+
 ## How It Works
 
 1. User forwards a suspicious email to `phishy@yourdomain.com`
