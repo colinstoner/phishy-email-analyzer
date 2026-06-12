@@ -2,8 +2,31 @@
  * IOC Extractor tests
  */
 
-import { extractIOCs } from '../../../../src/services/intelligence/ioc.extractor';
+import { extractIOCs, dedupeKey } from '../../../../src/services/intelligence/ioc.extractor';
 import { ExtractedEmailData, AnalysisResult } from '../../../../src/types';
+
+describe('dedupeKey', () => {
+  it('case-folds domains, emails, and IPs (case-insensitive)', () => {
+    expect(dedupeKey('domain', 'Evil.TEST')).toBe(dedupeKey('domain', 'evil.test'));
+    expect(dedupeKey('email', 'Attacker@Evil.Test')).toBe(dedupeKey('email', 'attacker@evil.test'));
+  });
+
+  it('case-folds only scheme+host for URLs, NOT path/query (must stay distinct)', () => {
+    // hostname case is insignificant -> same key
+    expect(dedupeKey('url', 'https://Evil.Test/Path')).toBe(
+      dedupeKey('url', 'https://evil.test/Path')
+    );
+    // path/query case IS significant -> distinct keys, must not merge
+    expect(dedupeKey('url', 'https://evil.test/Path?T=A')).not.toBe(
+      dedupeKey('url', 'https://evil.test/path?t=a')
+    );
+  });
+
+  it('falls back to an exact key for unparseable URLs', () => {
+    expect(dedupeKey('url', 'not a url')).toBe(dedupeKey('url', 'not a url'));
+    expect(dedupeKey('url', 'not a url')).not.toBe(dedupeKey('url', 'NOT A URL'));
+  });
+});
 
 describe('extractIOCs', () => {
   const createMockEmailData = (
@@ -249,10 +272,12 @@ describe('extractIOCs', () => {
 
       const iocs = extractIOCs(emailData, createMockAnalysis(true, 'High'));
 
-      expect(iocs.some(i => i.indicatorType === 'email' && i.indicatorValue === 'dpcxzut@gmail.com')).toBe(
-        true
+      expect(
+        iocs.some(i => i.indicatorType === 'email' && i.indicatorValue === 'dpcxzut@gmail.com')
+      ).toBe(true);
+      expect(iocs.some(i => i.indicatorType === 'domain' && i.indicatorValue === 'gmail.com')).toBe(
+        false
       );
-      expect(iocs.some(i => i.indicatorType === 'domain' && i.indicatorValue === 'gmail.com')).toBe(false);
     });
 
     it('drops free-mail domains nominated by the AI', () => {
@@ -285,9 +310,9 @@ describe('extractIOCs', () => {
 
       const iocs = extractIOCs(emailData, createMockAnalysis(true));
 
-      expect(iocs.some(i => i.indicatorType === 'domain' && i.indicatorValue === '203.0.113.50')).toBe(
-        false
-      );
+      expect(
+        iocs.some(i => i.indicatorType === 'domain' && i.indicatorValue === '203.0.113.50')
+      ).toBe(false);
       expect(iocs.some(i => i.indicatorType === 'ip' && i.indicatorValue === '203.0.113.50')).toBe(
         true
       );
@@ -333,7 +358,9 @@ describe('extractIOCs', () => {
       });
       const analysis = {
         ...createMockAnalysis(true),
-        iocs: [{ type: 'email' as const, value: 'attacker@evil-sender.jp', role: 'sender' as const }],
+        iocs: [
+          { type: 'email' as const, value: 'attacker@evil-sender.jp', role: 'sender' as const },
+        ],
       };
 
       const iocs = extractIOCs(emailData, analysis);
