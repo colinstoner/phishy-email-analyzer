@@ -428,10 +428,18 @@ export class IntelligenceDatabaseService {
       });
     }
     if (record.verdict) {
-      optional.push({ column: 'verdict', value: record.verdict, migration: '004_structured_verdict.sql' });
+      optional.push({
+        column: 'verdict',
+        value: record.verdict,
+        migration: '004_structured_verdict.sql',
+      });
     }
     if (typeof record.riskScore === 'number') {
-      optional.push({ column: 'risk_score', value: record.riskScore, migration: '004_structured_verdict.sql' });
+      optional.push({
+        column: 'risk_score',
+        value: record.riskScore,
+        migration: '004_structured_verdict.sql',
+      });
     }
 
     // Try with all optional columns; on a missing-column error (42703) drop

@@ -112,7 +112,12 @@ export function fuseRisk(result: AnalysisResult, signals: FusionSignals = {}): R
 
   // 3. An active high/critical campaign raises the floor.
   if (signals.campaign?.isActive) {
-    const campaignFloor = signals.campaign.riskLevel === 'critical' ? 80 : signals.campaign.riskLevel === 'high' ? 60 : 0;
+    const campaignFloor =
+      signals.campaign.riskLevel === 'critical'
+        ? 80
+        : signals.campaign.riskLevel === 'high'
+          ? 60
+          : 0;
     if (campaignFloor > score) {
       score = campaignFloor;
     }

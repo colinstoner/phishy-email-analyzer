@@ -126,12 +126,22 @@ export function extractIOCs(
   const urlChains = opts.extractUrls || opts.extractDomains ? resolveUrlChains(allContent) : [];
 
   if (opts.extractUrls) {
-    indicators.push(...extractUrlIOCs(urlChains, baseConfidence, severity, now, baseMetadata, exclusions));
+    indicators.push(
+      ...extractUrlIOCs(urlChains, baseConfidence, severity, now, baseMetadata, exclusions)
+    );
   }
 
   if (opts.extractDomains) {
     indicators.push(
-      ...extractDomainIOCs(emailData, urlChains, baseConfidence, severity, now, baseMetadata, exclusions)
+      ...extractDomainIOCs(
+        emailData,
+        urlChains,
+        baseConfidence,
+        severity,
+        now,
+        baseMetadata,
+        exclusions
+      )
     );
   }
 
@@ -144,12 +154,16 @@ export function extractIOCs(
   }
 
   if (opts.extractEmails) {
-    indicators.push(...extractEmailIOCs(emailData, baseConfidence, severity, now, baseMetadata, exclusions));
+    indicators.push(
+      ...extractEmailIOCs(emailData, baseConfidence, severity, now, baseMetadata, exclusions)
+    );
   }
 
   // Merge indicators the AI nominated from full context (structured output)
   if (analysis.iocs?.length) {
-    indicators.push(...extractAINominatedIOCs(analysis.iocs, severity, now, baseMetadata, exclusions));
+    indicators.push(
+      ...extractAINominatedIOCs(analysis.iocs, severity, now, baseMetadata, exclusions)
+    );
   }
 
   // Dedupe by type+value, keeping the highest-confidence occurrence, then
@@ -243,10 +257,9 @@ function extractEmbeddedUrl(url: string): string | null {
 
 function extractUrlFromJwtPayload(token: string): string | null {
   try {
-    const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString('utf8')) as Record<
-      string,
-      unknown
-    >;
+    const payload = JSON.parse(
+      Buffer.from(token.split('.')[1], 'base64').toString('utf8')
+    ) as Record<string, unknown>;
     for (const value of Object.values(payload)) {
       if (typeof value === 'string' && /^https?:\/\//i.test(value)) {
         return value;
@@ -371,7 +384,12 @@ function extractDomainIOCs(
     assign(finalHost, 'final_url_domain', severity, baseConfidence);
 
     for (const intermediate of chain.slice(0, -1)) {
-      assign(hostnameOf(intermediate), 'redirect_intermediary', 'low', Math.max(baseConfidence - 0.2, 0.3));
+      assign(
+        hostnameOf(intermediate),
+        'redirect_intermediary',
+        'low',
+        Math.max(baseConfidence - 0.2, 0.3)
+      );
     }
   }
 

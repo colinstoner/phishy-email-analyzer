@@ -161,13 +161,16 @@ function sanitizeAssessment(parsed: AIAnalysisResponse): ThreatAssessment | unde
     : [];
 
   const targeting =
-    typeof parsed.targeting === 'string' && TARGETINGS.includes(parsed.targeting.toLowerCase().trim() as Targeting)
+    typeof parsed.targeting === 'string' &&
+    TARGETINGS.includes(parsed.targeting.toLowerCase().trim() as Targeting)
       ? (parsed.targeting.toLowerCase().trim() as Targeting)
       : 'unknown';
 
   return {
     verdict,
-    riskScore: Math.round(clampScore(parsed.riskScore, 0, 100, MALICIOUS_VERDICTS.includes(verdict) ? 75 : 5)),
+    riskScore: Math.round(
+      clampScore(parsed.riskScore, 0, 100, MALICIOUS_VERDICTS.includes(verdict) ? 75 : 5)
+    ),
     verdictConfidence: clampScore(parsed.verdictConfidence, 0, 1, 0.5),
     threatVectors: [...new Set(vectors)],
     targeting,

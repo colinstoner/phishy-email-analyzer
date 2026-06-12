@@ -70,13 +70,16 @@ const VERDICT_DISPLAY: Record<
   bec: {
     label: 'BUSINESS EMAIL COMPROMISE',
     tone: 'danger',
-    plain: 'Someone is impersonating a colleague, executive, or vendor to trick you into sending money, data, or credentials.',
-    action: 'Do not reply or act on the request. Verify it with the real person through a known phone number or in person.',
+    plain:
+      'Someone is impersonating a colleague, executive, or vendor to trick you into sending money, data, or credentials.',
+    action:
+      'Do not reply or act on the request. Verify it with the real person through a known phone number or in person.',
   },
   phishing: {
     label: 'PHISHING',
     tone: 'danger',
-    plain: 'This email is trying to steal your password or personal information, usually through a fake login page.',
+    plain:
+      'This email is trying to steal your password or personal information, usually through a fake login page.',
     action: 'Do not click any links or enter any information. Delete it.',
   },
   malware_delivery: {
@@ -100,7 +103,8 @@ const VERDICT_DISPLAY: Record<
   graymail: {
     label: 'LEGITIMATE BULK EMAIL',
     tone: 'safe',
-    plain: 'This is real, legitimate mail (a newsletter, survey, or marketing message) — just the kind you may not want.',
+    plain:
+      'This is real, legitimate mail (a newsletter, survey, or marketing message) — just the kind you may not want.',
     action: "It's safe. If you'd rather not receive these, use the unsubscribe link.",
   },
   legitimate: {
@@ -131,12 +135,13 @@ const THREAT_VECTOR_TIPS: Record<string, string> = {
   malware:
     "Don't open unexpected attachments. If a file seems important, confirm with the sender through another channel first.",
   reconnaissance:
-    "Attackers often open with a harmless-looking note (\"Are you available?\") to start a conversation before the real ask. Be wary of unexpected messages like that.",
+    'Attackers often open with a harmless-looking note ("Are you available?") to start a conversation before the real ask. Be wary of unexpected messages like that.',
   data_exfiltration:
     'Be cautious about sharing internal data or documents in response to unsolicited requests.',
   extortion:
     "Threatening emails demanding payment are almost always bluffs. Don't pay — report it.",
-  other: 'When an email pressures you to act quickly or secretly, slow down and verify before doing anything.',
+  other:
+    'When an email pressures you to act quickly or secretly, slow down and verify before doing anything.',
 };
 
 /**

@@ -131,11 +131,7 @@ export type ThreatVector =
 export type Targeting = 'targeted' | 'mass' | 'unknown';
 
 /** Verdicts that count as malicious for downstream isPhishing-style gating */
-export const MALICIOUS_VERDICTS: readonly ThreatVerdict[] = [
-  'bec',
-  'phishing',
-  'malware_delivery',
-];
+export const MALICIOUS_VERDICTS: readonly ThreatVerdict[] = ['bec', 'phishing', 'malware_delivery'];
 
 /**
  * The structured verdict the model produces. Risk and confidence are separate
