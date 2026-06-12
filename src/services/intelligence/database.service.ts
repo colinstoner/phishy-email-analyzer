@@ -21,16 +21,22 @@ const logger = createLogger('intelligence-db');
  * (`host=... sslmode=require ...`).
  */
 export function stripSslOverrides(connectionString: string): string {
+  // libpq keywords are case-insensitive and allow whitespace around `=`, so
+  // match both — `SSLMODE=` and `sslmode = disable` must not survive, or they
+  // would still override config.ssl and could disable verification.
+  const DROP = new Set(['sslmode', 'ssl', 'uselibpqcompat']);
   try {
     const url = new URL(connectionString);
-    url.searchParams.delete('sslmode');
-    url.searchParams.delete('ssl');
-    url.searchParams.delete('uselibpqcompat');
+    for (const key of [...url.searchParams.keys()]) {
+      if (DROP.has(key.toLowerCase())) {
+        url.searchParams.delete(key);
+      }
+    }
     return url.toString();
   } catch {
     // Not URL-parseable — treat as libpq key=value (space-separated) form.
     return connectionString
-      .replace(/\b(?:sslmode|ssl|uselibpqcompat)=\S+/gi, '')
+      .replace(/\b(?:sslmode|ssl|uselibpqcompat)\s*=\s*\S+/gi, '')
       .replace(/\s{2,}/g, ' ')
       .trim();
   }

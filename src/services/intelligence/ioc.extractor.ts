@@ -574,7 +574,7 @@ function extractAINominatedIOCs(
  * case-sensitive, so lowercasing them whole would wrongly merge two distinct
  * malicious URLs into one and drop an indicator. Normalize just the origin.
  */
-function dedupeKey(type: ThreatIndicatorRecord['indicatorType'], value: string): string {
+export function dedupeKey(type: ThreatIndicatorRecord['indicatorType'], value: string): string {
   if (type === 'url') {
     try {
       const u = new URL(value);
