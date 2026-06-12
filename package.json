@@ -45,7 +45,7 @@
     "@aws-sdk/client-ses": "^3.787.0",
     "axios": "^1.7.0",
     "mailparser": "^3.9.9",
-    "pg": "^8.13.0",
+    "pg": "^8.21.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {
@@ -55,7 +55,7 @@
     "@types/jest": "^30.0.0",
     "@types/mailparser": "^3.4.6",
     "@types/node": "^22.10.0",
-    "@types/pg": "^8.11.10",
+    "@types/pg": "^8.20.0",
     "@typescript-eslint/eslint-plugin": "^8.18.0",
     "@typescript-eslint/parser": "^8.18.0",
     "aws-sdk-client-mock": "^4.1.0",
