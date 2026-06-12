@@ -1,0 +1,25 @@
+name: Feature request
+description: Propose an improvement or new capability
+labels: ['enhancement']
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the situation where Phishy falls short today
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed approach
+      description: Sketch how it could work — rough is fine
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Security considerations
+      description: |
+        Phishy has hard invariants (see CLAUDE.md): the suspicious email is
+        hostile data everywhere; only the security team triggers actions;
+        agentic tools never fetch from the network. Note anything your idea
+        touches.

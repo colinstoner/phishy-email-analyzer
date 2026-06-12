@@ -39,37 +39,37 @@ const ANALYSIS_ROW = {
 describe('stripSslOverrides (TLS CA pin must not be silently bypassed)', () => {
   it('removes sslmode from URL-form connection strings', () => {
     const out = stripSslOverrides(
-      'postgresql://u:p@db.abc.us-west-2.rds.amazonaws.com:5432/phishy?sslmode=no-verify'
+      'postgresql://u:p@db.abc.us-west-2.example.com:5432/phishy?sslmode=no-verify'
     );
     expect(out).not.toMatch(/sslmode/i);
-    expect(out).toContain('db.abc.us-west-2.rds.amazonaws.com');
+    expect(out).toContain('db.abc.us-west-2.example.com');
   });
 
   it('removes sslmode from libpq key=value form (the silent-failopen case)', () => {
     const out = stripSslOverrides(
-      'host=db.abc.us-west-2.rds.amazonaws.com port=5432 dbname=phishy sslmode=disable user=u'
+      'host=db.abc.us-west-2.example.com port=5432 dbname=phishy sslmode=disable user=u'
     );
     expect(out).not.toMatch(/sslmode/i);
-    expect(out).toContain('host=db.abc.us-west-2.rds.amazonaws.com');
+    expect(out).toContain('host=db.abc.us-west-2.example.com');
     expect(out).toContain('dbname=phishy');
   });
 
   it('is case-insensitive and tolerates whitespace (libpq keyword rules)', () => {
     // URL form, uppercased key
     const url = stripSslOverrides(
-      'postgresql://u:p@db.abc.us-west-2.rds.amazonaws.com:5432/phishy?SSLMODE=disable'
+      'postgresql://u:p@db.abc.us-west-2.example.com:5432/phishy?SSLMODE=disable'
     );
     expect(url).not.toMatch(/sslmode/i);
     // key=value form, mixed case + spaces around '='
     const kv = stripSslOverrides(
-      'host=db.abc.us-west-2.rds.amazonaws.com SslMode = no-verify dbname=phishy'
+      'host=db.abc.us-west-2.example.com SslMode = no-verify dbname=phishy'
     );
     expect(kv).not.toMatch(/sslmode|no-verify/i);
     expect(kv).toContain('dbname=phishy');
   });
 
   it('leaves a clean connection string intact', () => {
-    const clean = 'postgresql://u:p@db.abc.us-west-2.rds.amazonaws.com:5432/phishy';
+    const clean = 'postgresql://u:p@db.abc.us-west-2.example.com:5432/phishy';
     expect(stripSslOverrides(clean)).toBe(clean);
   });
 });

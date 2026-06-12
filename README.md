@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/colinstoner/phishy-email-analyzer/actions/workflows/ci.yml/badge.svg)](https://github.com/colinstoner/phishy-email-analyzer/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Node.js >= 18](https://img.shields.io/badge/node-%3E%3D18-brightgreen)](package.json)
+[![Node.js >= 22](https://img.shields.io/badge/node-%3E%3D22-brightgreen)](package.json)
 
 AI-powered phishing email analysis tool that uses Claude to evaluate suspicious emails and provide detailed security reports.
 
@@ -30,6 +30,17 @@ Perfect for security teams, IT departments, or anyone who needs to verify suspic
 - 🏢 **Enterprise Profiles**: Organization-specific context for better detection (VIPs, partners, known threats)
 - ☁️ **Flexible AI Backend**: Use Anthropic API or AWS Bedrock (no external API key needed)
 - 📈 **Threat Intelligence** (optional): Track patterns, extract IOCs, integrate with SIEM
+
+## Try It in 60 Seconds (no AWS required)
+
+```bash
+git clone https://github.com/colinstoner/phishy-email-analyzer && cd phishy-email-analyzer
+npm install
+npm run try examples/sample-phish.eml          # dry run: parsing, link unwrapping, obfuscation flags
+ANTHROPIC_API_KEY=sk-ant-... npm run try examples/sample-phish.eml   # + real Claude verdict
+```
+
+The dry run shows exactly what the deployed Lambda would see: MIME parsing, forwarded-header extraction, SafeLinks/redirect unwrapping, and content-integrity flags — on a bundled fictional sample. Point it at any `.eml` you export from your mail client.
 
 ## How It Works
 
