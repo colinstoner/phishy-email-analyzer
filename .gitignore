@@ -141,3 +141,7 @@ config/phishy.config.json
 config/*.profile.json
 function.zip
 lambda.zip
+
+# AWS SAM build artifacts and deploy config (may contain account-specific values)
+.aws-sam/
+samconfig.toml

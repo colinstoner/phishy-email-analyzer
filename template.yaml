@@ -1,0 +1,189 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Phishy Email Analyzer - AI-powered phishing analysis. Users forward
+  suspicious emails to a designated address; SES stores them in S3 and
+  triggers Lambda, which analyzes them with Claude and replies with a
+  security report.
+
+  Two manual steps remain after deploy (CloudFormation cannot do them):
+  1) verify your domain in SES and add the DNS/MX records, and
+  2) set the created receipt rule set as ACTIVE in the SES console
+     (SES allows only one active rule set per account, so this template
+     does not force it).
+
+Parameters:
+  RecipientEmail:
+    Type: String
+    Description: Address users forward suspicious emails to (e.g. phishy@yourdomain.com). The domain must be verified in SES with MX records pointing to SES.
+  SenderEmail:
+    Type: String
+    Description: Verified address that analysis reports are sent from (e.g. phishy@yourdomain.com).
+  SecurityTeamDistribution:
+    Type: String
+    Description: Comma-separated address(es) CC'd on all analyses (e.g. security@yourdomain.com).
+  SafeDomains:
+    Type: String
+    Description: Comma-separated domains allowed to submit emails for analysis (e.g. yourdomain.com).
+  AIProvider:
+    Type: String
+    AllowedValues: [anthropic, bedrock]
+    Default: bedrock
+    Description: bedrock needs no external API key; anthropic requires AnthropicApiKey.
+  AnthropicApiKey:
+    Type: String
+    NoEcho: true
+    Default: ''
+    Description: Required only when AIProvider is anthropic. Prefer storing this in Secrets Manager and referencing it via dynamic references for production.
+  DeleteEmailsAfterProcessing:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Default: 'false'
+    Description: Delete raw emails from S3 once processed.
+
+Conditions:
+  UseAnthropic: !Equals [!Ref AIProvider, anthropic]
+  UseBedrock: !Equals [!Ref AIProvider, bedrock]
+
+Resources:
+  EmailBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'phishy-emails-${AWS::AccountId}-${AWS::Region}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireRawEmails
+            Status: Enabled
+            Prefix: emails/
+            ExpirationInDays: 90
+
+  EmailBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref EmailBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowSESPuts
+            Effect: Allow
+            Principal:
+              Service: ses.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub '${EmailBucket.Arn}/emails/*'
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+
+  PhishyFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: false
+        Target: es2022
+        EntryPoints:
+          - src/index.ts
+        External:
+          - '@aws-sdk/*'
+    Properties:
+      Handler: index.handler
+      Runtime: nodejs22.x
+      Architectures: [x86_64]
+      MemorySize: 1024
+      Timeout: 90
+      Environment:
+        Variables:
+          PHISHY_AI_PROVIDER: !Ref AIProvider
+          ANTHROPIC_API_KEY: !If [UseAnthropic, !Ref AnthropicApiKey, !Ref AWS::NoValue]
+          PHISHY_BEDROCK_REGION: !If [UseBedrock, !Ref AWS::Region, !Ref AWS::NoValue]
+          S3_BUCKET_NAME: !Ref EmailBucket
+          SENDER_EMAIL: !Ref SenderEmail
+          SECURITY_TEAM_DISTRIBUTION: !Ref SecurityTeamDistribution
+          SAFE_DOMAINS: !Ref SafeDomains
+          PHISHY_AWS_REGION: !Ref AWS::Region
+          DELETE_EMAILS_AFTER_PROCESSING: !Ref DeleteEmailsAfterProcessing
+      Policies:
+        - Statement:
+            - Sid: SendReports
+              Effect: Allow
+              Action:
+                - ses:SendEmail
+                - ses:SendRawEmail
+              Resource: '*'
+            - Sid: ReadStoredEmails
+              Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:DeleteObject
+              Resource: !Sub '${EmailBucket.Arn}/emails/*'
+        - !If
+          - UseBedrock
+          - Statement:
+              - Sid: InvokeBedrock
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource:
+                  - !Sub 'arn:aws:bedrock:*::foundation-model/anthropic.claude-*'
+                  - !Sub 'arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*'
+          - !Ref AWS::NoValue
+
+  SESInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref PhishyFunction
+      Action: lambda:InvokeFunction
+      Principal: ses.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+
+  ReceiptRuleSet:
+    Type: AWS::SES::ReceiptRuleSet
+    Properties:
+      RuleSetName: phishy-rules
+
+  # S3 action MUST come before the Lambda action: SES stores the full raw
+  # email first, then the Lambda fetches it from S3 (the SES event itself
+  # carries only headers/metadata).
+  ReceiptRule:
+    Type: AWS::SES::ReceiptRule
+    DependsOn:
+      - EmailBucketPolicy
+      - SESInvokePermission
+    Properties:
+      RuleSetName: !Ref ReceiptRuleSet
+      Rule:
+        Name: phishy-analyze
+        Enabled: true
+        ScanEnabled: true
+        Recipients:
+          - !Ref RecipientEmail
+        Actions:
+          - S3Action:
+              BucketName: !Ref EmailBucket
+              ObjectKeyPrefix: emails/
+          - LambdaAction:
+              FunctionArn: !GetAtt PhishyFunction.Arn
+              InvocationType: Event
+
+Outputs:
+  FunctionArn:
+    Description: Phishy Lambda function ARN
+    Value: !GetAtt PhishyFunction.Arn
+  EmailBucketName:
+    Description: Bucket where SES stores raw emails
+    Value: !Ref EmailBucket
+  ReceiptRuleSetName:
+    Description: Rule set to activate in the SES console (Email receiving -> Rule sets -> Set as active)
+    Value: !Ref ReceiptRuleSet
+  NextSteps:
+    Description: Remaining manual steps
+    Value: !Sub 'Verify the domain of ${RecipientEmail} in SES (DNS + MX records), then set rule set "${ReceiptRuleSet}" as active. In SES sandbox mode, also verify recipient addresses.'
