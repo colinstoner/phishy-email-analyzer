@@ -47,6 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bedrock model defaults and configuration updated for inference profiles and VPC endpoints
 
 ### Fixed
+- Bedrock default model ID corrected to `global.anthropic.claude-opus-4-8`: on-demand invocation requires an inference-profile ID, and Bedrock rejects the bare `anthropic.claude-opus-4-8` form with a ValidationException (verified against a live account)
 - **Security**: `X-Forwarded-For` was trusted verbatim as the report recipient — an attacker-influenceable header (often an IP chain, never validated) could redirect analysis reports. It now requires an extractable address on a safe domain, the same bar as every other source
 - Outlook-style forwarded headers never captured the original subject: the marker pattern stopped at the literal `Subject:` before its value
 - Messages whose content could not be retrieved from S3 still reported a guessed `s3Reference`/`s3Location`, misleading cleanup and provenance; they now report none

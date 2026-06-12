@@ -17,7 +17,7 @@ const AnthropicConfigSchema = z.object({
 
 const BedrockConfigSchema = z.object({
   region: z.string().default('us-east-1'),
-  modelId: z.string().default('anthropic.claude-opus-4-8'),
+  modelId: z.string().default('global.anthropic.claude-opus-4-8'),
   maxTokens: z.number().positive().default(4096),
   timeout: z.number().positive().default(60000),
 });

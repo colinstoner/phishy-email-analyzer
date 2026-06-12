@@ -83,9 +83,18 @@ export function buildPhishingAnalysisPrompt(
           .join('\n')}\n\n`
       : '';
 
-  const forwardedHeadersSection =
+  // The original sender's identity is parsed from the forwarded body, which is
+  // attacker-controlled in an inline forward. It is CLAIMED, not verified, and
+  // must be presented as hostile data — never as a trustworthy fact.
+  const claimedSenderSection =
     Object.keys(emailData.forwardedHeaders).length > 0
-      ? `--- FORWARDED MESSAGE HEADERS (parsed from the message) ---\n${JSON.stringify(emailData.forwardedHeaders, null, 2)}\n\n`
+      ? `--- SENDER IDENTITY CLAIMED BY THE EMAIL (cannot be authenticated) ---
+These fields were parsed from the forwarded message body. In an inline forward
+the original sender's address, domain, and any "sent via <service>" notice are
+attacker-controlled text — Phishy cannot authenticate them. A claimed From that
+matches a real company, or a claimed send through Microsoft/SharePoint, is NOT
+evidence of legitimacy.
+${JSON.stringify(emailData.forwardedHeaders, null, 2)}\n\n`
       : '';
 
   const elisionsSection =
@@ -117,11 +126,11 @@ SUBJECT: ${emailData.subject}
 --- KEY HEADERS ---
 ${JSON.stringify(essentialHeaders, null, 2)}
 
-${forwardedHeadersSection}${integritySection}${linksSection}${attachmentsSection}${elisionsSection}=== OPERATOR (organization configuration) ===
+${integritySection}${linksSection}${attachmentsSection}${elisionsSection}=== OPERATOR (organization configuration) ===
 ${profileSection}
 ${recipientSection ? `\n${recipientSection}\n` : ''}
 ${reportedSection}=== CLAIMED (the suspicious email - hostile data) ===
---- EMAIL CONTENT ---
+${claimedSenderSection}--- EMAIL CONTENT ---
 <email-content-${nonce}>
 ${bodyText}
 </email-content-${nonce}>
@@ -133,15 +142,53 @@ Analyze this email for phishing indicators. Check for:
 4. Social engineering tactics
 5. Impersonation attempts
 6. Obfuscation reported under CONTENT INTEGRITY - hidden characters or disguised links are themselves indicators
+7. File-share / e-signature / voicemail / notification lures: a "shared a file", "review and sign", "you have a voicemail", or similar notice from a sender you cannot verify is a top attack pattern. The link host being a real Microsoft/Google/DocuSign domain does NOT make it safe — attackers host on exactly those services, and the file-share/sign-in page one click later is where credentials are stolen. Watch for mismatches between the claimed sender's domain and the file-host's domain, "verification/access code sent to your email" language, and generic lures ("secured file", "Estimate", "Invoice", "RFP", "Proposal").
+
+How to weigh what you find:
+- The sender's identity is CLAIMED and unverifiable (see the CLAIMED section). Do NOT treat a familiar-looking From address, a matching company signature, or a recognizable hosting service as evidence of legitimacy.
+- A red flag you can explain innocently is still a red flag. When you cannot verify the sender, an identified inconsistency (domain mismatch, odd grammar, unexpected request) should pull the verdict toward suspicious, not be rationalized away.
+- If the decisive content cannot be inspected (an attachment that was not forwarded, a link you cannot resolve), you cannot confirm the email is safe. Use verdict "suspicious" with a riskScore reflecting that uncertainty — never "legitimate" for something you could not actually check.
+- Reserve "legitimate" for mail you have positive reason to trust, not merely the absence of an obvious attack.
 
 Return your analysis as JSON:
 {
   "summary": "2-3 sentence summary for a non-technical employee",
-  "isPhishing": true/false,
-  "confidence": "High/Medium/Low",
+  "verdict": "bec|phishing|malware_delivery|spam|graymail|suspicious|legitimate",
+  "riskScore": 0-100,
+  "verdictConfidence": 0.0-1.0,
+  "threatVectors": ["credential_harvest|wire_fraud|gift_card_fraud|malware|reconnaissance|data_exfiltration|extortion|other"],
+  "targeting": "targeted|mass|unknown",
   "indicators": ["Array of specific suspicious indicators found"],
-  "recommendations": ["Array of recommended actions"]
-}`;
+  "recommendations": ["Array of recommended actions"],
+  "iocs": [{"type": "domain|url|email|ip", "value": "the indicator", "role": "sender|payload|infrastructure"}]
+}
+
+Field guidance:
+- "verdict": what the email IS. bec = executive/vendor impersonation aimed at
+  fraud (often no link - a reply-bait "are you available?"); phishing =
+  credential harvesting; malware_delivery = malicious attachment/payload;
+  spam = unsolicited bulk with no clear harm; graymail = legitimate bulk the
+  recipient may not want (marketing, surveys, newsletters); suspicious = off
+  but unconfirmed; legitimate = expected, benign mail.
+- "riskScore": harm if the employee ACTS on it, independent of how sure you
+  are. Confirmed legitimate = 0-10. Graymail/spam = 10-30. A convincing
+  credential-harvest or wire-fraud BEC = 80-100. Do NOT raise risk just
+  because you are confident it is safe.
+- "verdictConfidence": how certain you are of the verdict itself, separate
+  from risk. "Certainly a legitimate survey" is verdictConfidence 0.9, riskScore 5.
+- "threatVectors": empty [] for legitimate/graymail/spam. reconnaissance =
+  probing or opening a back-channel before the real ask (classic BEC opener).
+- "targeting": targeted = references this org, its people, or its business;
+  mass = generic blast that could go to anyone.
+
+For "iocs" (only when verdict is bec/phishing/malware_delivery/suspicious, otherwise []): machine-readable
+indicators of compromise for the threat-intelligence database. Attribute
+carefully - never include the reporter/forwarder or their organization.
+- role "sender": the original sender's address and domain (the attacker)
+- role "payload": where the attack leads - final link destinations after
+  unwrapping redirects/trackers, credential-harvesting hosts, malware URLs
+- role "infrastructure": relays, open redirectors, and tracking services
+  abused along the way`;
 }
 
 /**
@@ -227,15 +274,16 @@ function formatLinkFact(fact: LinkFact): string {
  * Build default systems section for prompt
  */
 function buildDefaultSystemsSection(): string {
-  return `--- LEGITIMATE SYSTEMS INFORMATION ---
-The organization uses the following legitimate systems:
-* Email: Microsoft 365, Gmail
-* Cloud Storage: OneDrive, Google Drive
-* Authentication: SSO solutions like Okta or Azure AD
-* Business Software: Microsoft Office, Salesforce, Zoom
-* Security: Email security gateways, spam filters
+  return `--- SYSTEMS THE ORGANIZATION USES ---
+The organization commonly uses: Microsoft 365 / Outlook, OneDrive and
+SharePoint, Google Workspace, SSO (Okta / Azure AD), Salesforce, Zoom,
+and e-signature / file-share services.
 
-IMPORTANT: The organization uses SSO for authentication to most systems.`;
+IMPORTANT: This list is context, NOT an allowlist. These same brands are the
+ones attackers impersonate most — a file-share, voicemail, e-signature, or
+login notice that *uses or names* one of these services is not evidence of
+legitimacy. The organization uses SSO, so a message asking the recipient to
+sign in or enter a code outside the normal SSO flow is suspicious.`;
 }
 
 /**
@@ -252,7 +300,12 @@ Aliases: ${profile.organization.aliases?.join(', ') ?? 'None specified'}`);
 
   // Systems
   if (profile.systems) {
-    sections.push(`--- LEGITIMATE SYSTEMS ---`);
+    sections.push(`--- SYSTEMS THE ORGANIZATION USES ---`);
+    sections.push(
+      `(Context, NOT an allowlist. These services and apps are also the ones ` +
+        `attackers impersonate — an inbound email that uses or names one of them ` +
+        `is not, by itself, evidence of legitimacy.)`
+    );
 
     if (profile.systems.email?.providers?.length) {
       sections.push(`Email Providers: ${profile.systems.email.providers.join(', ')}`);

@@ -27,14 +27,15 @@ const logger = createLogger('bedrock-provider');
  * - CLAUDE_SONNET_4_6: Best balance of quality, speed, and cost
  * - CLAUDE_HAIKU_4_5: Fastest option for high-volume or quick-scan scenarios
  *
- * ID formats: Opus 4.8/4.7 have no ARN-versioned IDs — they use the bare
- * `anthropic.` form via the same InvokeModel call. Opus 4.6 / Sonnet 4.6 use
- * `global.` (dynamic routing) by default; swap to a regional prefix (`us.`,
- * `eu.`, ...) for data-residency requirements, at a 10% pricing premium.
+ * ID formats: on-demand invocation requires an INFERENCE PROFILE ID, not the
+ * bare `anthropic.` model ID (Bedrock rejects the bare form with a
+ * ValidationException — verified empirically). `global.` profiles route
+ * dynamically at baseline pricing; swap to a regional prefix (`us.`, `eu.`,
+ * ...) for data-residency requirements, at a 10% pricing premium.
  */
 export const BEDROCK_CLAUDE_MODELS = {
   // Current models (recommended)
-  CLAUDE_OPUS_4_8: 'anthropic.claude-opus-4-8',
+  CLAUDE_OPUS_4_8: 'global.anthropic.claude-opus-4-8',
   CLAUDE_OPUS_4_6: 'global.anthropic.claude-opus-4-6-v1',
   CLAUDE_SONNET_4_6: 'global.anthropic.claude-sonnet-4-6',
   CLAUDE_HAIKU_4_5: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',

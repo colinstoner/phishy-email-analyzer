@@ -92,6 +92,62 @@ export interface TokenUsage {
 }
 
 /**
+ * An indicator of compromise nominated by the AI analysis itself.
+ * Regex extraction misses context (which domain is the attacker vs the
+ * victim, where a redirect chain really lands); the model does not.
+ */
+export interface AINominatedIOC {
+  type: 'domain' | 'url' | 'email' | 'ip';
+  value: string;
+  /** sender = who sent the phish, payload = where its links lead, infrastructure = relays/trackers in between */
+  role: 'sender' | 'payload' | 'infrastructure';
+}
+
+/**
+ * What kind of email this is. Distinct from risk: a verdict says what the
+ * message *is*, riskScore says how much damage acting on it would cause.
+ */
+export type ThreatVerdict =
+  | 'bec' // business email compromise / executive impersonation
+  | 'phishing' // credential harvesting
+  | 'malware_delivery' // malicious attachment or payload link
+  | 'spam' // unsolicited bulk, no clear harm
+  | 'graymail' // legitimate bulk the user may not want (marketing, surveys)
+  | 'suspicious' // can't confirm malicious, but off
+  | 'legitimate';
+
+/** The mechanism by which a malicious email causes harm */
+export type ThreatVector =
+  | 'credential_harvest'
+  | 'wire_fraud'
+  | 'gift_card_fraud'
+  | 'malware'
+  | 'reconnaissance' // probing / establishing a back-channel before the ask
+  | 'data_exfiltration'
+  | 'extortion'
+  | 'other';
+
+/** Whether the email was aimed at this org/person or sent en masse */
+export type Targeting = 'targeted' | 'mass' | 'unknown';
+
+/** Verdicts that count as malicious for downstream isPhishing-style gating */
+export const MALICIOUS_VERDICTS: readonly ThreatVerdict[] = ['bec', 'phishing', 'malware_delivery'];
+
+/**
+ * The structured verdict the model produces. Risk and confidence are separate
+ * axes: a confidently-legitimate email is high confidence, zero risk.
+ */
+export interface ThreatAssessment {
+  verdict: ThreatVerdict;
+  /** Harm if the recipient acts on the email, 0 (none) – 100 (catastrophic) */
+  riskScore: number;
+  /** Model's certainty in the verdict, 0.0 – 1.0 */
+  verdictConfidence: number;
+  threatVectors: ThreatVector[];
+  targeting: Targeting;
+}
+
+/**
  * AI analysis result structure
  */
 export interface AnalysisResult {
@@ -100,6 +156,10 @@ export interface AnalysisResult {
   confidence: ConfidenceLevel;
   indicators: string[];
   recommendations: string[];
+  /** Structured verdict (next-gen). isPhishing/confidence are derived from it. */
+  assessment?: ThreatAssessment;
+  /** Structured IOCs the model identified during analysis */
+  iocs?: AINominatedIOC[];
   rawResponse?: string;
   processingTimeMs?: number;
   provider?: string;

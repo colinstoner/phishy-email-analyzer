@@ -6,7 +6,7 @@ import { emitAIUsageMetric, AIUsageMetric } from '../../../src/utils/metrics';
 
 const SAMPLE: AIUsageMetric = {
   provider: 'bedrock',
-  model: 'anthropic.claude-opus-4-8',
+  model: 'global.anthropic.claude-opus-4-8',
   inputTokens: 12000,
   outputTokens: 800,
   totalTokens: 12800,
@@ -46,7 +46,7 @@ describe('emitAIUsageMetric', () => {
 
     const doc = JSON.parse(stdoutSpy.mock.calls[0][0] as string);
     expect(doc.Provider).toBe('bedrock');
-    expect(doc.Model).toBe('anthropic.claude-opus-4-8');
+    expect(doc.Model).toBe('global.anthropic.claude-opus-4-8');
     expect(doc.AnalysisCount).toBe(1);
     expect(doc.InputTokens).toBe(12000);
     expect(doc.OutputTokens).toBe(800);

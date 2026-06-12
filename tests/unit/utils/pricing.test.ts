@@ -24,7 +24,7 @@ describe('estimateCostUsd', () => {
     const cost = estimateCostUsd('global.anthropic.claude-sonnet-4-6', 1_000_000, 0);
     expect(cost).toBeCloseTo(3, 6);
 
-    const bareOpus = estimateCostUsd('anthropic.claude-opus-4-8', 1_000_000, 0);
+    const bareOpus = estimateCostUsd('global.anthropic.claude-opus-4-8', 1_000_000, 0);
     expect(bareOpus).toBeCloseTo(5, 6);
   });
 

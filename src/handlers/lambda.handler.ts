@@ -33,8 +33,11 @@ import {
   CampaignAlertService,
   computeCampaignSignature,
   buildCachedAnalysisResult,
+  fuseRisk,
+  FusionSignals,
 } from '../services/intelligence';
 import { extractIOCs, IOCSourceContext } from '../services/intelligence/ioc.extractor';
+import { ThreatIndicatorRecord } from '../services/intelligence/database.service';
 
 const logger = createLogger('lambda-handler');
 
@@ -461,20 +464,61 @@ async function processEmailEvent(
     });
   }
 
+  // Fuse the model's verdict with Phishy's own intelligence (known
+  // indicators, active campaigns, security-team rulings) into the final risk.
+  const messageId = msg.messageId ?? `${Date.now()}-${Math.random().toString(36).substring(7)}`;
+  const iocSourceContext: IOCSourceContext = {
+    messageId,
+    reporterEmail: emailData.from_email,
+    reporterDomain: senderDomain,
+    subject: emailData.subject,
+  };
+  const extractedIOCs = services.intelligenceDb
+    ? extractIOCs(
+        emailData,
+        analysis,
+        { safeDomains: config.email.safeDomains, safeSenders: config.email.safeSenders },
+        iocSourceContext
+      )
+    : [];
+
+  const fusionSignals = services.intelligenceDb
+    ? await gatherFusionSignals(
+        services.intelligenceDb,
+        extractedIOCs,
+        campaignSignature,
+        isSafelistUser
+      )
+    : {};
+  const riskDecision = fuseRisk(analysis, fusionSignals);
+  if (riskDecision.reasons.length) {
+    logger.info('Risk fusion applied', {
+      verdict: riskDecision.verdict,
+      riskScore: riskDecision.riskScore,
+      riskLevel: riskDecision.riskLevel,
+      reasons: riskDecision.reasons,
+    });
+  }
+
+  // The fused verdict is authoritative for downstream gating (IOC storage,
+  // campaign detection) and the report.
+  analysis.isPhishing = riskDecision.isPhishing;
+  analysis.confidence = riskDecision.confidence;
+
   // Store analysis in intelligence database (only for enterprise users, not safelist)
   let storedAnalysisId: string | undefined;
   if (services.intelligenceDb && !isSafelistUser) {
     try {
-      const messageId = msg.messageId ?? `${Date.now()}-${Math.random().toString(36).substring(7)}`;
-
       const analysisId = await services.intelligenceDb.storeAnalysis({
         messageId,
         fromEmail: emailData.from_email,
         fromDomain: senderDomain,
         subject: emailData.subject,
-        isPhishing: analysis.isPhishing,
-        confidenceScore: normalizeConfidenceToNumber(analysis.confidence),
-        riskLevel: mapConfidenceToRiskLevel(analysis.confidence),
+        isPhishing: riskDecision.isPhishing,
+        confidenceScore: riskDecision.riskScore / 100,
+        riskLevel: riskDecision.riskLevel,
+        verdict: riskDecision.verdict,
+        riskScore: riskDecision.riskScore,
         analysisResult: analysis,
         indicators: analysis.indicators ?? [],
         vipImpersonationDetected: false,
@@ -510,23 +554,17 @@ async function processEmailEvent(
         }
       }
 
-      // Extract and store IOCs if phishing detected
-      if (analysis.isPhishing) {
-        // Build source context for IOC provenance tracking
-        const sourceContext: IOCSourceContext = {
-          analysisId,
-          messageId,
-          fromEmail: emailData.from_email,
-          fromDomain: senderDomain,
-          subject: emailData.subject,
-        };
+      // Store the IOCs already extracted above, but only for a malicious
+      // verdict (the fused isPhishing). Stamp them with this analysis ID.
+      if (riskDecision.isPhishing) {
+        logger.info('Extracted IOCs', { count: extractedIOCs.length, analysisId });
 
-        const iocs = extractIOCs(emailData, analysis, {}, sourceContext);
-        logger.info('Extracted IOCs', { count: iocs.length, analysisId });
-
-        for (const ioc of iocs) {
+        for (const ioc of extractedIOCs) {
           try {
-            await services.intelligenceDb.upsertIndicator(ioc);
+            await services.intelligenceDb.upsertIndicator({
+              ...ioc,
+              metadata: { ...ioc.metadata, sourceAnalysisId: analysisId },
+            });
           } catch (iocError) {
             logger.warn('Failed to store IOC', {
               type: ioc.indicatorType,
@@ -543,8 +581,9 @@ async function processEmailEvent(
   }
 
   // Track for campaign detection if phishing detected (skip for safelist users)
-  if (analysis.isPhishing && services.campaignService && !isSafelistUser) {
-    const riskLevel = mapConfidenceToRiskLevel(analysis.confidence);
+  if (riskDecision.isPhishing && services.campaignService && !isSafelistUser) {
+    // Campaign tracking has no 'safe' tier; floor the fused level at 'low'.
+    const riskLevel = riskDecision.riskLevel === 'safe' ? 'low' : riskDecision.riskLevel;
 
     try {
       const alertSent = await services.campaignService.processDetection(
@@ -575,9 +614,15 @@ async function processEmailEvent(
 
     // Include the Analysis ID in the report so security-team replies can be
     // matched back to this analysis (the email command channel)
-    const reportOptions: ReportOptions | undefined = storedAnalysisId
-      ? { analysisId: storedAnalysisId }
-      : undefined;
+    const reportOptions: ReportOptions = {
+      ...(storedAnalysisId ? { analysisId: storedAnalysisId } : {}),
+      risk: {
+        verdict: riskDecision.verdict,
+        riskScore: riskDecision.riskScore,
+        riskLevel: riskDecision.riskLevel,
+        reasons: riskDecision.reasons,
+      },
+    };
 
     const emailResult = await services.sesNotifier.sendAnalysisReport(
       recipient,
@@ -721,29 +766,49 @@ function isValidEmailRecipient(email: string): boolean {
 }
 
 /**
- * Map analysis confidence to risk level for campaign tracking
+ * Gather the intelligence signals the risk-fusion layer needs: which of this
+ * email's indicators are already known threats, and any active campaign it
+ * matches. The security-team verdict, when present, rides on the campaign
+ * cache hit, so it is not re-fetched here.
  */
-function mapConfidenceToRiskLevel(confidence: string): 'critical' | 'high' | 'medium' | 'low' {
-  const normalized = confidence.toLowerCase();
-  if (normalized.includes('very high')) return 'critical';
-  if (normalized.includes('high')) return 'high';
-  if (normalized.includes('medium')) return 'medium';
-  return 'low';
-}
+async function gatherFusionSignals(
+  db: IntelligenceDatabaseService,
+  extractedIOCs: ThreatIndicatorRecord[],
+  campaignSignature: string | undefined,
+  isSafelistUser: boolean
+): Promise<FusionSignals> {
+  const matchedIndicators: ThreatIndicatorRecord[] = [];
 
-/**
- * Convert confidence string to numeric score (0-1 scale for database storage)
- */
-function normalizeConfidenceToNumber(confidence: string): number {
-  const normalized = confidence.toLowerCase();
-  if (normalized.includes('very high')) return 0.95;
-  if (normalized.includes('high')) return 0.85;
-  if (normalized.includes('medium')) return 0.6;
-  if (normalized.includes('low')) return 0.3;
-  // Try to parse as number if it's already numeric (assume 0-100 scale)
-  const parsed = parseInt(confidence, 10);
-  if (!isNaN(parsed)) return Math.min(1, Math.max(0, parsed / 100));
-  return 0.5; // Default to medium
+  // Look up this email's candidate indicators against the store, by type.
+  const byType = new Map<ThreatIndicatorRecord['indicatorType'], string[]>();
+  for (const ioc of extractedIOCs) {
+    const list = byType.get(ioc.indicatorType) ?? [];
+    list.push(ioc.indicatorValue);
+    byType.set(ioc.indicatorType, list);
+  }
+  for (const [type, values] of byType) {
+    try {
+      matchedIndicators.push(...(await db.lookupIndicators(type, values)));
+    } catch (error) {
+      logger.warn('Indicator lookup failed during risk fusion', {
+        type,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  let campaign = null;
+  if (campaignSignature) {
+    try {
+      campaign = await db.getCampaignBySignature(campaignSignature);
+    } catch (error) {
+      logger.warn('Campaign lookup failed during risk fusion', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  return { matchedIndicators, campaign, isSafeSender: isSafelistUser };
 }
 
 /**

@@ -1,10 +1,15 @@
 /**
  * IOC (Indicator of Compromise) Extractor
  * Extracts threat indicators from emails and analysis results
+ *
+ * Attribution model: Phishy receives *forwarded* emails, so the envelope
+ * sender is the reporter (a colleague), never the attacker. Sender-based
+ * indicators come exclusively from the original sender parsed out of the
+ * forwarded content; the reporter is recorded as provenance metadata only.
  */
 
 import { createHash } from 'crypto';
-import { ExtractedEmailData, AnalysisResult } from '../../types';
+import { ExtractedEmailData, AnalysisResult, AINominatedIOC } from '../../types';
 import { ThreatIndicatorRecord } from './database.service';
 import { createLogger } from '../../utils/logger';
 import { extractUrls, extractDomain } from '../../utils/validation';
@@ -27,6 +32,26 @@ const HASH_PATTERNS = {
 };
 
 /**
+ * Query parameters that commonly carry a redirect destination
+ */
+const REDIRECT_PARAM_KEYS = [
+  'url',
+  'u',
+  'q',
+  'r',
+  'link',
+  'redirect',
+  'redirect_url',
+  'redirect_uri',
+  'target',
+  'dest',
+  'destination',
+  'next',
+  'goto',
+  'continue',
+];
+
+/**
  * Options for IOC extraction
  */
 export interface IOCExtractionOptions {
@@ -36,16 +61,20 @@ export interface IOCExtractionOptions {
   extractHashes?: boolean;
   extractEmails?: boolean;
   minConfidence?: number;
+  /** Configured allowlists; merged with the built-in big-provider baseline */
+  safeDomains?: string[];
+  safeSenders?: string[];
 }
 
 /**
  * Source context for IOC provenance tracking
  */
 export interface IOCSourceContext {
-  analysisId: string;
+  analysisId?: string;
   messageId: string;
-  fromEmail: string;
-  fromDomain: string;
+  /** Who forwarded the email to Phishy — provenance only, never an indicator */
+  reporterEmail: string;
+  reporterDomain: string;
   subject: string;
 }
 
@@ -78,152 +107,295 @@ export function extractIOCs(
   // Build base metadata for provenance tracking
   const baseMetadata: Record<string, unknown> = {};
   if (sourceContext) {
-    baseMetadata.sourceAnalysisId = sourceContext.analysisId;
+    if (sourceContext.analysisId) baseMetadata.sourceAnalysisId = sourceContext.analysisId;
     baseMetadata.sourceMessageId = sourceContext.messageId;
-    baseMetadata.sourceFromEmail = sourceContext.fromEmail;
-    baseMetadata.sourceFromDomain = sourceContext.fromDomain;
+    baseMetadata.reportedBy = sourceContext.reporterEmail;
+    baseMetadata.reportedByDomain = sourceContext.reporterDomain;
     baseMetadata.sourceSubject = sourceContext.subject.substring(0, 100);
   }
+
+  // Values that must never become indicators, regardless of allowlists
+  const exclusions = buildExclusions(opts, sourceContext);
 
   // Combine all text content for analysis
   const allContent = [emailData.text, emailData.html, emailData.subject, ...emailData.links].join(
     ' '
   );
 
-  // Extract URLs
+  // Resolve every URL's redirect chain once; URL and domain extraction share it
+  const urlChains = opts.extractUrls || opts.extractDomains ? resolveUrlChains(allContent) : [];
+
   if (opts.extractUrls) {
-    const urls = extractUrlIOCs(allContent, baseConfidence, severity, now, baseMetadata);
-    indicators.push(...urls);
-  }
-
-  // Extract domains
-  if (opts.extractDomains) {
-    const domains = extractDomainIOCs(
-      emailData,
-      allContent,
-      baseConfidence,
-      severity,
-      now,
-      baseMetadata
+    indicators.push(
+      ...extractUrlIOCs(urlChains, baseConfidence, severity, now, baseMetadata, exclusions)
     );
-    indicators.push(...domains);
   }
 
-  // Extract IPs
+  if (opts.extractDomains) {
+    indicators.push(
+      ...extractDomainIOCs(
+        emailData,
+        urlChains,
+        baseConfidence,
+        severity,
+        now,
+        baseMetadata,
+        exclusions
+      )
+    );
+  }
+
   if (opts.extractIPs) {
-    const ips = extractIPIOCs(allContent, baseConfidence, severity, now, baseMetadata);
-    indicators.push(...ips);
+    indicators.push(...extractIPIOCs(allContent, baseConfidence, severity, now, baseMetadata));
   }
 
-  // Extract hashes
   if (opts.extractHashes) {
-    const hashes = extractHashIOCs(allContent, baseConfidence, severity, now, baseMetadata);
-    indicators.push(...hashes);
+    indicators.push(...extractHashIOCs(allContent, baseConfidence, severity, now, baseMetadata));
   }
 
-  // Extract suspicious email addresses
   if (opts.extractEmails) {
-    const emails = extractEmailIOCs(emailData, baseConfidence, severity, now, baseMetadata);
-    indicators.push(...emails);
+    indicators.push(
+      ...extractEmailIOCs(emailData, baseConfidence, severity, now, baseMetadata, exclusions)
+    );
   }
 
-  // Filter by minimum confidence
-  const filtered = indicators.filter(i => i.confidenceScore >= (opts.minConfidence ?? 0));
+  // Merge indicators the AI nominated from full context (structured output)
+  if (analysis.iocs?.length) {
+    indicators.push(
+      ...extractAINominatedIOCs(analysis.iocs, severity, now, baseMetadata, exclusions)
+    );
+  }
+
+  // Dedupe by type+value, keeping the highest-confidence occurrence, then
+  // filter by minimum confidence
+  const deduped = dedupeIndicators(indicators);
+  const filtered = deduped.filter(i => i.confidenceScore >= (opts.minConfidence ?? 0));
 
   logger.info('Extracted IOCs from email', {
     total: indicators.length,
     filtered: filtered.length,
     isPhishing: analysis.isPhishing,
     hasSourceContext: !!sourceContext,
+    aiNominated: analysis.iocs?.length ?? 0,
   });
 
   return filtered;
 }
 
 /**
- * Extract URL indicators
+ * Exclusion set: configured safe senders/domains plus the reporter
+ */
+interface Exclusions {
+  safeDomains: string[];
+  safeSenders: string[];
+}
+
+function buildExclusions(opts: IOCExtractionOptions, sourceContext?: IOCSourceContext): Exclusions {
+  const safeDomains = (opts.safeDomains ?? []).map(d => d.toLowerCase());
+  const safeSenders = (opts.safeSenders ?? []).map(s => s.toLowerCase());
+  if (sourceContext) {
+    safeDomains.push(sourceContext.reporterDomain.toLowerCase());
+    safeSenders.push(sourceContext.reporterEmail.toLowerCase());
+  }
+  return { safeDomains, safeSenders };
+}
+
+/**
+ * A URL and the redirect chain it unwraps to (chain[0] is the original URL,
+ * the last element is the final destination)
+ */
+interface UrlChain {
+  chain: string[];
+}
+
+function resolveUrlChains(content: string): UrlChain[] {
+  return extractUrls(content).map(url => ({ chain: unwrapRedirectChain(url) }));
+}
+
+/**
+ * Follow redirect-style query parameters (and JWT tracker payloads) to the
+ * final destination without making any network requests
+ */
+function unwrapRedirectChain(url: string, maxDepth = 4): string[] {
+  const chain = [url];
+  let current = url;
+
+  for (let i = 0; i < maxDepth; i++) {
+    const next = extractEmbeddedUrl(current);
+    if (!next || chain.includes(next)) break;
+    chain.push(next);
+    current = next;
+  }
+
+  return chain;
+}
+
+function extractEmbeddedUrl(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+
+    for (const key of REDIRECT_PARAM_KEYS) {
+      const value = parsed.searchParams.get(key);
+      if (value && /^https?:\/\//i.test(value)) {
+        return value;
+      }
+    }
+
+    // Tracker links often stash the destination inside a JWT payload
+    for (const [, value] of parsed.searchParams) {
+      if (/^[\w-]+\.[\w-]+\.[\w-]+$/.test(value)) {
+        const fromJwt = extractUrlFromJwtPayload(value);
+        if (fromJwt) return fromJwt;
+      }
+    }
+  } catch {
+    // Not a parseable URL
+  }
+
+  return null;
+}
+
+function extractUrlFromJwtPayload(token: string): string | null {
+  try {
+    const payload = JSON.parse(
+      Buffer.from(token.split('.')[1], 'base64').toString('utf8')
+    ) as Record<string, unknown>;
+    for (const value of Object.values(payload)) {
+      if (typeof value === 'string' && /^https?:\/\//i.test(value)) {
+        return value;
+      }
+    }
+  } catch {
+    // Not a decodable JWT
+  }
+  return null;
+}
+
+/**
+ * Extract URL indicators. The original URL is always the indicator value;
+ * when it unwraps to a different final destination, that final URL becomes
+ * its own (higher-value) indicator and the chain is kept as metadata.
  */
 function extractUrlIOCs(
-  content: string,
+  urlChains: UrlChain[],
   baseConfidence: number,
   severity: ThreatIndicatorRecord['severity'],
   now: Date,
-  baseMetadata: Record<string, unknown>
+  baseMetadata: Record<string, unknown>,
+  exclusions: Exclusions
 ): ThreatIndicatorRecord[] {
-  const urls = extractUrls(content);
   const indicators: ThreatIndicatorRecord[] = [];
 
-  for (const url of urls) {
-    // Skip obviously safe URLs
-    if (isSafeUrl(url)) continue;
+  for (const { chain } of urlChains) {
+    const original = chain[0];
+    const final = chain[chain.length - 1];
 
-    // Calculate confidence based on URL characteristics
-    let confidence = baseConfidence;
+    if (!isSafeUrl(original, exclusions)) {
+      let confidence = baseConfidence;
+      if (containsSuspiciousUrlPatterns(original)) {
+        confidence = Math.min(confidence + 0.2, 1.0);
+      }
 
-    // Increase confidence for suspicious patterns
-    if (containsSuspiciousUrlPatterns(url)) {
-      confidence = Math.min(confidence + 0.2, 1.0);
+      indicators.push({
+        indicatorType: 'url',
+        indicatorValue: original,
+        indicatorHash: hashValue('url', original),
+        confidenceScore: confidence,
+        severity,
+        timesSeen: 1,
+        firstSeenAt: now,
+        lastSeenAt: now,
+        isActive: true,
+        metadata: {
+          ...baseMetadata,
+          extractionContext: 'url_in_content',
+          ...(chain.length > 1 ? { redirectChain: chain, finalUrl: final } : {}),
+        },
+      });
     }
 
-    indicators.push({
-      indicatorType: 'url',
-      indicatorValue: url,
-      indicatorHash: hashValue('url', url),
-      confidenceScore: confidence,
-      severity,
-      timesSeen: 1,
-      firstSeenAt: now,
-      lastSeenAt: now,
-      isActive: true,
-      metadata: { ...baseMetadata, extractionContext: 'url_in_content' },
-    });
+    if (final !== original && !isSafeUrl(final, exclusions)) {
+      indicators.push({
+        indicatorType: 'url',
+        indicatorValue: final,
+        indicatorHash: hashValue('url', final),
+        confidenceScore: Math.min(baseConfidence + 0.2, 1.0),
+        severity,
+        timesSeen: 1,
+        firstSeenAt: now,
+        lastSeenAt: now,
+        isActive: true,
+        metadata: { ...baseMetadata, extractionContext: 'final_url', unwrappedFrom: original },
+      });
+    }
   }
 
   return indicators;
 }
 
 /**
- * Extract domain indicators
+ * Extract domain indicators with role-based severity:
+ * - the original sender's domain and final URL destinations carry the
+ *   analysis-derived severity
+ * - redirect intermediaries (trackers, open redirectors) are low severity
  */
 function extractDomainIOCs(
   emailData: ExtractedEmailData,
-  content: string,
+  urlChains: UrlChain[],
   baseConfidence: number,
   severity: ThreatIndicatorRecord['severity'],
   now: Date,
-  baseMetadata: Record<string, unknown>
+  baseMetadata: Record<string, unknown>,
+  exclusions: Exclusions
 ): ThreatIndicatorRecord[] {
-  const domainContexts = new Map<string, string>();
-  const indicators: ThreatIndicatorRecord[] = [];
+  // domain -> {context, severity, confidence}; first writer wins except that
+  // higher-value contexts (sender, final URL) overwrite intermediaries
+  const domainRoles = new Map<
+    string,
+    { context: string; severity: ThreatIndicatorRecord['severity']; confidence: number }
+  >();
 
-  // Extract from sender
-  const senderDomain = extractDomain(emailData.from_email);
-  if (senderDomain && !isSafeDomain(senderDomain)) {
-    domainContexts.set(senderDomain, 'sender_domain');
+  const assign = (
+    domain: string | null,
+    context: string,
+    sev: ThreatIndicatorRecord['severity'],
+    confidence: number
+  ): void => {
+    if (!domain) return;
+    const lower = domain.toLowerCase();
+    // IPs in URL hosts are handled by the IP extractor, not as domains
+    if (new RegExp(IP_REGEX.source).test(lower) || isSafeDomain(lower, exclusions)) return;
+    const existing = domainRoles.get(lower);
+    if (!existing || existing.context === 'redirect_intermediary') {
+      domainRoles.set(lower, { context, severity: sev, confidence });
+    }
+  };
+
+  // Original sender (the attacker), parsed from the forwarded content —
+  // never the reporter who forwarded the email to Phishy
+  const originalSenderAddress = parseEmailAddress(emailData.original_sender);
+  if (originalSenderAddress) {
+    const senderDomain = extractDomain(originalSenderAddress);
+    assign(senderDomain, 'sender_domain', severity, Math.min(baseConfidence + 0.1, 1.0));
   }
 
-  // Extract from URLs
-  const urls = extractUrls(content);
-  for (const url of urls) {
-    try {
-      const urlObj = new URL(url);
-      const domain = urlObj.hostname.toLowerCase();
-      if (!isSafeDomain(domain)) {
-        // Don't overwrite sender_domain context if already set
-        if (!domainContexts.has(domain)) {
-          domainContexts.set(domain, 'url_domain');
-        }
-      }
-    } catch {
-      // Skip invalid URLs
+  for (const { chain } of urlChains) {
+    const finalHost = hostnameOf(chain[chain.length - 1]);
+    assign(finalHost, 'final_url_domain', severity, baseConfidence);
+
+    for (const intermediate of chain.slice(0, -1)) {
+      assign(
+        hostnameOf(intermediate),
+        'redirect_intermediary',
+        'low',
+        Math.max(baseConfidence - 0.2, 0.3)
+      );
     }
   }
 
-  // Create indicators
-  for (const [domain, context] of domainContexts) {
-    let confidence = baseConfidence;
-
-    // Increase confidence for suspicious domains
+  const indicators: ThreatIndicatorRecord[] = [];
+  for (const [domain, role] of domainRoles) {
+    let confidence = role.confidence;
     if (isSuspiciousDomain(domain)) {
       confidence = Math.min(confidence + 0.2, 1.0);
     }
@@ -233,12 +405,12 @@ function extractDomainIOCs(
       indicatorValue: domain,
       indicatorHash: hashValue('domain', domain),
       confidenceScore: confidence,
-      severity,
+      severity: role.severity,
       timesSeen: 1,
       firstSeenAt: now,
       lastSeenAt: now,
       isActive: true,
-      metadata: { ...baseMetadata, extractionContext: context },
+      metadata: { ...baseMetadata, extractionContext: role.context },
     });
   }
 
@@ -316,42 +488,118 @@ function extractHashIOCs(
 }
 
 /**
- * Extract email address indicators
+ * Extract email address indicators from the original (forwarded) sender
  */
 function extractEmailIOCs(
   emailData: ExtractedEmailData,
   baseConfidence: number,
   severity: ThreatIndicatorRecord['severity'],
   now: Date,
-  baseMetadata: Record<string, unknown>
+  baseMetadata: Record<string, unknown>,
+  exclusions: Exclusions
 ): ThreatIndicatorRecord[] {
   const indicators: ThreatIndicatorRecord[] = [];
 
-  // Add sender if suspicious
-  const senderEmail = emailData.from_email.toLowerCase();
-  if (senderEmail && !isSafeEmail(senderEmail)) {
+  const originalSender = parseEmailAddress(emailData.original_sender)?.toLowerCase();
+  if (originalSender && !isSafeEmail(originalSender, exclusions)) {
     let confidence = baseConfidence;
 
     // Increase confidence for suspicious patterns
-    if (containsSuspiciousEmailPatterns(senderEmail)) {
+    if (containsSuspiciousEmailPatterns(originalSender)) {
       confidence = Math.min(confidence + 0.2, 1.0);
     }
 
     indicators.push({
       indicatorType: 'email',
-      indicatorValue: senderEmail,
-      indicatorHash: hashValue('email', senderEmail),
+      indicatorValue: originalSender,
+      indicatorHash: hashValue('email', originalSender),
       confidenceScore: confidence,
       severity,
       timesSeen: 1,
       firstSeenAt: now,
       lastSeenAt: now,
       isActive: true,
-      metadata: { ...baseMetadata, extractionContext: 'sender_email' },
+      metadata: { ...baseMetadata, extractionContext: 'original_sender_email' },
     });
   }
 
   return indicators;
+}
+
+/**
+ * Convert AI-nominated IOCs (structured output from the analysis) into
+ * indicator records. The model sees full context the regexes cannot, but its
+ * nominations still pass the same allowlist filters.
+ */
+function extractAINominatedIOCs(
+  iocs: AINominatedIOC[],
+  severity: ThreatIndicatorRecord['severity'],
+  now: Date,
+  baseMetadata: Record<string, unknown>,
+  exclusions: Exclusions
+): ThreatIndicatorRecord[] {
+  const VALID_TYPES = new Set(['domain', 'url', 'email', 'ip']);
+  const indicators: ThreatIndicatorRecord[] = [];
+
+  for (const ioc of iocs) {
+    if (!VALID_TYPES.has(ioc.type) || typeof ioc.value !== 'string' || !ioc.value.trim()) continue;
+    const value = ioc.type === 'url' ? ioc.value.trim() : ioc.value.trim().toLowerCase();
+
+    if (ioc.type === 'domain' && isSafeDomain(value, exclusions)) continue;
+    if (ioc.type === 'email' && isSafeEmail(value, exclusions)) continue;
+    if (ioc.type === 'url' && isSafeUrl(value, exclusions)) continue;
+    if (ioc.type === 'ip' && isPrivateIP(value)) continue;
+
+    indicators.push({
+      indicatorType: ioc.type,
+      indicatorValue: value,
+      indicatorHash: hashValue(ioc.type, value),
+      confidenceScore: 0.8,
+      severity: ioc.role === 'infrastructure' ? 'medium' : severity,
+      timesSeen: 1,
+      firstSeenAt: now,
+      lastSeenAt: now,
+      isActive: true,
+      metadata: { ...baseMetadata, extractionContext: `ai_nominated:${ioc.role}` },
+    });
+  }
+
+  return indicators;
+}
+
+/**
+ * Dedupe by type+value, keeping the highest-confidence occurrence
+ */
+function dedupeIndicators(indicators: ThreatIndicatorRecord[]): ThreatIndicatorRecord[] {
+  const byKey = new Map<string, ThreatIndicatorRecord>();
+  for (const indicator of indicators) {
+    const key = `${indicator.indicatorType}:${indicator.indicatorValue.toLowerCase()}`;
+    const existing = byKey.get(key);
+    if (!existing || indicator.confidenceScore > existing.confidenceScore) {
+      byKey.set(key, indicator);
+    }
+  }
+  return [...byKey.values()];
+}
+
+/**
+ * Parse a bare address out of a From-style header value
+ * ("Sender Name <sender@example.com>" or "sender@example.com")
+ */
+function parseEmailAddress(headerValue?: string): string | null {
+  if (!headerValue) return null;
+  const angled = headerValue.match(/<([^<>\s]+@[^<>\s]+)>/);
+  if (angled) return angled[1];
+  const bare = headerValue.match(/\b[^<>\s@]+@[^<>\s@]+\.[^<>\s@]+\b/);
+  return bare ? bare[0] : null;
+}
+
+function hostnameOf(url: string): string | null {
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -376,45 +624,83 @@ function determineSeverity(analysis: AnalysisResult): ThreatIndicatorRecord['sev
 /**
  * Check if URL is from a known safe source
  */
-function isSafeUrl(url: string): boolean {
-  try {
-    const urlObj = new URL(url);
-    return isSafeDomain(urlObj.hostname);
-  } catch {
-    return false;
-  }
+function isSafeUrl(url: string, exclusions: Exclusions): boolean {
+  const host = hostnameOf(url);
+  return host ? isSafeDomain(host, exclusions) : false;
 }
 
 /**
- * Check if domain is known safe
+ * Built-in baseline of domains that are never useful as indicators
  */
-function isSafeDomain(domain: string): boolean {
-  const safeDomains = [
-    'google.com',
-    'microsoft.com',
-    'apple.com',
-    'amazon.com',
-    'facebook.com',
-    'linkedin.com',
-    'twitter.com',
-    'github.com',
-    'slack.com',
-    'zoom.us',
-    'salesforce.com',
-    'office.com',
-    'outlook.com',
-  ];
+const BASELINE_SAFE_DOMAINS = [
+  'google.com',
+  'microsoft.com',
+  'apple.com',
+  'amazon.com',
+  'facebook.com',
+  'linkedin.com',
+  'twitter.com',
+  'github.com',
+  'slack.com',
+  'zoom.us',
+  'salesforce.com',
+  'office.com',
+  'outlook.com',
+  'aka.ms', // Microsoft short-links, incl. the M365 sender-warning banner
+];
 
+/**
+ * Free webmail providers. The attacker's full address is a useful indicator,
+ * but the provider domain is shared by millions of legitimate users and must
+ * never be stored as a threat domain.
+ */
+const FREE_MAIL_DOMAINS = new Set([
+  'gmail.com',
+  'googlemail.com',
+  'yahoo.com',
+  'ymail.com',
+  'hotmail.com',
+  'outlook.com',
+  'live.com',
+  'msn.com',
+  'aol.com',
+  'icloud.com',
+  'me.com',
+  'mac.com',
+  'proton.me',
+  'protonmail.com',
+  'gmx.com',
+  'mail.com',
+  'zoho.com',
+  'yandex.com',
+  'tutanota.com',
+  'hey.com',
+]);
+
+/**
+ * Should this domain be skipped as a *domain* indicator? True for the big-
+ * provider baseline, configured safe domains, and free-mail providers — a
+ * free-mail domain is shared by millions, so only the full address is useful.
+ */
+function isSafeDomain(domain: string, exclusions: Exclusions): boolean {
   const lowerDomain = domain.toLowerCase();
-  return safeDomains.some(safe => lowerDomain === safe || lowerDomain.endsWith('.' + safe));
+  if (FREE_MAIL_DOMAINS.has(lowerDomain)) return true;
+  const allSafe = [...BASELINE_SAFE_DOMAINS, ...exclusions.safeDomains];
+  return allSafe.some(safe => lowerDomain === safe || lowerDomain.endsWith('.' + safe));
 }
 
 /**
- * Check if email is known safe
+ * Check if email is known safe (configured safe senders or a safe domain).
+ * Free-mail domains do NOT make an address safe — a phish from a throwaway
+ * gmail account is still a valid email indicator.
  */
-function isSafeEmail(email: string): boolean {
-  const domain = email.split('@')[1];
-  return domain ? isSafeDomain(domain) : false;
+function isSafeEmail(email: string, exclusions: Exclusions): boolean {
+  const lower = email.toLowerCase();
+  if (exclusions.safeSenders.includes(lower)) return true;
+  const domain = lower.split('@')[1];
+  if (!domain) return false;
+  if (FREE_MAIL_DOMAINS.has(domain)) return false;
+  return isSafeDomain(domain, exclusions);
 }
 
 /**

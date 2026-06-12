@@ -13,7 +13,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node-version: [18.x, 20.x, 22.x]
+        # Match the Lambda runtime exactly (template.yaml: nodejs22.x). Testing
+        # other majors validates runtimes we never deploy to; add the next entry
+        # here only when the template moves to a newer Lambda runtime.
+        node-version: [22.x]
 
     steps:
       - uses: actions/checkout@v4

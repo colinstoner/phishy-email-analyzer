@@ -31,7 +31,7 @@ All five must pass before a commit. CI runs them on Node 18/20/22.
 - TypeScript strict; Zod for every external boundary (config, profiles, event payloads).
 - Config flows through `src/config/schema.ts` + `ENV_MAPPINGS` in `src/config/index.ts` — an env var without a mapping does nothing. Update `docs/CONFIGURATION.md` and `config/phishy.config.example.json` with any new key.
 - Database: the app auto-creates **only** migration 001. Schema changes ship as new numbered files in `migrations/`, applied manually; code must catch `42P01`/`42703` and degrade with an instructive log line. Document new tables in `docs/DATABASE.md`.
-- Model IDs are never guessed: verify against current docs. Current defaults: `claude-opus-4-8` (Anthropic) / `anthropic.claude-opus-4-8` (Bedrock). Pricing lives in `src/utils/pricing.ts`.
+- Model IDs are never guessed: verify against current docs. Current defaults: `claude-opus-4-8` (Anthropic) / `global.anthropic.claude-opus-4-8` (Bedrock). Pricing lives in `src/utils/pricing.ts`.
 - Metrics are CloudWatch EMF written straight to stdout (`src/utils/metrics.ts`) — they must bypass the logger so `_aws` stays at the JSON root.
 - Tests use invented `example.com`-style data only — never real organization names, people, or domains. `config/phishy.config.json` and `config/*.profile.json` are real deployment data and are gitignored; never commit or read them into examples.
 - Keep `CHANGELOG.md` (Keep a Changelog format) updated in the same commit as the change.
