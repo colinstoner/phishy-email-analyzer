@@ -7,7 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-06-12
+
 ### Added
+- **Structured threat verdicts** (migration 004): the model produces a categorical verdict (`bec`, `phishing`, `malware_delivery`, `spam`, `graymail`, `suspicious`, `legitimate`) and a 0–100 risk score on an axis separate from confidence — a confidently-legitimate email is high confidence, low risk. Queryable `verdict`/`risk_score` columns; the full assessment persists in `analysis_result` JSONB; legacy `isPhishing`/confidence are derived so existing consumers keep working
+- **Risk fusion** (`risk.fusion.ts`): deterministically fuses the model verdict with Phishy's own intelligence — known indicators and active campaigns raise the risk floor, a security-team ruling overrides (verdict included), a safe-sender match caps — and returns the explanation trail shown in the report
+- **Attributed IOC extraction**: indicators are attributed to the original (forwarded) sender, never the reporter — previously the victim could be recorded as the attacker. The model nominates IOCs structurally (sender/payload/infrastructure roles), merged with regex extraction; open-redirect and tracker chains are unwrapped so the final destination is the high-value indicator; free-mail provider domains are excluded as domain indicators; configured SafeDomains/SafeSenders are honored during extraction
+- **Employee-facing report redesign**: thanks the reporter every time, leads with a plain-language verdict gloss and risk score, one clear "What to do" line, "Why we flagged it" fused-intelligence reasons, and a "How to spot this next time" teaching block driven by the identified threat vectors
+- **RDS TLS verification**: the official Amazon RDS global CA bundle is pinned for `*.rds.amazonaws.com` hosts with full certificate verification (replacing connection failures / no-verify workarounds)
+- SAM template parameters for the enterprise profile and safe-sender lists; `.nvmrc` and CI scoped to the Lambda runtime (Node 22)
 - Unified handler routing SES and API Gateway events through a single Lambda entry point
 - Campaign detection and employee alert system
 - Recipient signature analysis for risk-aware phishing detection
@@ -41,7 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Token usage capture for the Anthropic API provider (previously Bedrock-only)
 
 ### Changed
-- **Default model upgraded to Claude Opus 4.8** on both providers (`claude-opus-4-8` / `anthropic.claude-opus-4-8`); model catalogs refreshed with Opus 4.6, Sonnet 4.6, and current Bedrock `global.`/regional ID formats
+- **The analysis is no longer armed with attacker-controlled "facts"**: the forwarded sender's identity (parsed from the attacker-controlled body in inline forwards) moved from the VERIFIED block to a CLAIMED cannot-be-authenticated section; "legitimate systems" lists are reframed as the brands attackers impersonate most, not an allowlist; reasoning rules added — a familiar-looking From is not verification, and content that cannot be inspected is never "legitimate"
+- **Default model upgraded to Claude Opus 4.8** on both providers (`claude-opus-4-8` / `global.anthropic.claude-opus-4-8`); model catalogs refreshed with Opus 4.6, Sonnet 4.6, and current Bedrock `global.`/regional ID formats
 - Full-prompt logging in the Bedrock provider moved from info to debug level — reported email content no longer lands in CloudWatch logs at default log levels
 - **License changed from GPL-3.0 to Apache-2.0**
 - Bedrock model defaults and configuration updated for inference profiles and VPC endpoints
@@ -83,6 +92,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SES-triggered analysis of forwarded emails with Claude via the Anthropic API
 - HTML security report delivered back to the forwarder
 
-[Unreleased]: https://github.com/colinstoner/phishy-email-analyzer/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/colinstoner/phishy-email-analyzer/compare/v3.0.0...HEAD
+[3.0.0]: https://github.com/colinstoner/phishy-email-analyzer/compare/v2.0.0...v3.0.0
 [2.0.0]: https://github.com/colinstoner/phishy-email-analyzer/releases/tag/v2.0.0
 [1.0.0]: https://github.com/colinstoner/phishy-email-analyzer/tree/0641640
