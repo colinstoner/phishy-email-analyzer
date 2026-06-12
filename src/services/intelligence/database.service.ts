@@ -7,6 +7,7 @@ import { Pool, PoolConfig } from 'pg';
 import { createLogger } from '../../utils/logger';
 import { AnalysisResult, IndicatorType } from '../../types';
 import { createHash } from 'crypto';
+import rdsCaBundle from './rds-global-bundle.pem';
 
 const logger = createLogger('intelligence-db');
 
@@ -200,6 +201,24 @@ export class IntelligenceDatabaseService {
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 5000,
     };
+
+    // RDS certificates chain to Amazon's private RDS CA, which Node does not
+    // trust out of the box. Pin the official bundle so TLS verification stays
+    // on instead of being disabled via sslmode=no-verify. Any sslmode in the
+    // connection string must be stripped first: pg gives string params
+    // precedence over config.ssl, which would discard the pinned CA.
+    if (connectionString.includes('.rds.amazonaws.com')) {
+      try {
+        const url = new URL(connectionString);
+        url.searchParams.delete('sslmode');
+        url.searchParams.delete('ssl');
+        url.searchParams.delete('uselibpqcompat');
+        config.connectionString = url.toString();
+      } catch {
+        // Not URL-parseable (e.g. key=value form); leave the string as-is.
+      }
+      config.ssl = { ca: rdsCaBundle };
+    }
 
     this.pool = new Pool(config);
 

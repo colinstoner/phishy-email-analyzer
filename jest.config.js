@@ -30,6 +30,7 @@ module.exports = {
     }
   },
   moduleNameMapper: {
+    '\\.pem$': '<rootDir>/tests/mocks/pem.mock.js',
     '^@/(.*)$': '<rootDir>/src/$1',
     '^@services/(.*)$': '<rootDir>/src/services/$1',
     '^@config/(.*)$': '<rootDir>/src/config/$1',
