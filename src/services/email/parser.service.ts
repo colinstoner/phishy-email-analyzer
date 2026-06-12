@@ -79,7 +79,7 @@ export class EmailParserService {
         const jsonBody = JSON.parse(bodyStr);
 
         if (Array.isArray(jsonBody)) {
-          return jsonBody as EmailEvent[];
+          return this.validateEventShapes(jsonBody);
         }
 
         if (jsonBody.Records && Array.isArray(jsonBody.Records)) {
@@ -90,7 +90,7 @@ export class EmailParserService {
           const events = Array.isArray(jsonBody.email_events)
             ? jsonBody.email_events
             : JSON.parse(jsonBody.email_events as string);
-          return Array.isArray(events) ? events : [];
+          return Array.isArray(events) ? this.validateEventShapes(events) : [];
         }
       } catch {
         logger.debug('Not a JSON payload');
@@ -103,7 +103,7 @@ export class EmailParserService {
           const emailEvents = params.get('email_events');
           if (emailEvents) {
             const events = JSON.parse(emailEvents);
-            return Array.isArray(events) ? events : [];
+            return Array.isArray(events) ? this.validateEventShapes(events) : [];
           }
         } catch {
           logger.debug('Failed to parse URL-encoded data');
@@ -118,6 +118,28 @@ export class EmailParserService {
       });
       return [];
     }
+  }
+
+  /**
+   * Validate externally supplied event payloads instead of blind-casting:
+   * an event must carry an object `msg`. Non-conforming entries are dropped
+   * with a warning rather than crashing mid-pipeline.
+   */
+  private validateEventShapes(events: unknown[]): EmailEvent[] {
+    const valid = events.filter((event): event is EmailEvent => {
+      if (typeof event !== 'object' || event === null) return false;
+      const msg = (event as { msg?: unknown }).msg;
+      return typeof msg === 'object' && msg !== null;
+    });
+
+    if (valid.length < events.length) {
+      logger.warn('Dropped malformed email events from payload', {
+        received: events.length,
+        valid: valid.length,
+      });
+    }
+
+    return valid;
   }
 
   /**
@@ -237,10 +259,12 @@ export class EmailParserService {
       }
     }
 
-    // Fallback: create minimal content from headers
+    // Fallback: create minimal content from headers. Report no S3 location —
+    // every read above failed, and downstream uses the location for cleanup
+    // and provenance, so a guessed-but-unread path would be misleading.
     return {
       content: this.createMinimalContent(record),
-      s3Location,
+      s3Location: null,
     };
   }
 
@@ -478,9 +502,15 @@ export class EmailParserService {
    * Find original forwarder from various sources
    */
   private findOriginalForwarder(msg: EmailMessage, headers: Record<string, string>): string {
-    // Check X-Forwarded-For header
+    // X-Forwarded-For is attacker-influenceable and often not an address at
+    // all (proxies put IP chains here). The forwarder determines where the
+    // analysis report is sent, so extract a real address and require a safe
+    // domain — same bar as every other source below.
     if (headers['X-Forwarded-For']) {
-      return headers['X-Forwarded-For'];
+      const email = extractEmailAddress(headers['X-Forwarded-For']);
+      if (email && this.isFromSafeDomain(email)) {
+        return email;
+      }
     }
 
     // Parse from From header
@@ -577,10 +607,12 @@ export class EmailParserService {
 
     // Look for forwarded message markers
     const forwardedPatterns = [
-      /---------- Forwarded message ---------\s*\n([\s\S]*?)(?:\n\n|\r\n\r\n)/i,
-      /-------- Original Message --------\s*\n([\s\S]*?)(?:\n\n|\r\n\r\n)/i,
-      /Begin forwarded message:\s*\n([\s\S]*?)(?:\n\n|\r\n\r\n)/i,
-      /From:.*\nSent:.*\nTo:.*\nSubject:/i, // Outlook style
+      /---------- Forwarded message ---------\s*\n([\s\S]*?)(?:\n\n|\r\n\r\n|$)/i,
+      /-------- Original Message --------\s*\n([\s\S]*?)(?:\n\n|\r\n\r\n|$)/i,
+      /Begin forwarded message:\s*\n([\s\S]*?)(?:\n\n|\r\n\r\n|$)/i,
+      // Outlook style: no marker line — match through the end of the Subject
+      // line so its value is part of the captured block
+      /From:.*\r?\nSent:.*\r?\nTo:.*\r?\nSubject:.*/i,
     ];
 
     let headerBlock = '';

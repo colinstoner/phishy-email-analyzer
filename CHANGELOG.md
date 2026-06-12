@@ -39,6 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bedrock model defaults and configuration updated for inference profiles and VPC endpoints
 
 ### Fixed
+- **Security**: `X-Forwarded-For` was trusted verbatim as the report recipient — an attacker-influenceable header (often an IP chain, never validated) could redirect analysis reports. It now requires an extractable address on a safe domain, the same bar as every other source
+- Outlook-style forwarded headers never captured the original subject: the marker pattern stopped at the literal `Subject:` before its value
+- Messages whose content could not be retrieved from S3 still reported a guessed `s3Reference`/`s3Location`, misleading cleanup and provenance; they now report none
+- External event payloads (API Gateway paths) were blind-cast instead of validated; malformed entries are now dropped with a warning
 - Anthropic provider model catalog contained invalid IDs (wrong date suffixes) that returned 404 from the API; catalog rebuilt with current model aliases
 - Cost estimation previously used hardcoded Sonnet 4.5 rates regardless of which model ran
 - Security fixes from audit: XSS in reports, ReDoS in extraction regexes, SSRF in webhook URLs, error detail disclosure, prompt injection hardening

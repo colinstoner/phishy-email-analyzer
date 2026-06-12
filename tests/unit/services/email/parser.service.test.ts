@@ -94,6 +94,35 @@ describe('EmailParserService', () => {
       expect(result[0].msg.from_email).toBe('a@example.com');
     });
 
+    it('should drop malformed entries from external event arrays', async () => {
+      const parser = makeParser();
+      const payload = JSON.stringify([
+        { msg: { from_email: 'good@example.com', subject: 'Valid' } },
+        { msg: 'just a string, not an object' },
+        { unrelated: true },
+        'not even an object',
+        null,
+        42,
+      ]);
+
+      const result = await parser.parseEmailEvents(payload);
+
+      expect(result).toHaveLength(1);
+      expect(result[0].msg.from_email).toBe('good@example.com');
+    });
+
+    it('should drop malformed entries from email_events payloads', async () => {
+      const parser = makeParser();
+      const payload = JSON.stringify({
+        email_events: [{ msg: { from_email: 'ok@example.org' } }, { msg: null }, 'bogus'],
+      });
+
+      const result = await parser.parseEmailEvents(payload);
+
+      expect(result).toHaveLength(1);
+      expect(result[0].msg.from_email).toBe('ok@example.org');
+    });
+
     it('should parse a JSON string containing SES Records', async () => {
       const parser = makeParser();
       const payload = JSON.stringify({
@@ -319,8 +348,10 @@ describe('EmailParserService', () => {
       expect(msg.text).toContain('Date: Mon, 1 Jun 2026 09:00:00 -0500');
       expect(msg.text).toContain('Message-ID: <msg-001@example.com>');
       expect(msg.text).toContain('Full message content could not be retrieved');
-      // s3Location still points at the attempted standard path
-      expect(msg.s3Reference).toBe('s3://default-bucket/emails/msg-001');
+      // No S3 reference is reported — every read failed, so a guessed path
+      // would mislead cleanup and provenance
+      expect(msg.s3Reference).toBeNull();
+      expect(msg.s3Location).toBeUndefined();
     });
 
     it('should still process records with very short content', async () => {
@@ -603,6 +634,36 @@ describe('EmailParserService', () => {
       expect(parser.extractEmailData(msg).originalForwarder).toBe('employee@example.com');
     });
 
+    it('should ignore X-Forwarded-For values that are not safe-domain addresses', () => {
+      const parser = makeParser(makeS3(), ['example.com']);
+
+      // Proxy-style IP chain — not an address at all
+      const ipChain = makeMessage({
+        headers: { 'X-Forwarded-For': '203.0.113.5, 198.51.100.7' },
+        to: 'someone@outside.test',
+      });
+      expect(parser.extractEmailData(ipChain).originalForwarder).toBe('');
+
+      // Attacker-supplied outside address must not receive the report
+      const outside = makeMessage({
+        headers: { 'X-Forwarded-For': 'attacker@evil.test' },
+        to: 'someone@outside.test',
+      });
+      expect(parser.extractEmailData(outside).originalForwarder).toBe('');
+    });
+
+    it('should fall through to the From header when X-Forwarded-For is unusable', () => {
+      const parser = makeParser(makeS3(), ['example.com']);
+      const msg = makeMessage({
+        headers: {
+          'X-Forwarded-For': '203.0.113.5',
+          From: 'Employee <employee@example.com>',
+        },
+      });
+
+      expect(parser.extractEmailData(msg).originalForwarder).toBe('employee@example.com');
+    });
+
     it('should use the From header when it belongs to a safe domain', () => {
       const parser = makeParser(makeS3(), ['example.com']);
       const msg = makeMessage({
@@ -778,6 +839,21 @@ describe('EmailParserService', () => {
       expect(headers['Original-From']).toBe('Alice Example <alice@example.org>');
       expect(headers['Original-Sent']).toBe('Monday, June 1, 2026 9:00 AM');
       expect(headers['Original-To']).toBe('bob@example.com');
+      expect(headers['Original-Subject']).toBe('Quarterly report');
+    });
+
+    it('should capture the Outlook subject with CRLF line endings', () => {
+      const parser = makeParser();
+      const text =
+        'From: Alice Example <alice@example.org>\r\n' +
+        'Sent: Monday, June 1, 2026 9:00 AM\r\n' +
+        'To: bob@example.com\r\n' +
+        'Subject: Re: Wire transfer approval\r\n\r\n' +
+        'Please approve today.';
+
+      const headers = parser.extractForwardedHeaders(text);
+
+      expect(headers['Original-Subject']).toBe('Re: Wire transfer approval');
     });
 
     it('should fall back to inline From header at the start of text', () => {
