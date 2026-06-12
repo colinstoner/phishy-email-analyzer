@@ -21,7 +21,7 @@ function makeAnalysisResult(overrides: Partial<AnalysisResult> = {}): AnalysisRe
     indicators: ['Lookalike domain', 'Urgent language'],
     recommendations: ['Do not click any links', 'Delete the email'],
     provider: 'bedrock',
-    model: 'anthropic.claude-opus-4-8',
+    model: 'global.anthropic.claude-opus-4-8',
     processingTimeMs: 4200,
     tokenUsage: { inputTokens: 1000, outputTokens: 500, totalTokens: 1500 },
     ...overrides,

@@ -136,7 +136,7 @@ function getDefaultConfig(): PartialPhishyConfig {
       // This allows bedrock provider to work without requiring an Anthropic key
       bedrock: {
         region: 'us-east-1',
-        modelId: 'anthropic.claude-opus-4-8',
+        modelId: 'global.anthropic.claude-opus-4-8',
         maxTokens: 4096,
         timeout: 60000,
       },

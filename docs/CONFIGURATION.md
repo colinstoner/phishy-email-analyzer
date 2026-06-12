@@ -41,7 +41,7 @@ When the same setting is defined in multiple places, Phishy uses this priority (
 | `ANTHROPIC_API_KEY` | - | Anthropic API key (required for anthropic provider) |
 | `CLAUDE_MODEL` | `claude-opus-4-8` | Model for Anthropic provider |
 | `PHISHY_BEDROCK_REGION` | `us-east-1` | AWS region for Bedrock |
-| `PHISHY_BEDROCK_MODEL` | `anthropic.claude-opus-4-8` | Bedrock model ID |
+| `PHISHY_BEDROCK_MODEL` | `global.anthropic.claude-opus-4-8` | Bedrock model ID |
 
 > Max tokens and request timeout are file-config only (`ai.anthropic.maxTokens` / `ai.bedrock.timeout`, etc.) — see the example configuration below.
 
@@ -202,7 +202,7 @@ For more complex setups, use a JSON configuration file.
     "provider": "bedrock",
     "bedrock": {
       "region": "us-east-1",
-      "modelId": "anthropic.claude-opus-4-8",
+      "modelId": "global.anthropic.claude-opus-4-8",
       "maxTokens": 4096,
       "timeout": 60000
     },

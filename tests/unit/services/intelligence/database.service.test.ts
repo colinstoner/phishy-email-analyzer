@@ -106,7 +106,7 @@ describe('IntelligenceDatabaseService campaign verdict cache', () => {
       indicators: [],
       vipImpersonationDetected: false,
       aiProvider: 'bedrock',
-      aiModel: 'anthropic.claude-opus-4-8',
+      aiModel: 'global.anthropic.claude-opus-4-8',
       processingTimeMs: 1000,
       campaignSignature: 'abcd1234abcd1234',
     };
