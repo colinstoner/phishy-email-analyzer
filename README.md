@@ -1,5 +1,9 @@
 # Phishy Email Analyzer
 
+[![CI](https://github.com/colinstoner/phishy-email-analyzer/actions/workflows/ci.yml/badge.svg)](https://github.com/colinstoner/phishy-email-analyzer/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Node.js >= 18](https://img.shields.io/badge/node-%3E%3D18-brightgreen)](package.json)
+
 AI-powered phishing email analysis tool that uses Claude to evaluate suspicious emails and provide detailed security reports.
 
 ## Overview
@@ -122,14 +126,10 @@ zip -r phishy.zip dist/ node_modules/ package.json
 
 ## License
 
-GPLv3
+[Apache-2.0](LICENSE)
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, coding standards, and the pull request process.
 
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+Found a security vulnerability? Please report it privately — see [SECURITY.md](SECURITY.md).

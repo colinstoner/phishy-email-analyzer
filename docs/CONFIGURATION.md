@@ -270,8 +270,4 @@ Phishy validates all configuration at startup using Zod schemas. Invalid configu
 Configuration error: ai.anthropic.apiKey must start with 'sk-ant-'
 ```
 
-To validate your config without running:
-
-```bash
-npm run validate-config
-```
+Validation runs on every cold start, so a misconfigured deployment fails immediately and loudly in CloudWatch logs rather than silently misbehaving. To catch problems before deploying, compare your config against [config/phishy.config.example.json](../config/phishy.config.example.json) — every key is documented in this file.
