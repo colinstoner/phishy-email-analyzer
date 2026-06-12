@@ -51,7 +51,7 @@ Every reporter gets a plain-language reply: a tone-colored verdict, a 0–100 ri
 | ![Business email compromise — critical](examples/report-bec.png) | ![Credential phishing — critical](examples/report-phishing.png) |
 | ![Suspicious — caution](examples/report-suspicious.png) | ![Legitimate — cleared](examples/report-legitimate.png) |
 
-Screenshots are generated from the real report template — `npm run build && npm i --no-save puppeteer-core && node scripts/render-report-samples.js`.
+Screenshots are generated from the real report template — `npm run build && npm i --no-save --no-package-lock puppeteer-core && node scripts/render-report-samples.js`.
 
 ## How It Works
 

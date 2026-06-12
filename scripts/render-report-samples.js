@@ -3,23 +3,44 @@
  *
  * Produces retina PNGs of the actual employee-facing report
  * (src/templates/report.html.ts) using curated, fully fictional scenarios —
- * one per tone (danger / caution / safe). The data here is invented
- * (example.com / .test only); no real organization, person, or email.
+ * four scenarios across the three tones (danger / caution / safe). The data
+ * here is invented (example.com / .test only); no real org, person, or email.
  *
  *   npm run build
- *   npm i --no-save puppeteer-core
+ *   npm i --no-save --no-package-lock puppeteer-core
  *   node scripts/render-report-samples.js
  *
- * Requires Google Chrome installed (path below). Outputs to examples/*.png.
+ * Requires Chrome/Chromium installed; set CHROME_PATH to override the binary.
+ * Outputs to examples/*.png.
  */
 
+const fs = require('fs');
 const path = require('path');
 const puppeteer = require('puppeteer-core');
 const { buildEmailHtml } = require('../dist/templates/report.html');
 
-const CHROME =
-  process.env.CHROME_PATH ||
-  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+function findChrome() {
+  if (process.env.CHROME_PATH) return process.env.CHROME_PATH;
+  const candidates = [
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    '/Applications/Chromium.app/Contents/MacOS/Chromium',
+    '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/snap/bin/chromium',
+  ];
+  const found = candidates.find((p) => fs.existsSync(p));
+  if (!found) {
+    throw new Error(
+      'Could not find Chrome/Chromium. Set CHROME_PATH to your browser binary, e.g.\n' +
+        '  CHROME_PATH="/path/to/chrome" node scripts/render-report-samples.js'
+    );
+  }
+  return found;
+}
+
+const CHROME = findChrome();
 
 function email(o) {
   return {
