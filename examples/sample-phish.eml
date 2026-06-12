@@ -1,0 +1,28 @@
+From: Jordan Reporter <jordan@example.com>
+To: phishy@example.com
+Subject: FW: Action required: your mailbox will be suspended
+Date: Fri, 12 Jun 2026 09:15:00 -0700
+Message-ID: <local-sample-001@example.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+This showed up this morning and the link looks weird to me. Forwarding just in case.
+
+---------- Forwarded message ---------
+From: IT Service Desk <support@examp1e-mailcare.test>
+Date: Fri, 12 Jun 2026 08:58:12 -0700
+Subject: Action required: your mailbox will be suspended
+To: jordan@example.com
+Reply-To: recovery-desk@webmail-helpdesk.test
+
+Dear jordan,
+
+Our system detected unusual sign-in activity on your mailbox. To avoid
+suspension within 24 hours, please verify your account immediately:
+
+https://eu1.safelinks.protection.outlook.com/?url=https%3A%2F%2Fexamp1e-mailcare.test%2Fsso%2Fverify%3Fuser%3Djordan&data=05
+
+If you do not verify, your messages will be permanently deleted.
+
+IT Service Desk
+Example Corporation

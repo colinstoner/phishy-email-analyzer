@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Local try-it CLI (`npm run try <file.eml>` / `npx phishy-try`): parses any `.eml` exactly as the deployed Lambda would — MIME, forwarded headers, link unwrapping, content-integrity flags — with no AWS required; add `ANTHROPIC_API_KEY` for a live Claude verdict. Bundled fictional sample in `examples/sample-phish.eml`
+- Community infrastructure: issue templates (bug/feature with data-hygiene guidance), PR template with the security-invariant checklist, Dependabot (npm + actions, AWS SDK grouped), and CodeQL scanning
+- README: "Try It in 60 Seconds" quick start and example report screenshots
+
 ## [3.0.0] - 2026-06-12
 
 ### Added

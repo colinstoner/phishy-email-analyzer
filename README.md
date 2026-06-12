@@ -31,6 +31,24 @@ Perfect for security teams, IT departments, or anyone who needs to verify suspic
 - ☁️ **Flexible AI Backend**: Use Anthropic API or AWS Bedrock (no external API key needed)
 - 📈 **Threat Intelligence** (optional): Track patterns, extract IOCs, integrate with SIEM
 
+## Try It in 60 Seconds (no AWS required)
+
+```bash
+git clone https://github.com/colinstoner/phishy-email-analyzer && cd phishy-email-analyzer
+npm install
+npm run try examples/sample-phish.eml          # dry run: parsing, link unwrapping, obfuscation flags
+ANTHROPIC_API_KEY=sk-ant-... npm run try examples/sample-phish.eml   # + real Claude verdict
+```
+
+The dry run shows exactly what the deployed Lambda would see: MIME parsing, forwarded-header extraction, SafeLinks/redirect unwrapping, and content-integrity flags — on a bundled fictional sample. Point it at any `.eml` you export from your mail client.
+
+## What Reports Look Like
+
+| | |
+|---|---|
+| ![Phishing scam report](examples/Best%20Buy%20Scam.png) | ![Crypto scam report](examples/BlockFi%20Scam.png) |
+| ![Newsletter cleared](examples/Action%20Network%20Newsletter.png) | ![Legitimate email cleared](examples/The%20Palms%20Newsletter.png) |
+
 ## How It Works
 
 1. User forwards a suspicious email to `phishy@yourdomain.com`

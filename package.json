@@ -4,7 +4,11 @@
   "description": "AI-powered phishing email analysis tool using Claude to evaluate suspicious emails",
   "main": "index.js",
   "types": "dist/index.d.ts",
+  "bin": {
+    "phishy-try": "dist/cli/try.js"
+  },
   "scripts": {
+    "try": "npm run build && node dist/cli/try.js",
     "build": "tsc",
     "build:watch": "tsc --watch",
     "clean": "rm -rf dist",

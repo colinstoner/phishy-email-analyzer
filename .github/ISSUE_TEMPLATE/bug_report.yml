@@ -1,0 +1,59 @@
+name: Bug report
+description: Something in Phishy misbehaves
+labels: ['bug']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report! **Never paste real phishing emails, real employee
+        addresses, or your organization's internal data** — reproduce with
+        invented `example.com`-style data. Suspected security vulnerabilities
+        go to [SECURITY.md](../blob/main/SECURITY.md) instead of an issue.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect, and what did Phishy do instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: Minimal steps or a sanitized .eml that triggers it
+      placeholder: |
+        1. Forward an email with subject "..."
+        2. ...
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Email parsing / MIME
+        - AI analysis / verdicts
+        - Reports (employee email)
+        - Email commands (security-team replies)
+        - Threat intelligence / database
+        - Campaign detection / cache
+        - Deployment (SAM / AWS)
+        - Configuration
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: |
+        Phishy version: 3.0.0
+        Provider: bedrock (global.anthropic.claude-opus-4-8)
+        Node: 22
+        Features enabled: intelligence, agentic
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: CloudWatch lines (sanitize addresses/subjects first)
+      render: text
