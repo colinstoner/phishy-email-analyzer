@@ -4,13 +4,15 @@
  * An AI-powered phishing email analysis tool that uses Claude to
  * evaluate suspicious emails and provide detailed security reports.
  *
- * @license GPL-3.0
+ * @license Apache-2.0
  */
 
 // Export handlers
 export { handler } from './handlers/unified.handler';
 export { handler as sesHandler } from './handlers/lambda.handler';
 export { handler as apiHandler } from './handlers/api.handler';
+export { WebhookService } from './handlers/webhook.handler';
+export type { WebhookConfig, WebhookEvent, WebhookPayload } from './handlers/webhook.handler';
 
 // Export types
 export * from './types';

@@ -31,8 +31,8 @@
     "bedrock",
     "enterprise"
   ],
-  "author": "",
-  "license": "GPL-3.0",
+  "author": "Colin Stoner <colinstoner@gmail.com>",
+  "license": "Apache-2.0",
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.787.0",
     "@aws-sdk/client-rds-data": "^3.787.0",
@@ -66,9 +66,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/yourusername/phishy-email-analyzer.git"
+    "url": "https://github.com/colinstoner/phishy-email-analyzer.git"
   },
   "bugs": {
-    "url": "https://github.com/yourusername/phishy-email-analyzer/issues"
-  }
+    "url": "https://github.com/colinstoner/phishy-email-analyzer/issues"
+  },
+  "homepage": "https://github.com/colinstoner/phishy-email-analyzer#readme"
 }
