@@ -568,12 +568,32 @@ function extractAINominatedIOCs(
 }
 
 /**
+ * Build a case-normalized dedupe key. Domains, emails, and IPs are
+ * case-insensitive, so they fold to lowercase. URLs are NOT: only the
+ * scheme+host are case-insensitive — the path and query can be
+ * case-sensitive, so lowercasing them whole would wrongly merge two distinct
+ * malicious URLs into one and drop an indicator. Normalize just the origin.
+ */
+function dedupeKey(type: ThreatIndicatorRecord['indicatorType'], value: string): string {
+  if (type === 'url') {
+    try {
+      const u = new URL(value);
+      return `url:${u.protocol.toLowerCase()}//${u.host.toLowerCase()}${u.pathname}${u.search}${u.hash}`;
+    } catch {
+      // Unparseable URL — fall back to an exact (case-sensitive) match.
+      return `url:${value}`;
+    }
+  }
+  return `${type}:${value.toLowerCase()}`;
+}
+
+/**
  * Dedupe by type+value, keeping the highest-confidence occurrence
  */
 function dedupeIndicators(indicators: ThreatIndicatorRecord[]): ThreatIndicatorRecord[] {
   const byKey = new Map<string, ThreatIndicatorRecord>();
   for (const indicator of indicators) {
-    const key = `${indicator.indicatorType}:${indicator.indicatorValue.toLowerCase()}`;
+    const key = dedupeKey(indicator.indicatorType, indicator.indicatorValue);
     const existing = byKey.get(key);
     if (!existing || indicator.confidenceScore > existing.confidenceScore) {
       byKey.set(key, indicator);

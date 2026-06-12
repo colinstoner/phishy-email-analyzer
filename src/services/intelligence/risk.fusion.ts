@@ -83,19 +83,25 @@ export function fuseRisk(result: AnalysisResult, signals: FusionSignals = {}): R
   let score = initialScore;
   const reasons: string[] = [];
 
-  // 1. Security-team ruling is authoritative — it overrides everything.
+  // 1. Security-team ruling is authoritative — it overrides everything,
+  //    including the verdict (so the stored verdict and the report banner
+  //    can't contradict the human ruling). A confirmed ruling keeps an
+  //    already-malicious model verdict (preserving specificity like 'bec')
+  //    but promotes a non-malicious one to 'phishing'; a clearance forces
+  //    'legitimate'.
   if (signals.humanVerdict === 'confirmed_phishing') {
     score = Math.max(score, 95);
+    const ruledVerdict = MALICIOUS_VERDICTS.includes(verdict) ? verdict : 'phishing';
     reasons.push('Your security team confirmed this campaign as phishing.');
-    return finalize(verdict, score, reasons, true);
+    return finalize(ruledVerdict, score, reasons, true);
   }
   if (signals.humanVerdict === 'false_positive') {
     reasons.push('Your security team reviewed this campaign and cleared it.');
-    return finalize(verdict, 0, reasons, false);
+    return finalize('legitimate', 0, reasons, false);
   }
 
-  // 2. Known malicious indicators seen before raise the floor. Repeat
-  //    sightings and higher stored confidence push harder.
+  // 2. Known malicious indicators seen before raise the floor, scaled by how
+  //    many times the strongest has been seen in prior reports.
   const matches = signals.matchedIndicators ?? [];
   if (matches.length > 0) {
     const strongest = matches.reduce((a, b) => (b.timesSeen > a.timesSeen ? b : a));

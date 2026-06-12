@@ -12,6 +12,31 @@ import rdsCaBundle from './rds-global-bundle.pem';
 const logger = createLogger('intelligence-db');
 
 /**
+ * Strip SSL-mode overrides from a Postgres connection string so a pinned CA
+ * (config.ssl) is never silently discarded. `pg` gives connection-string
+ * params precedence over config.ssl, so an embedded `sslmode`/`ssl` would
+ * defeat the pinned RDS CA — and `sslmode=no-verify`/`disable` would fail open
+ * (connect without verification, no error). Handles both the URL form
+ * (`postgres://...?sslmode=...`) and the libpq key=value form
+ * (`host=... sslmode=require ...`).
+ */
+export function stripSslOverrides(connectionString: string): string {
+  try {
+    const url = new URL(connectionString);
+    url.searchParams.delete('sslmode');
+    url.searchParams.delete('ssl');
+    url.searchParams.delete('uselibpqcompat');
+    return url.toString();
+  } catch {
+    // Not URL-parseable — treat as libpq key=value (space-separated) form.
+    return connectionString
+      .replace(/\b(?:sslmode|ssl|uselibpqcompat)=\S+/gi, '')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+  }
+}
+
+/**
  * Email analysis record for database storage
  */
 export interface EmailAnalysisRecord {
@@ -209,17 +234,12 @@ export class IntelligenceDatabaseService {
     // trust out of the box. Pin the official bundle so TLS verification stays
     // on instead of being disabled via sslmode=no-verify. Any sslmode in the
     // connection string must be stripped first: pg gives string params
-    // precedence over config.ssl, which would discard the pinned CA.
+    // precedence over config.ssl, which would discard the pinned CA and could
+    // silently fail open (no verification). Strip it in BOTH the URL and the
+    // libpq key=value form — leaving a key=value sslmode intact would bypass
+    // the pin without error.
     if (connectionString.includes('.rds.amazonaws.com')) {
-      try {
-        const url = new URL(connectionString);
-        url.searchParams.delete('sslmode');
-        url.searchParams.delete('ssl');
-        url.searchParams.delete('uselibpqcompat');
-        config.connectionString = url.toString();
-      } catch {
-        // Not URL-parseable (e.g. key=value form); leave the string as-is.
-      }
+      config.connectionString = stripSslOverrides(connectionString);
       config.ssl = { ca: rdsCaBundle };
     }
 

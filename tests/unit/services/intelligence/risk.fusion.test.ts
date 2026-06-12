@@ -4,9 +4,15 @@
 
 import { fuseRisk, scoreToLevel } from '../../../../src/services/intelligence/risk.fusion';
 import { AnalysisResult, ThreatAssessment } from '../../../../src/types';
-import { ThreatIndicatorRecord, CampaignRecord } from '../../../../src/services/intelligence/database.service';
+import {
+  ThreatIndicatorRecord,
+  CampaignRecord,
+} from '../../../../src/services/intelligence/database.service';
 
-function result(assessment?: Partial<ThreatAssessment>, overrides: Partial<AnalysisResult> = {}): AnalysisResult {
+function result(
+  assessment?: Partial<ThreatAssessment>,
+  overrides: Partial<AnalysisResult> = {}
+): AnalysisResult {
   return {
     summary: 'test',
     isPhishing: false,
@@ -43,7 +49,9 @@ function indicator(timesSeen: number): ThreatIndicatorRecord {
 
 describe('fuseRisk', () => {
   it('keeps a confidently-legitimate email at low risk (the core bug)', () => {
-    const decision = fuseRisk(result({ verdict: 'legitimate', riskScore: 5, verdictConfidence: 0.95 }));
+    const decision = fuseRisk(
+      result({ verdict: 'legitimate', riskScore: 5, verdictConfidence: 0.95 })
+    );
     expect(decision.riskLevel).toBe('safe');
     expect(decision.isPhishing).toBe(false);
     expect(decision.riskScore).toBe(5);
@@ -51,7 +59,12 @@ describe('fuseRisk', () => {
 
   it('scores a high-risk BEC as critical and phishing', () => {
     const decision = fuseRisk(
-      result({ verdict: 'bec', riskScore: 88, threatVectors: ['wire_fraud'], targeting: 'targeted' })
+      result({
+        verdict: 'bec',
+        riskScore: 88,
+        threatVectors: ['wire_fraud'],
+        targeting: 'targeted',
+      })
     );
     expect(decision.riskLevel).toBe('critical');
     expect(decision.isPhishing).toBe(true);
@@ -66,24 +79,40 @@ describe('fuseRisk', () => {
     expect(decision.reasons.join(' ')).toMatch(/prior reports/);
   });
 
-  it('lets a security-team confirmation override to critical', () => {
+  it('lets a security-team confirmation override to critical (and fixes the verdict)', () => {
     const decision = fuseRisk(result({ verdict: 'legitimate', riskScore: 5 }), {
       humanVerdict: 'confirmed_phishing',
     });
     expect(decision.riskLevel).toBe('critical');
     expect(decision.isPhishing).toBe(true);
+    // verdict must not contradict the human ruling
+    expect(decision.verdict).toBe('phishing');
   });
 
-  it('lets a security-team false-positive override to safe', () => {
+  it('keeps a specific malicious verdict when the team confirms phishing', () => {
+    const decision = fuseRisk(result({ verdict: 'bec', riskScore: 70 }), {
+      humanVerdict: 'confirmed_phishing',
+    });
+    expect(decision.verdict).toBe('bec'); // specificity preserved
+    expect(decision.isPhishing).toBe(true);
+  });
+
+  it('lets a security-team false-positive override to safe (and clears the verdict)', () => {
     const decision = fuseRisk(result({ verdict: 'phishing', riskScore: 90 }), {
       humanVerdict: 'false_positive',
     });
     expect(decision.riskScore).toBe(0);
     expect(decision.isPhishing).toBe(false);
+    expect(decision.verdict).toBe('legitimate');
   });
 
   it('raises risk to match an active critical campaign', () => {
-    const campaign = { isActive: true, riskLevel: 'critical', detectionCount: 12, uniqueRecipients: ['a', 'b'] } as CampaignRecord;
+    const campaign = {
+      isActive: true,
+      riskLevel: 'critical',
+      detectionCount: 12,
+      uniqueRecipients: ['a', 'b'],
+    } as CampaignRecord;
     const decision = fuseRisk(result({ verdict: 'suspicious', riskScore: 30 }), { campaign });
     expect(decision.riskScore).toBeGreaterThanOrEqual(80);
   });

@@ -3,7 +3,10 @@
  * graceful degradation when migrations 002/003 are not applied.
  */
 
-import { IntelligenceDatabaseService } from '../../../../src/services/intelligence/database.service';
+import {
+  IntelligenceDatabaseService,
+  stripSslOverrides,
+} from '../../../../src/services/intelligence/database.service';
 
 const mockClient = {
   query: jest.fn().mockResolvedValue({}),
@@ -32,6 +35,30 @@ const ANALYSIS_ROW = {
   feedback_verdict: null,
   feedback_by: null,
 };
+
+describe('stripSslOverrides (TLS CA pin must not be silently bypassed)', () => {
+  it('removes sslmode from URL-form connection strings', () => {
+    const out = stripSslOverrides(
+      'postgresql://u:p@db.abc.us-west-2.rds.amazonaws.com:5432/phishy?sslmode=no-verify'
+    );
+    expect(out).not.toMatch(/sslmode/i);
+    expect(out).toContain('db.abc.us-west-2.rds.amazonaws.com');
+  });
+
+  it('removes sslmode from libpq key=value form (the silent-failopen case)', () => {
+    const out = stripSslOverrides(
+      'host=db.abc.us-west-2.rds.amazonaws.com port=5432 dbname=phishy sslmode=disable user=u'
+    );
+    expect(out).not.toMatch(/sslmode/i);
+    expect(out).toContain('host=db.abc.us-west-2.rds.amazonaws.com');
+    expect(out).toContain('dbname=phishy');
+  });
+
+  it('leaves a clean connection string intact', () => {
+    const clean = 'postgresql://u:p@db.abc.us-west-2.rds.amazonaws.com:5432/phishy';
+    expect(stripSslOverrides(clean)).toBe(clean);
+  });
+});
 
 describe('IntelligenceDatabaseService campaign verdict cache', () => {
   let db: IntelligenceDatabaseService;

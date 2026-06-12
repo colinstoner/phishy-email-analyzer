@@ -47,6 +47,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bedrock model defaults and configuration updated for inference profiles and VPC endpoints
 
 ### Fixed
+- **Security**: the pinned RDS CA could be silently bypassed for connection strings in libpq `key=value` form — `pg` gives an embedded `sslmode` precedence over `config.ssl`, and `sslmode=disable`/`no-verify` would fail open (connect with no TLS verification, no error). `sslmode`/`ssl` are now stripped from both the URL and key=value forms before the CA is pinned
+- Risk fusion: a security-team ruling now overrides the **verdict** too, so the stored verdict and the employee report banner can't contradict the human ruling (a confirmation no longer leaves a `legitimate` verdict at critical risk; a clearance forces `legitimate`). A confirmed ruling preserves an already-malicious model verdict (e.g. `bec`)
+- IOC dedupe lowercased entire URL values, which could merge two distinct malicious URLs (paths/queries are case-sensitive) and drop an indicator; only the scheme+host are now case-folded
+- Tests no longer reference a real organization domain (CLAUDE.md requires invented `example.com`-style data only)
 - Bedrock default model ID corrected to `global.anthropic.claude-opus-4-8`: on-demand invocation requires an inference-profile ID, and Bedrock rejects the bare `anthropic.claude-opus-4-8` form with a ValidationException (verified against a live account)
 - **Security**: `X-Forwarded-For` was trusted verbatim as the report recipient — an attacker-influenceable header (often an IP chain, never validated) could redirect analysis reports. It now requires an extractable address on a safe domain, the same bar as every other source
 - Outlook-style forwarded headers never captured the original subject: the marker pattern stopped at the literal `Subject:` before its value
