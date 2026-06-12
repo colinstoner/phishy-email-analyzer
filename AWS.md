@@ -13,7 +13,26 @@ This document provides step-by-step instructions for deploying Phishy on AWS.
 
 > **Quick Start**: See [docs/QUICK_START.md](docs/QUICK_START.md) for a 15-minute setup guide.
 
-## AWS Service Setup
+## Option A: Deploy with AWS SAM (recommended)
+
+The [template.yaml](template.yaml) in the repo root provisions everything except DNS: the Lambda function (built from TypeScript via esbuild), the S3 email bucket with SES write access and a 90-day lifecycle rule, the SES receipt rule set (S3 action first, then Lambda), IAM permissions, and — when you pick the `bedrock` provider — the Bedrock invoke policy.
+
+```bash
+# Prerequisites: AWS SAM CLI, authenticated AWS CLI
+sam build
+sam deploy --guided   # prompts for recipient/sender emails, AI provider, etc.
+```
+
+Two manual steps remain, because CloudFormation cannot do them:
+
+1. **Verify your domain in SES** (Section 1 below) and point your domain's MX record at SES — e.g. `10 inbound-smtp.us-east-1.amazonaws.com`.
+2. **Activate the rule set**: SES allows only one active receipt rule set per account, so the template won't force a switch. In the SES console: Email receiving → Rule sets → `phishy-rules` → Set as active.
+
+> SES email receiving is only available in certain regions (including us-east-1, us-west-2, and eu-west-1) — deploy the stack in one of them.
+
+If you deploy with SAM, you can skip to Section 9 (production access) and Section 10 (testing). The sections below document the same setup done manually via the console.
+
+## Option B: Manual Console Setup
 
 ### 1. Domain Verification in SES
 
@@ -155,7 +174,7 @@ If you prefer to use AWS Bedrock instead of the Anthropic API, add this permissi
 
 Then set these environment variables instead:
 - `PHISHY_AI_PROVIDER`: Set to `bedrock`
-- `BEDROCK_REGION`: Your AWS region (e.g., `us-east-1`)
+- `PHISHY_BEDROCK_REGION`: Your AWS region (e.g., `us-east-1`)
 - Remove `ANTHROPIC_API_KEY` - not needed with Bedrock
 
 **Benefits of Bedrock**:

@@ -40,10 +40,10 @@ When the same setting is defined in multiple places, Phishy uses this priority (
 | `PHISHY_AI_PROVIDER` | `anthropic` | AI provider: `anthropic` or `bedrock` |
 | `ANTHROPIC_API_KEY` | - | Anthropic API key (required for anthropic provider) |
 | `CLAUDE_MODEL` | `claude-sonnet-4-5-20250514` | Model for Anthropic provider |
-| `BEDROCK_REGION` | `us-east-1` | AWS region for Bedrock |
-| `BEDROCK_MODEL_ID` | `us.anthropic.claude-sonnet-4-5-20250514-v1:0` | Bedrock model ID |
-| `AI_MAX_TOKENS` | `4096` | Max tokens for AI response |
-| `AI_TIMEOUT` | `60000` | AI request timeout (ms) |
+| `PHISHY_BEDROCK_REGION` | `us-east-1` | AWS region for Bedrock |
+| `PHISHY_BEDROCK_MODEL` | `us.anthropic.claude-sonnet-4-5-20250514-v1:0` | Bedrock model ID |
+
+> Max tokens and request timeout are file-config only (`ai.anthropic.maxTokens` / `ai.bedrock.timeout`, etc.) — see the example configuration below.
 
 ### Email Settings
 
@@ -51,14 +51,13 @@ When the same setting is defined in multiple places, Phishy uses this priority (
 |----------|---------|-------------|
 | `SAFE_DOMAINS` | - | Comma-separated safe sender domains |
 | `SAFE_SENDERS` | - | Comma-separated safe sender emails |
-| `DELETE_AFTER_PROCESSING` | `false` | Delete emails from S3 after analysis |
+| `DELETE_EMAILS_AFTER_PROCESSING` | `false` | Delete emails from S3 after analysis |
 
 ### Notification Settings
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SENDER_EMAIL` | - | From address for notification emails |
-| `SENDER_NAME` | `Phishy Security` | Display name for notifications |
 | `SECURITY_TEAM_DISTRIBUTION` | - | Comma-separated CC recipients for enterprise users |
 | `SAFE_SENDER_SECURITY` | - | Comma-separated CC recipients for safelist users (optional, separate from enterprise) |
 | `SES_CONFIG_SET` | - | Optional SES configuration set |
@@ -176,7 +175,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 
 # Use Bedrock (requires IAM permissions)
 export PHISHY_AI_PROVIDER=bedrock
-export BEDROCK_REGION=us-east-1
+export PHISHY_BEDROCK_REGION=us-east-1
 ```
 
 ### Provider Fallback

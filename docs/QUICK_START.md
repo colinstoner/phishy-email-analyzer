@@ -136,7 +136,7 @@ If you're already on AWS, Bedrock is simpler - no external API key required.
 2. Change environment variables:
    ```bash
    PHISHY_AI_PROVIDER=bedrock
-   BEDROCK_REGION=us-east-1
+   PHISHY_BEDROCK_REGION=us-east-1
    # Remove ANTHROPIC_API_KEY - not needed with Bedrock
    ```
 

@@ -56,11 +56,15 @@ User → SES → S3 (stores raw email)
 
 ### Quick Start
 
-1. Clone this repository
-2. Install dependencies: `npm install`
-3. Build: `npm run build`
-4. Follow the AWS setup guide to configure SES and Lambda
-5. Deploy to AWS Lambda
+The fastest path is the included AWS SAM template, which provisions the Lambda, S3 bucket, SES receipt rules, and IAM permissions in one command:
+
+```bash
+git clone https://github.com/colinstoner/phishy-email-analyzer.git
+cd phishy-email-analyzer
+sam build && sam deploy --guided
+```
+
+Then verify your domain in SES and activate the rule set — see [AWS.md](AWS.md) for those two manual steps, or for fully manual console setup if you prefer.
 
 ### Minimum Environment Variables
 
@@ -98,7 +102,8 @@ The analysis report includes:
 | [docs/QUICK_START.md](docs/QUICK_START.md) | 15-minute setup guide |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | All configuration options |
 | [docs/INTELLIGENCE.md](docs/INTELLIGENCE.md) | Threat intelligence features |
-| [AWS.md](AWS.md) | Detailed AWS setup |
+| [docs/DATABASE.md](docs/DATABASE.md) | Intelligence database schema & migrations |
+| [AWS.md](AWS.md) | Detailed AWS setup (SAM and manual) |
 
 ## Development
 
@@ -119,9 +124,13 @@ npm test
 ### Deployment
 
 ```bash
-npm run build
-zip -r phishy.zip dist/ node_modules/ package.json
-# Upload to Lambda
+sam build && sam deploy   # infrastructure + code, via template.yaml
+```
+
+Or, to update just the function code on an existing manually-created Lambda:
+
+```bash
+npm run deploy   # builds, zips, and updates the function via the AWS CLI
 ```
 
 ## License

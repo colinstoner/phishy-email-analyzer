@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - AWS Secrets Manager support for database credentials
 - AI usage tracking and cost analytics for Bedrock
 - `WebhookService` (SIEM/SOAR delivery with HMAC signing) exported from the package root
+- AWS SAM template (`template.yaml`) for one-command deployment of the Lambda, S3 bucket, SES receipt rules, and IAM permissions
+- Versioned database migrations (`migrations/`) and schema documentation (`docs/DATABASE.md`)
+- Unit test suites for the email parser and analysis service
 
 ### Changed
 - **License changed from GPL-3.0 to Apache-2.0**
@@ -25,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Security fixes from audit: XSS in reports, ReDoS in extraction regexes, SSRF in webhook URLs, error detail disclosure, prompt injection hardening
+- Documentation listed environment variables the code never read: `BEDROCK_REGION` → `PHISHY_BEDROCK_REGION`, `BEDROCK_MODEL_ID` → `PHISHY_BEDROCK_MODEL`, `DELETE_AFTER_PROCESSING` → `DELETE_EMAILS_AFTER_PROCESSING`
 - Base64 MIME decoding for forwarded content
 - Bedrock VPC endpoint HTTP/2 stream timeout
 - Config validation no longer requires an Anthropic API key when using Bedrock
