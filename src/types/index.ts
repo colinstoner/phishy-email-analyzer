@@ -86,6 +86,8 @@ export interface AnalysisResult {
   provider?: string;
   model?: string;
   tokenUsage?: TokenUsage;
+  /** Agentic analysis: which tools the model consulted, in call order */
+  toolsUsed?: string[];
 }
 
 /**

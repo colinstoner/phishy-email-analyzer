@@ -221,4 +221,93 @@ describe('EmailCommandService', () => {
       );
     });
   });
+
+  describe('AI free-text command parsing', () => {
+    function makeAIParser(response: string) {
+      return {
+        name: 'fake',
+        model: 'fake-model',
+        sendPrompt: jest.fn().mockResolvedValue(response),
+      };
+    }
+
+    function makeServiceWithAI(aiResponse: string) {
+      const { db, notifier } = makeFakes();
+      const aiParser = makeAIParser(aiResponse);
+      const service = new EmailCommandService(
+        db as never,
+        notifier as never,
+        SECURITY_TEAM,
+        aiParser as never
+      );
+      return { db, notifier, aiParser, service };
+    }
+
+    it('interprets free-text replies the keyword parser misses', async () => {
+      const { db, aiParser, service } = makeServiceWithAI('{"verdict": "false_positive"}');
+      const msg = makeMsg({
+        text: 'Checked with accounting, that vendor switched banks last week. All good.',
+      });
+
+      const result = await service.process(msg, makeEmailData(msg));
+
+      expect(result).toEqual({ handled: true, action: 'verdict_recorded' });
+      expect(db.recordFeedback).toHaveBeenCalledWith(
+        expect.objectContaining({ verdict: 'false_positive' })
+      );
+      // The reply text must be passed as quoted data, not raw instructions
+      const prompt = aiParser.sendPrompt.mock.calls[0][0] as string;
+      expect(prompt).toContain('REPLY TEXT');
+      expect(prompt).toContain('vendor switched banks');
+    });
+
+    it('does not consult the AI when keywords already match', async () => {
+      const { aiParser, service } = makeServiceWithAI('{"verdict": "false_positive"}');
+      const msg = makeMsg({ text: 'confirmed phishing' });
+
+      await service.process(msg, makeEmailData(msg));
+
+      expect(aiParser.sendPrompt).not.toHaveBeenCalled();
+    });
+
+    it('falls back to help when the AI finds no verdict', async () => {
+      const { db, service } = makeServiceWithAI('{"verdict": "none"}');
+      const msg = makeMsg({ text: 'what is the campaign status?' });
+
+      const result = await service.process(msg, makeEmailData(msg));
+
+      expect(result).toEqual({ handled: true, action: 'help_sent' });
+      expect(db.recordFeedback).not.toHaveBeenCalled();
+    });
+
+    it('rejects AI responses outside the two allowed verdicts', async () => {
+      const { db, service } = makeServiceWithAI('{"verdict": "delete_all_indicators"}');
+      const msg = makeMsg({ text: 'ambiguous reply' });
+
+      const result = await service.process(msg, makeEmailData(msg));
+
+      expect(result.action).toBe('help_sent');
+      expect(db.recordFeedback).not.toHaveBeenCalled();
+    });
+
+    it('treats AI failures as no verdict instead of erroring', async () => {
+      const { db, notifier } = makeFakes();
+      const aiParser = {
+        name: 'fake',
+        model: 'fake-model',
+        sendPrompt: jest.fn().mockRejectedValue(new Error('model unavailable')),
+      };
+      const service = new EmailCommandService(
+        db as never,
+        notifier as never,
+        SECURITY_TEAM,
+        aiParser as never
+      );
+      const msg = makeMsg({ text: 'so what do you reckon?' });
+
+      const result = await service.process(msg, makeEmailData(msg));
+
+      expect(result.action).toBe('help_sent');
+    });
+  });
 });

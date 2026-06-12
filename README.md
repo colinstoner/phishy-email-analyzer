@@ -19,6 +19,8 @@ Perfect for security teams, IT departments, or anyone who needs to verify suspic
 ## Features
 
 - 🛡️ **Robust Analysis**: Uses Claude AI (Opus 4.8 by default; Sonnet 4.6/Haiku 4.5 configurable) to evaluate email senders, content, links, and attachments
+- 🤖 **Agentic Analysis** (optional): Claude consults your own threat intel — prior indicator sightings, concurrent reports of the same campaign, URL inspection, VIP/lookalike checks — before delivering its verdict
+- 💬 **Email Commands** (optional): the security team replies to a report to confirm or overturn a verdict; one reply resolves an entire campaign and Phishy answers with the completed actions
 - 💰 **Cost Visibility**: Per-analysis token and cost metrics in CloudWatch (namespace `Phishy`), no database required
 - ⚡ **Serverless Architecture**: Runs on AWS Lambda for zero-maintenance operation
 - 🔄 **Easy Workflow**: Just forward suspicious emails to your designated address

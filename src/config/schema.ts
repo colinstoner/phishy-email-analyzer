@@ -103,6 +103,20 @@ const CommandsConfigSchema = z.object({
 });
 
 /**
+ * Agentic analysis configuration schema
+ * Runs analysis as a bounded tool-use loop: Claude may consult Phishy's own
+ * threat intelligence (known indicators, campaign history, URL inspection,
+ * enterprise profile) before delivering its verdict. Also enables AI
+ * interpretation of free-text security-team commands. Falls back to the
+ * standard single-shot analysis on any failure.
+ */
+const AgenticConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  /** Maximum tool-use rounds before the model must deliver a verdict */
+  maxToolRounds: z.number().int().min(1).max(10).default(5),
+});
+
+/**
  * Campaign verdict cache configuration schema
  * Reuses a recent analysis verdict for reports matching the same campaign
  * signature, instead of paying for a fresh AI analysis per duplicate report.
@@ -127,6 +141,7 @@ export const PhishyConfigSchema = z.object({
   campaignAlerts: CampaignAlertConfigSchema.optional(),
   campaignCache: CampaignCacheConfigSchema.optional(),
   commands: CommandsConfigSchema.optional(),
+  agentic: AgenticConfigSchema.optional(),
   logLevel: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   version: z.string().optional(),
 });
@@ -145,6 +160,7 @@ export type IntelligenceConfig = z.infer<typeof IntelligenceConfigSchema>;
 export type CampaignAlertConfig = z.infer<typeof CampaignAlertConfigSchema>;
 export type CampaignCacheConfig = z.infer<typeof CampaignCacheConfigSchema>;
 export type CommandsConfig = z.infer<typeof CommandsConfigSchema>;
+export type AgenticConfig = z.infer<typeof AgenticConfigSchema>;
 
 /**
  * Partial configuration for merging

@@ -40,6 +40,10 @@
     "enabled": false,
     "ttlHours": 24
   },
+  "agentic": {
+    "enabled": false,
+    "maxToolRounds": 5
+  },
   "commands": {
     "enabled": false
   },

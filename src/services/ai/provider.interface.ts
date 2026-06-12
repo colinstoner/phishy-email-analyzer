@@ -5,6 +5,7 @@
 
 import { AnalysisResult, ExtractedEmailData } from '../../types';
 import { EnterpriseProfile } from '../../models/profile.model';
+import { ConversationRequest, ConversationResponse } from './conversation.types';
 
 /**
  * Options for AI analysis
@@ -40,6 +41,13 @@ export interface AIProvider {
    * Send a raw prompt and get response
    */
   sendPrompt(prompt: string, options?: AnalysisOptions): Promise<string>;
+
+  /**
+   * Run one turn of a multi-message conversation, optionally offering tools
+   * the model may call. Powers the agentic analysis loop. Optional — callers
+   * must check for support before relying on it.
+   */
+  converse?(request: ConversationRequest, options?: AnalysisOptions): Promise<ConversationResponse>;
 
   /**
    * Check if the provider is available/configured

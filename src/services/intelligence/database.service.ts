@@ -807,12 +807,26 @@ export class IntelligenceDatabaseService {
     await this.initialize();
 
     const result = await this.pool.query('SELECT * FROM campaigns WHERE id = $1', [campaignId]);
+    return result.rows.length > 0 ? this.mapRowToCampaign(result.rows[0]) : null;
+  }
 
-    if (result.rows.length === 0) {
-      return null;
-    }
+  /**
+   * Look up a campaign by its signature (used by the agentic check_campaign
+   * tool to answer "have other employees reported emails like this one?")
+   */
+  async getCampaignBySignature(signature: string): Promise<CampaignRecord | null> {
+    await this.initialize();
 
-    const row = result.rows[0];
+    const result = await this.pool.query('SELECT * FROM campaigns WHERE campaign_signature = $1', [
+      signature,
+    ]);
+    return result.rows.length > 0 ? this.mapRowToCampaign(result.rows[0]) : null;
+  }
+
+  /**
+   * Map database row to CampaignRecord
+   */
+  private mapRowToCampaign(row: Record<string, unknown>): CampaignRecord {
     return {
       id: row.id as string,
       campaignSignature: row.campaign_signature as string,
@@ -824,7 +838,7 @@ export class IntelligenceDatabaseService {
       sampleIndicators: row.sample_indicators as string[],
       firstSeenAt: row.first_seen_at as Date,
       lastSeenAt: row.last_seen_at as Date,
-      alertSentAt: row.alert_sent_at as Date | undefined,
+      alertSentAt: (row.alert_sent_at as Date | null) ?? undefined,
       isActive: row.is_active as boolean,
     };
   }

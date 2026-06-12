@@ -26,6 +26,8 @@ import { estimateCostUsd } from '../utils/pricing';
 import { emitAIUsageMetric, emitCampaignCacheHitMetric } from '../utils/metrics';
 import { ReportOptions } from '../templates/report.html';
 import { EmailCommandService } from '../services/commands/email.command.service';
+import { AgenticAnalyzer } from '../services/ai/agentic/agentic.analyzer';
+import { AgenticToolExecutor } from '../services/ai/agentic/tool.executor';
 import {
   IntelligenceDatabaseService,
   CampaignAlertService,
@@ -178,22 +180,8 @@ async function initializeServices(): Promise<{
     fallbackProvider = createAIProvider(fallbackConfig, emailParser, cachedProfile);
   }
 
-  // Create analysis service
-  const analysisService = new AnalysisService({
-    primaryProvider,
-    fallbackProvider,
-  });
-
-  // Create SES notifier
-  const sesNotifier = new SESNotifier({
-    region: config.storage.region,
-    senderEmail: config.notification.senderEmail,
-    senderName: config.notification.senderName,
-    securityTeamDistribution: config.notification.securityTeamDistribution,
-    configSet: config.notification.sesConfigSet,
-  });
-
-  // Initialize intelligence and campaign services if enabled
+  // Initialize intelligence and campaign services if enabled (before the
+  // analysis service — the agentic tools query the intelligence database)
   let intelligenceDb: IntelligenceDatabaseService | undefined;
   let campaignService: CampaignAlertService | undefined;
 
@@ -215,16 +203,54 @@ async function initializeServices(): Promise<{
     }
   }
 
-  // Email command channel: security team replies to reports to direct Phishy
+  // Agentic analysis: a bounded tool loop over Phishy's own data — known
+  // indicators, campaign history, URL inspection, and the enterprise profile
+  let agenticAnalyzer: AgenticAnalyzer | undefined;
+  if (config.agentic?.enabled) {
+    const toolExecutor = new AgenticToolExecutor({
+      db: intelligenceDb,
+      profile: cachedProfile,
+    });
+    agenticAnalyzer = new AgenticAnalyzer(toolExecutor, {
+      maxToolRounds: config.agentic.maxToolRounds,
+      essentialHeadersExtractor: (headers): Record<string, string> =>
+        emailParser.extractEssentialHeaders(headers),
+    });
+    logger.info('Agentic analysis enabled', {
+      maxToolRounds: config.agentic.maxToolRounds,
+      tools: toolExecutor.getToolDefinitions().map(t => t.name),
+    });
+  }
+
+  // Create analysis service
+  const analysisService = new AnalysisService({
+    primaryProvider,
+    fallbackProvider,
+    agenticAnalyzer,
+  });
+
+  // Create SES notifier
+  const sesNotifier = new SESNotifier({
+    region: config.storage.region,
+    senderEmail: config.notification.senderEmail,
+    senderName: config.notification.senderName,
+    securityTeamDistribution: config.notification.securityTeamDistribution,
+    configSet: config.notification.sesConfigSet,
+  });
+
+  // Email command channel: security team replies to reports to direct Phishy.
+  // With agentic mode on, free-text commands are interpreted by the model.
   let commandService: EmailCommandService | undefined;
   if (config.commands?.enabled && intelligenceDb) {
     commandService = new EmailCommandService(
       intelligenceDb,
       sesNotifier,
-      config.notification.securityTeamDistribution
+      config.notification.securityTeamDistribution,
+      config.agentic?.enabled ? primaryProvider : undefined
     );
     logger.info('Email command service initialized', {
       authorizedSenders: config.notification.securityTeamDistribution.length,
+      aiCommandParsing: !!config.agentic?.enabled,
     });
   }
 

@@ -11,6 +11,7 @@ import {
   parseAnalysisResponse,
 } from './provider.interface';
 import { buildPhishingAnalysisPrompt } from './prompt.builder';
+import { ConversationRequest, ConversationResponse, ContentBlock } from './conversation.types';
 import { AnalysisResult, ExtractedEmailData } from '../../types';
 import { createLogger } from '../../utils/logger';
 import { withRetry, isRetryableHttpError } from '../../utils/retry';
@@ -111,6 +112,101 @@ export class BedrockProvider implements AIProvider {
     });
 
     return result;
+  }
+
+  /**
+   * Run one turn of a tool-capable conversation via InvokeModel. The request
+   * body is the Anthropic Messages format, which Bedrock passes through.
+   */
+  async converse(
+    request: ConversationRequest,
+    options?: AnalysisOptions
+  ): Promise<ConversationResponse> {
+    const maxTokens = request.maxTokens ?? options?.maxTokens ?? this.maxTokens;
+
+    logger.info('Bedrock conversation turn', {
+      model: this.model,
+      messages: request.messages.length,
+      tools: request.tools?.length ?? 0,
+    });
+
+    return withRetry(
+      async () => {
+        const requestBody: Record<string, unknown> = {
+          anthropic_version: 'bedrock-2023-05-31',
+          max_tokens: maxTokens,
+          messages: request.messages,
+        };
+        if (request.system) {
+          requestBody.system = request.system;
+        }
+        if (request.tools?.length) {
+          requestBody.tools = request.tools;
+        }
+
+        const command = new InvokeModelCommand({
+          modelId: this.model,
+          contentType: 'application/json',
+          accept: 'application/json',
+          body: JSON.stringify(requestBody),
+        });
+
+        const response = await this.client.send(command);
+        if (!response.body) {
+          throw new Error('Empty response from Bedrock');
+        }
+
+        const parsed = JSON.parse(new TextDecoder().decode(response.body)) as BedrockResponse;
+        if (parsed.error) {
+          throw new Error(`Bedrock error: ${parsed.error.message ?? 'Unknown error'}`);
+        }
+        if (parsed.stop_reason === 'refusal') {
+          throw new Error('Claude refused to respond');
+        }
+
+        const content: ContentBlock[] = [];
+        for (const block of parsed.content ?? []) {
+          if (block.type === 'text' && block.text) {
+            content.push({ type: 'text', text: block.text });
+          } else if (block.type === 'tool_use' && block.id && block.name) {
+            content.push({
+              type: 'tool_use',
+              id: block.id,
+              name: block.name,
+              input: block.input ?? {},
+            });
+          }
+        }
+
+        return {
+          content,
+          stopReason: parsed.stop_reason,
+          usage: parsed.usage
+            ? {
+                inputTokens: parsed.usage.input_tokens,
+                outputTokens: parsed.usage.output_tokens,
+                totalTokens: parsed.usage.input_tokens + parsed.usage.output_tokens,
+              }
+            : undefined,
+        };
+      },
+      {
+        maxRetries: 3,
+        baseDelayMs: 1000,
+        shouldRetry: error => {
+          const message = error.message || '';
+          if (
+            message.includes('AccessDeniedException') ||
+            message.includes('ResourceNotFoundException') ||
+            message.includes('Bedrock error:') ||
+            message.includes('refused to respond')
+          ) {
+            return false;
+          }
+          return isRetryableHttpError(error);
+        },
+      }
+    );
   }
 
   /**
@@ -282,6 +378,9 @@ interface BedrockResponse {
   content?: Array<{
     type: string;
     text?: string;
+    id?: string;
+    name?: string;
+    input?: Record<string, unknown>;
   }>;
   model?: string;
   stop_reason?: string;

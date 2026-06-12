@@ -81,6 +81,30 @@ When the same setting is defined in multiple places, Phishy uses this priority (
 | `PHISHY_CAMPAIGN_ALERTS_ENABLED` | `false` | Enable campaign flood detection alerts |
 | `PHISHY_CAMPAIGN_ALERTS_DISTRIBUTION` | - | Email to receive campaign alerts |
 
+### Agentic Analysis
+
+By default Phishy analyzes each email in a single AI call. With agentic mode enabled, the analysis runs as a **bounded tool-use loop**: Claude reads the email and may consult Phishy's own data before delivering its verdict.
+
+The tools — deliberately limited to organizational data and pure computation, with no network fetches or open-ended browsing:
+
+| Tool | Backed by | Answers |
+|------|-----------|---------|
+| `examine_url` | pure computation | "What's structurally suspicious about this link?" (IP hosts, punycode, redirect chains, credential tricks — never fetched) |
+| `lookup_indicators` | intelligence DB | "Have we seen this domain/URL/IP/email before, and how bad was it?" |
+| `check_campaign` | intelligence DB | "Are other employees reporting this same email right now?" |
+| `check_profile` | enterprise profile | "Is this a VIP, a trusted partner, our own domain — or a lookalike of one?" |
+
+Tools are only offered when their backing data exists (no database → no intel tools). The loop is hard-capped at `maxToolRounds`; any failure falls back to the standard single-shot analysis, so agentic mode can never make Phishy less reliable. The verdict summary cites what the intelligence showed (e.g. "this domain was flagged in 4 previous reports"), and the tools used are recorded with the analysis.
+
+Agentic mode also upgrades **Email Commands**: free-text replies the keyword parser can't read ("checked with accounting, that vendor switched banks — all good") are interpreted by the model, constrained to the two known verdicts.
+
+Note: each tool round is an additional model call, so an agentic analysis can cost roughly 2–4× a standard one. The campaign verdict cache offsets this — in a flood, only the first report pays for the deep analysis.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PHISHY_AGENTIC_ENABLED` | `false` | Run analysis as a bounded tool-use loop |
+| `PHISHY_AGENTIC_MAX_TOOL_ROUNDS` | `5` | Maximum tool rounds before a verdict is required (1–10) |
+
 ### Campaign Verdict Cache
 
 When a phishing campaign hits many inboxes at once, every recipient may forward the same email. With the cache enabled, the **first** report gets a full AI analysis; reports matching the same campaign within the cache window reuse that verdict — every reporter gets a consistent answer, instantly and at no extra AI cost. Reports served from the cache say so in the summary, and a `CampaignCacheHits` / `EstimatedCostSavedUSD` metric is emitted (see Cost Tracking below).

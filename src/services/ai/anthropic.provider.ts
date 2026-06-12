@@ -11,6 +11,7 @@ import {
   parseAnalysisResponse,
 } from './provider.interface';
 import { buildPhishingAnalysisPrompt } from './prompt.builder';
+import { ConversationRequest, ConversationResponse, ContentBlock } from './conversation.types';
 import { AnalysisResult, ExtractedEmailData } from '../../types';
 import { createLogger } from '../../utils/logger';
 import { withRetry, isRetryableHttpError } from '../../utils/retry';
@@ -109,6 +110,116 @@ export class AnthropicProvider implements AIProvider {
     });
 
     return result;
+  }
+
+  /**
+   * Run one turn of a tool-capable conversation against the Messages API
+   */
+  async converse(
+    request: ConversationRequest,
+    options?: AnalysisOptions
+  ): Promise<ConversationResponse> {
+    const maxTokens = request.maxTokens ?? options?.maxTokens ?? this.maxTokens;
+    const timeout = options?.timeout ?? this.timeout;
+
+    logger.info('Anthropic conversation turn', {
+      model: this.model,
+      messages: request.messages.length,
+      tools: request.tools?.length ?? 0,
+    });
+
+    return withRetry(
+      async () => {
+        try {
+          const body: Record<string, unknown> = {
+            model: this.model,
+            messages: request.messages,
+            max_tokens: maxTokens,
+          };
+          if (request.system) {
+            body.system = request.system;
+          }
+          if (request.tools?.length) {
+            body.tools = request.tools;
+          }
+
+          const response = await axios.post(ANTHROPIC_API_ENDPOINT, body, {
+            headers: {
+              'Content-Type': 'application/json',
+              'x-api-key': this.apiKey,
+              'anthropic-version': '2023-06-01',
+            },
+            timeout,
+          });
+
+          const rawContent = response.data?.content;
+          if (!Array.isArray(rawContent)) {
+            throw new Error('Unexpected response format from Anthropic API');
+          }
+
+          const content: ContentBlock[] = [];
+          for (const block of rawContent as Array<Record<string, unknown>>) {
+            if (block.type === 'text' && typeof block.text === 'string') {
+              content.push({ type: 'text', text: block.text });
+            } else if (
+              block.type === 'tool_use' &&
+              typeof block.id === 'string' &&
+              typeof block.name === 'string'
+            ) {
+              content.push({
+                type: 'tool_use',
+                id: block.id,
+                name: block.name,
+                input: (block.input as Record<string, unknown>) ?? {},
+              });
+            }
+          }
+
+          const apiUsage = response.data?.usage;
+          const usage =
+            typeof apiUsage?.input_tokens === 'number' &&
+            typeof apiUsage?.output_tokens === 'number'
+              ? {
+                  inputTokens: apiUsage.input_tokens,
+                  outputTokens: apiUsage.output_tokens,
+                  totalTokens: apiUsage.input_tokens + apiUsage.output_tokens,
+                }
+              : undefined;
+
+          return {
+            content,
+            stopReason: response.data?.stop_reason as string | undefined,
+            usage,
+          };
+        } catch (error) {
+          if (axios.isAxiosError(error)) {
+            const axiosError = error as AxiosError;
+            if (axiosError.response?.status === 401) {
+              throw new Error('Invalid Anthropic API key');
+            }
+            if (axiosError.response?.status === 400) {
+              throw new Error(
+                `Anthropic API bad request: ${JSON.stringify(axiosError.response.data)}`
+              );
+            }
+            throw new Error(
+              `Anthropic API error: ${axiosError.response?.status ?? 'unknown'} - ${axiosError.message}`
+            );
+          }
+          throw error;
+        }
+      },
+      {
+        maxRetries: 3,
+        baseDelayMs: 1000,
+        shouldRetry: error => {
+          if (error.message.includes('401') || error.message.includes('400')) {
+            return false;
+          }
+          return isRetryableHttpError(error);
+        },
+      }
+    );
   }
 
   /**
