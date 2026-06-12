@@ -103,6 +103,18 @@ const CommandsConfigSchema = z.object({
 });
 
 /**
+ * Campaign verdict cache configuration schema
+ * Reuses a recent analysis verdict for reports matching the same campaign
+ * signature, instead of paying for a fresh AI analysis per duplicate report.
+ * Requires the intelligence database and migration 003.
+ */
+const CampaignCacheConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  /** How long a verdict may be reused before the campaign is re-analyzed */
+  ttlHours: z.number().positive().max(168).default(24),
+});
+
+/**
  * Complete Phishy configuration schema
  */
 export const PhishyConfigSchema = z.object({
@@ -113,6 +125,7 @@ export const PhishyConfigSchema = z.object({
   profile: z.string().optional(), // Profile ID or S3 path
   intelligence: IntelligenceConfigSchema.optional(),
   campaignAlerts: CampaignAlertConfigSchema.optional(),
+  campaignCache: CampaignCacheConfigSchema.optional(),
   commands: CommandsConfigSchema.optional(),
   logLevel: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   version: z.string().optional(),
@@ -130,6 +143,7 @@ export type NotificationConfig = z.infer<typeof NotificationConfigSchema>;
 export type StorageConfig = z.infer<typeof StorageConfigSchema>;
 export type IntelligenceConfig = z.infer<typeof IntelligenceConfigSchema>;
 export type CampaignAlertConfig = z.infer<typeof CampaignAlertConfigSchema>;
+export type CampaignCacheConfig = z.infer<typeof CampaignCacheConfigSchema>;
 export type CommandsConfig = z.infer<typeof CommandsConfigSchema>;
 
 /**

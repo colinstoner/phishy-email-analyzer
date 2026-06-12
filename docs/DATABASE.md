@@ -36,6 +36,9 @@ Recurring patterns confirmed across multiple analyses, keyed by `(pattern_type, 
 ### `ai_usage`
 Per-request token counts and estimated cost, optionally linked to the analysis row (`ON DELETE SET NULL`). Powers the cost-analytics stats (totals, 24h/7d windows, per-model breakdown).
 
+### `email_analyses.campaign_signature` *(migration 003 — not auto-created)*
+Tags each analysis with its flood-detection campaign signature, powering the **campaign verdict cache**: a report matching a recently analyzed campaign (within `PHISHY_CAMPAIGN_CACHE_TTL_HOURS`) reuses that verdict instead of triggering a new AI analysis. Cache lookups prefer an analysis with a security-team verdict (`analysis_feedback`) over the most recent raw analysis, and verdict feedback adjusts indicators sourced from *every* analysis sharing the signature — one reply resolves the whole campaign. Cached reports are stored with `ai_provider = 'cache'` and never serve as cache sources themselves (unless they carry feedback), so a campaign is re-analyzed once the original analysis ages out. Apply `migrations/003_campaign_verdict_cache.sql` before setting `PHISHY_CAMPAIGN_CACHE_ENABLED=true`.
+
 ### `analysis_feedback` *(migration 002 — not auto-created)*
 Security-team verdicts on analyses, submitted by replying to Phishy's reports (the email command channel). One row per analysis (`UNIQUE(analysis_id)`); resubmission updates in place so a correction wins. Feedback also adjusts `threat_indicators` confidence through IOC provenance (`metadata.sourceAnalysisId`). Migration 002 additionally adds `email_analyses.report_message_id`, which links each outbound report to its analysis so replies can be matched via `In-Reply-To`. Apply `migrations/002_analysis_feedback.sql` before setting `PHISHY_EMAIL_COMMANDS_ENABLED=true`.
 

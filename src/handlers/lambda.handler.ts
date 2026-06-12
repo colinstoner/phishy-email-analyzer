@@ -13,14 +13,25 @@ import { AnthropicProvider } from '../services/ai/anthropic.provider';
 import { BedrockProvider } from '../services/ai/bedrock.provider';
 import { AIProvider } from '../services/ai/provider.interface';
 import { EnterpriseProfile, validateProfile } from '../models/profile.model';
-import { LambdaResponse, ProcessingResult, EmailMessage, ExtractedEmailData } from '../types';
+import {
+  LambdaResponse,
+  ProcessingResult,
+  EmailMessage,
+  ExtractedEmailData,
+  AnalysisResult,
+} from '../types';
 import { createLogger } from '../utils/logger';
 import { extractEmailAddress, domainMatches } from '../utils/validation';
 import { estimateCostUsd } from '../utils/pricing';
-import { emitAIUsageMetric } from '../utils/metrics';
+import { emitAIUsageMetric, emitCampaignCacheHitMetric } from '../utils/metrics';
 import { ReportOptions } from '../templates/report.html';
 import { EmailCommandService } from '../services/commands/email.command.service';
-import { IntelligenceDatabaseService, CampaignAlertService } from '../services/intelligence';
+import {
+  IntelligenceDatabaseService,
+  CampaignAlertService,
+  computeCampaignSignature,
+  buildCachedAnalysisResult,
+} from '../services/intelligence';
 import { extractIOCs, IOCSourceContext } from '../services/intelligence/ioc.extractor';
 
 const logger = createLogger('lambda-handler');
@@ -30,6 +41,12 @@ const logger = createLogger('lambda-handler');
  */
 const processedEmails = new Set<string>();
 const CACHE_MAX_SIZE = 100;
+
+/**
+ * Cost of the most recent real AI analysis in this Lambda instance — used to
+ * estimate the spend avoided by a campaign verdict cache hit
+ */
+let lastAnalysisCostUsd = 0;
 
 /**
  * Cached configuration and services
@@ -360,8 +377,40 @@ async function processEmailEvent(
     services.analysisService.setProfile(cachedProfile);
   }
 
-  // Analyze with AI
-  const analysis = await services.analysisService.analyzeEmail(emailData);
+  const senderDomain = emailData.from_email.split('@')[1] ?? 'unknown';
+  const campaignSignature =
+    services.intelligenceDb && !isSafelistUser
+      ? computeCampaignSignature(senderDomain, emailData.subject)
+      : undefined;
+
+  // Campaign verdict cache: when a flood of the same email is reported, the
+  // first report pays for a full AI analysis and the rest reuse its verdict.
+  // A security-team ruling on any report in the campaign overrides the AI.
+  let analysis: AnalysisResult | null = null;
+  if (config.campaignCache?.enabled && campaignSignature && services.intelligenceDb) {
+    try {
+      const cacheHit = await services.intelligenceDb.findCampaignVerdict(
+        campaignSignature,
+        config.campaignCache.ttlHours
+      );
+      if (cacheHit) {
+        analysis = buildCachedAnalysisResult(cacheHit);
+        emitCampaignCacheHitMetric(lastAnalysisCostUsd);
+        logger.info('Campaign verdict cache hit', {
+          campaignSignature,
+          sourceAnalysisId: cacheHit.analysisId,
+          securityVerdict: cacheHit.feedbackVerdict,
+        });
+      }
+    } catch (cacheError) {
+      logger.warn('Campaign verdict cache lookup failed — running full analysis', {
+        error: cacheError instanceof Error ? cacheError.message : String(cacheError),
+      });
+    }
+  }
+
+  // Analyze with AI (cache miss or cache disabled)
+  analysis ??= await services.analysisService.analyzeEmail(emailData);
 
   // Emit CloudWatch usage/cost metrics for every analysis, regardless of
   // whether the intelligence database is enabled
@@ -373,6 +422,7 @@ async function processEmailEvent(
       )
     : 0;
   if (analysis.tokenUsage) {
+    lastAnalysisCostUsd = estimatedCostUsd;
     emitAIUsageMetric({
       provider: analysis.provider ?? 'unknown',
       model: analysis.model ?? 'unknown',
@@ -389,7 +439,6 @@ async function processEmailEvent(
   let storedAnalysisId: string | undefined;
   if (services.intelligenceDb && !isSafelistUser) {
     try {
-      const senderDomain = emailData.from_email.split('@')[1] ?? 'unknown';
       const messageId = msg.messageId ?? `${Date.now()}-${Math.random().toString(36).substring(7)}`;
 
       const analysisId = await services.intelligenceDb.storeAnalysis({
@@ -406,6 +455,7 @@ async function processEmailEvent(
         aiProvider: analysis.provider ?? 'unknown',
         aiModel: analysis.model ?? 'unknown',
         processingTimeMs: analysis.processingTimeMs ?? 0,
+        campaignSignature,
       });
       storedAnalysisId = analysisId;
       logger.info('Stored analysis in intelligence database', { analysisId });
@@ -468,7 +518,6 @@ async function processEmailEvent(
 
   // Track for campaign detection if phishing detected (skip for safelist users)
   if (analysis.isPhishing && services.campaignService && !isSafelistUser) {
-    const senderDomain = emailData.from_email.split('@')[1] ?? 'unknown';
     const riskLevel = mapConfidenceToRiskLevel(analysis.confidence);
 
     try {

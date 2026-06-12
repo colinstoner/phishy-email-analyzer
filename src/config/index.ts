@@ -58,6 +58,10 @@ const ENV_MAPPINGS: Record<string, string> = {
   PHISHY_CAMPAIGN_ALERTS_ENABLED: 'campaignAlerts.enabled',
   PHISHY_CAMPAIGN_ALERTS_DISTRIBUTION: 'campaignAlerts.distributionList',
 
+  // Campaign verdict cache
+  PHISHY_CAMPAIGN_CACHE_ENABLED: 'campaignCache.enabled',
+  PHISHY_CAMPAIGN_CACHE_TTL_HOURS: 'campaignCache.ttlHours',
+
   // Email commands
   PHISHY_EMAIL_COMMANDS_ENABLED: 'commands.enabled',
 
@@ -128,7 +132,7 @@ function getDefaultConfig(): PartialPhishyConfig {
       // This allows bedrock provider to work without requiring an Anthropic key
       bedrock: {
         region: 'us-east-1',
-        modelId: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
+        modelId: 'anthropic.claude-opus-4-8',
         maxTokens: 4096,
         timeout: 60000,
       },

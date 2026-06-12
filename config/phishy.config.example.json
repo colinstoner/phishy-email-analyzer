@@ -36,5 +36,12 @@
     "type": "postgres",
     "connectionString": "postgresql://user:password@localhost:5432/phishy"
   },
+  "campaignCache": {
+    "enabled": false,
+    "ttlHours": 24
+  },
+  "commands": {
+    "enabled": false
+  },
   "logLevel": "info"
 }

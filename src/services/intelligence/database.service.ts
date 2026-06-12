@@ -29,6 +29,8 @@ export interface EmailAnalysisRecord {
   aiProvider: string;
   aiModel: string;
   processingTimeMs: number;
+  /** Flood-detection signature, also the campaign verdict cache key (migration 003) */
+  campaignSignature?: string;
   createdAt?: Date;
 }
 
@@ -134,6 +136,18 @@ export interface FeedbackRecord {
   submittedBy?: string;
   notes?: string;
   createdAt?: Date;
+}
+
+/**
+ * A reusable verdict from a recent analysis of the same campaign
+ */
+export interface CampaignVerdictCacheHit {
+  analysisId: string;
+  analysisResult: AnalysisResult;
+  analyzedAt: Date;
+  /** Set when the security team has ruled on this campaign — overrides the AI verdict */
+  feedbackVerdict?: FeedbackRecord['verdict'];
+  feedbackBy?: string;
 }
 
 /**
@@ -347,29 +361,55 @@ export class IntelligenceDatabaseService {
   async storeAnalysis(record: EmailAnalysisRecord): Promise<string> {
     await this.initialize();
 
-    const result = await this.pool.query(
+    const baseParams = [
+      record.profileId ?? null,
+      record.messageId,
+      record.fromEmail,
+      record.fromDomain,
+      record.subject,
+      record.isPhishing,
+      record.confidenceScore,
+      record.riskLevel,
+      JSON.stringify(record.analysisResult),
+      record.indicators,
+      record.vipImpersonationDetected,
+      record.aiProvider,
+      record.aiModel,
+      record.processingTimeMs,
+    ];
+
+    let result;
+    if (record.campaignSignature) {
+      try {
+        result = await this.pool.query(
+          `INSERT INTO email_analyses
+           (profile_id, message_id, from_email, from_domain, subject, is_phishing,
+            confidence_score, risk_level, analysis_result, indicators,
+            vip_impersonation_detected, ai_provider, ai_model, processing_time_ms,
+            campaign_signature)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+           RETURNING id`,
+          [...baseParams, record.campaignSignature]
+        );
+      } catch (error) {
+        // 42703 = campaign_signature column missing (migration 003 not applied)
+        if ((error as { code?: string }).code !== '42703') {
+          throw error;
+        }
+        logger.warn(
+          'campaign_signature column missing — apply migrations/003_campaign_verdict_cache.sql; storing analysis without it'
+        );
+      }
+    }
+
+    result ??= await this.pool.query(
       `INSERT INTO email_analyses
        (profile_id, message_id, from_email, from_domain, subject, is_phishing,
         confidence_score, risk_level, analysis_result, indicators,
         vip_impersonation_detected, ai_provider, ai_model, processing_time_ms)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
        RETURNING id`,
-      [
-        record.profileId ?? null,
-        record.messageId,
-        record.fromEmail,
-        record.fromDomain,
-        record.subject,
-        record.isPhishing,
-        record.confidenceScore,
-        record.riskLevel,
-        JSON.stringify(record.analysisResult),
-        record.indicators,
-        record.vipImpersonationDetected,
-        record.aiProvider,
-        record.aiModel,
-        record.processingTimeMs,
-      ]
+      baseParams
     );
 
     const id = result.rows[0].id as string;
@@ -667,11 +707,8 @@ export class IntelligenceDatabaseService {
     await this.initialize();
 
     // Generate campaign signature from sender domain + normalized subject
-    const normalizedSubject = this.normalizeSubjectForCampaign(subject);
-    const signature = createHash('sha256')
-      .update(`${senderDomain.toLowerCase()}:${normalizedSubject}`)
-      .digest('hex')
-      .substring(0, 16);
+    const normalizedSubject = normalizeSubjectForCampaign(subject);
+    const signature = computeCampaignSignature(senderDomain, subject);
 
     const client = await this.pool.connect();
 
@@ -793,23 +830,6 @@ export class IntelligenceDatabaseService {
   }
 
   /**
-   * Normalize subject line for campaign matching
-   * Strips numbers, dates, invoice numbers, etc. to group similar subjects
-   */
-  private normalizeSubjectForCampaign(subject: string): string {
-    return subject
-      .toLowerCase()
-      .replace(/re:\s*/gi, '')
-      .replace(/fw:\s*/gi, '')
-      .replace(/fwd:\s*/gi, '')
-      .replace(/\d+/g, '#') // Replace numbers with #
-      .replace(/[^\w\s#]/g, '') // Remove special chars except #
-      .replace(/\s+/g, ' ') // Normalize whitespace
-      .trim()
-      .substring(0, 100); // Limit length
-  }
-
-  /**
    * Link an outbound report email to its analysis so security-team replies
    * can be matched via In-Reply-To. Non-fatal if the column is missing
    * (migration 002 not yet applied).
@@ -907,6 +927,11 @@ export class IntelligenceDatabaseService {
    * provenance (metadata.sourceAnalysisId). Confirmation boosts confidence;
    * a false positive decays it and deactivates indicators that fall below
    * the floor, so they stop matching future lookups.
+   *
+   * The verdict applies campaign-wide: indicators sourced from any analysis
+   * sharing the campaign signature are adjusted, so replying to any one
+   * report in a flood resolves them all. Falls back to per-analysis scope
+   * when migration 003 (campaign_signature) is not applied.
    */
   async applyFeedbackToIndicators(
     analysisId: string,
@@ -914,22 +939,36 @@ export class IntelligenceDatabaseService {
   ): Promise<number> {
     await this.initialize();
 
-    const result =
+    const updateSql = (sourceFilter: string): string =>
       verdict === 'confirmed_phishing'
-        ? await this.pool.query(
-            `UPDATE threat_indicators
-             SET confidence_score = LEAST(1.0, confidence_score + 0.2),
-                 last_seen_at = NOW()
-             WHERE metadata->>'sourceAnalysisId' = $1`,
-            [analysisId]
-          )
-        : await this.pool.query(
-            `UPDATE threat_indicators
-             SET confidence_score = GREATEST(0.0, confidence_score - 0.3),
-                 is_active = (confidence_score - 0.3) > 0.1
-             WHERE metadata->>'sourceAnalysisId' = $1`,
-            [analysisId]
-          );
+        ? `UPDATE threat_indicators
+           SET confidence_score = LEAST(1.0, confidence_score + 0.2),
+               last_seen_at = NOW()
+           WHERE ${sourceFilter}`
+        : `UPDATE threat_indicators
+           SET confidence_score = GREATEST(0.0, confidence_score - 0.3),
+               is_active = (confidence_score - 0.3) > 0.1
+           WHERE ${sourceFilter}`;
+
+    let result;
+    try {
+      result = await this.pool.query(
+        updateSql(`metadata->>'sourceAnalysisId' IN (
+           SELECT sibling.id::text FROM email_analyses sibling
+           WHERE sibling.id = $1
+              OR (sibling.campaign_signature IS NOT NULL
+                  AND sibling.campaign_signature =
+                      (SELECT campaign_signature FROM email_analyses WHERE id = $1))
+         )`),
+        [analysisId]
+      );
+    } catch (error) {
+      // 42703 = campaign_signature column missing — adjust this analysis only
+      if ((error as { code?: string }).code !== '42703') {
+        throw error;
+      }
+      result = await this.pool.query(updateSql(`metadata->>'sourceAnalysisId' = $1`), [analysisId]);
+    }
 
     const adjusted = result.rowCount ?? 0;
     logger.info('Adjusted indicator confidence from feedback', {
@@ -1067,8 +1106,68 @@ export class IntelligenceDatabaseService {
       aiProvider: row.ai_provider as string,
       aiModel: row.ai_model as string,
       processingTimeMs: row.processing_time_ms as number,
+      campaignSignature: (row.campaign_signature as string | null) ?? undefined,
       createdAt: row.created_at as Date,
     };
+  }
+
+  /**
+   * Find a reusable verdict for a campaign: the most recent analysis with the
+   * same signature within the cache window. An analysis the security team has
+   * ruled on (via the email command channel) is preferred over a newer raw
+   * analysis, so one human verdict resolves the whole campaign.
+   *
+   * Degrades gracefully: returns null when migration 003 (campaign_signature)
+   * is missing, and skips the feedback join when migration 002 is missing.
+   */
+  async findCampaignVerdict(
+    signature: string,
+    maxAgeHours: number
+  ): Promise<CampaignVerdictCacheHit | null> {
+    await this.initialize();
+
+    const windowHours = Math.max(1, maxAgeHours);
+
+    try {
+      const result = await this.pool.query(
+        `SELECT ea.id, ea.analysis_result, ea.created_at,
+                af.verdict AS feedback_verdict, af.submitted_by AS feedback_by
+         FROM email_analyses ea
+         LEFT JOIN analysis_feedback af ON af.analysis_id = ea.id
+         WHERE ea.campaign_signature = $1
+           AND ea.created_at > NOW() - ($2 * INTERVAL '1 hour')
+           AND (ea.ai_provider <> 'cache' OR af.verdict IS NOT NULL)
+         ORDER BY (af.verdict IS NOT NULL) DESC, ea.created_at DESC
+         LIMIT 1`,
+        [signature, windowHours]
+      );
+      return result.rows.length > 0 ? mapRowToCacheHit(result.rows[0]) : null;
+    } catch (error) {
+      const code = (error as { code?: string }).code;
+      // 42703 = campaign_signature column missing (migration 003 not applied)
+      if (code === '42703') {
+        logger.warn(
+          'campaign_signature column missing — apply migrations/003_campaign_verdict_cache.sql to enable the campaign verdict cache'
+        );
+        return null;
+      }
+      // 42P01 = analysis_feedback table missing (migration 002 not applied) —
+      // cache still works, just without security-team verdict overrides
+      if (code === '42P01') {
+        const result = await this.pool.query(
+          `SELECT id, analysis_result, created_at
+           FROM email_analyses
+           WHERE campaign_signature = $1
+             AND created_at > NOW() - ($2 * INTERVAL '1 hour')
+             AND ai_provider <> 'cache'
+           ORDER BY created_at DESC
+           LIMIT 1`,
+          [signature, windowHours]
+        );
+        return result.rows.length > 0 ? mapRowToCacheHit(result.rows[0]) : null;
+      }
+      throw error;
+    }
   }
 
   /**
@@ -1090,4 +1189,43 @@ export class IntelligenceDatabaseService {
       metadata: row.metadata as Record<string, unknown> | undefined,
     };
   }
+}
+
+/**
+ * Normalize subject line for campaign matching
+ * Strips numbers, dates, invoice numbers, etc. to group similar subjects
+ */
+function normalizeSubjectForCampaign(subject: string): string {
+  return subject
+    .toLowerCase()
+    .replace(/re:\s*/gi, '')
+    .replace(/fw:\s*/gi, '')
+    .replace(/fwd:\s*/gi, '')
+    .replace(/\d+/g, '#') // Replace numbers with #
+    .replace(/[^\w\s#]/g, '') // Remove special chars except #
+    .replace(/\s+/g, ' ') // Normalize whitespace
+    .trim()
+    .substring(0, 100); // Limit length
+}
+
+/**
+ * Campaign signature: the grouping key shared by flood detection and the
+ * campaign verdict cache. Numbers are normalized out of the subject so
+ * "Invoice #4821" and "Invoice #4822" land in the same campaign.
+ */
+export function computeCampaignSignature(senderDomain: string, subject: string): string {
+  return createHash('sha256')
+    .update(`${senderDomain.toLowerCase()}:${normalizeSubjectForCampaign(subject)}`)
+    .digest('hex')
+    .substring(0, 16);
+}
+
+function mapRowToCacheHit(row: Record<string, unknown>): CampaignVerdictCacheHit {
+  return {
+    analysisId: row.id as string,
+    analysisResult: row.analysis_result as AnalysisResult,
+    analyzedAt: row.created_at as Date,
+    feedbackVerdict: (row.feedback_verdict as FeedbackRecord['verdict'] | undefined) ?? undefined,
+    feedbackBy: (row.feedback_by as string | undefined) ?? undefined,
+  };
 }

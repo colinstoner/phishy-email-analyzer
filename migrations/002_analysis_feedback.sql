@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS analysis_feedback (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   analysis_id UUID NOT NULL REFERENCES email_analyses(id) ON DELETE CASCADE,
   verdict VARCHAR(30) NOT NULL,
-  source VARCHAR(30) NOT NULL DEFAULT 'report_link',
+  source VARCHAR(30) NOT NULL DEFAULT 'email_reply',
   submitted_by VARCHAR(500),
   notes TEXT,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),

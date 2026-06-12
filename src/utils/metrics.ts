@@ -64,3 +64,35 @@ export function emitAIUsageMetric(metric: AIUsageMetric): void {
   // whose envelope would hide the _aws key from the metric extractor.
   process.stdout.write(`${JSON.stringify(emf)}\n`);
 }
+
+/**
+ * Emit a campaign verdict cache hit: a report answered from a recent analysis
+ * of the same campaign instead of a fresh AI call. EstimatedCostSavedUSD
+ * approximates what the skipped call would have cost (based on the most
+ * recent real analysis in this Lambda instance; 0 on a cold start).
+ */
+export function emitCampaignCacheHitMetric(estimatedCostSavedUsd: number): void {
+  if (process.env.PHISHY_DISABLE_METRICS === 'true') {
+    return;
+  }
+
+  const emf = {
+    _aws: {
+      Timestamp: Date.now(),
+      CloudWatchMetrics: [
+        {
+          Namespace: NAMESPACE,
+          Dimensions: [[]],
+          Metrics: [
+            { Name: 'CampaignCacheHits', Unit: 'Count' },
+            { Name: 'EstimatedCostSavedUSD', Unit: 'None' },
+          ],
+        },
+      ],
+    },
+    CampaignCacheHits: 1,
+    EstimatedCostSavedUSD: estimatedCostSavedUsd,
+  };
+
+  process.stdout.write(`${JSON.stringify(emf)}\n`);
+}

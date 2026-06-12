@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Email command channel (`PHISHY_EMAIL_COMMANDS_ENABLED`): the security team replies to analysis reports to correct verdicts ("confirmed phishing" / "false positive"), and Phishy executes the command and replies with completed actions. Verdicts are stored per analysis (migration 002) and immediately adjust indicator confidence via IOC provenance. Authorization is two-factor: security-team membership plus SES SPF/DKIM verification
 - SES SPF/DKIM/DMARC verdicts are now captured from receipt events and available to the pipeline
 - Reports include an `Analysis ID` line, and outbound report message IDs are stored for `In-Reply-To` thread matching
+- Campaign verdict cache (`PHISHY_CAMPAIGN_CACHE_ENABLED`): when a flood of the same email is reported, the first report gets a full AI analysis and subsequent same-campaign reports reuse its verdict (migration 003) — consistent answers for every reporter, no duplicate AI spend. A security-team reply to any one report ("confirmed phishing" / "false positive") overrides the AI verdict for the whole campaign, and verdict feedback now adjusts indicators campaign-wide. Cache hits emit `CampaignCacheHits` / `EstimatedCostSavedUSD` metrics
 - CloudWatch cost/usage metrics via Embedded Metric Format: every analysis emits tokens, estimated USD cost, latency, and verdict to the `Phishy` namespace, with no database or extra IAM required (`PHISHY_DISABLE_METRICS` to opt out)
 - Per-model pricing table for cost estimation, replacing hardcoded Sonnet rates; includes the 10% Bedrock regional-endpoint premium
 - Token usage capture for the Anthropic API provider (previously Bedrock-only)
@@ -42,6 +43,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Base64 MIME decoding for forwarded content
 - Bedrock VPC endpoint HTTP/2 stream timeout
 - Config validation no longer requires an Anthropic API key when using Bedrock
+- The built-in default config still pointed Bedrock at the retired Sonnet 4.5 dated model ID, overriding the schema's Opus 4.8 default
+- Migration 002's `source` column default (`'report_link'`) violated its own CHECK constraint — leftover from the removed one-click feedback design
 
 ## [2.0.0] - 2026-02-14
 

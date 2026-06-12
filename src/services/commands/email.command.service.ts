@@ -115,7 +115,7 @@ export class EmailCommandService {
       [
         'Completed actions:',
         `  - Recorded "${verdictLabel}" for analysis ${analysisId} (submitted by ${sender})`,
-        `  - Adjusted confidence on ${adjusted} threat indicator${adjusted === 1 ? '' : 's'} from this analysis`,
+        `  - Adjusted confidence on ${adjusted} threat indicator${adjusted === 1 ? '' : 's'} from this campaign`,
         verdict === 'false_positive'
           ? '  - Indicators that fell below the confidence floor were deactivated'
           : '  - Future emails reusing these indicators will be flagged with higher confidence',

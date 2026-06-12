@@ -81,6 +81,21 @@ When the same setting is defined in multiple places, Phishy uses this priority (
 | `PHISHY_CAMPAIGN_ALERTS_ENABLED` | `false` | Enable campaign flood detection alerts |
 | `PHISHY_CAMPAIGN_ALERTS_DISTRIBUTION` | - | Email to receive campaign alerts |
 
+### Campaign Verdict Cache
+
+When a phishing campaign hits many inboxes at once, every recipient may forward the same email. With the cache enabled, the **first** report gets a full AI analysis; reports matching the same campaign within the cache window reuse that verdict — every reporter gets a consistent answer, instantly and at no extra AI cost. Reports served from the cache say so in the summary, and a `CampaignCacheHits` / `EstimatedCostSavedUSD` metric is emitted (see Cost Tracking below).
+
+Campaign matching uses the same signature as flood detection: sender domain plus the subject with numbers normalized out, so "Invoice #4821" and "Invoice #4822" match.
+
+This composes with Email Commands: when the security team replies "confirmed phishing" or "false positive" to **any one** report, that ruling overrides the AI verdict for the whole campaign — subsequent reporters are told their security team has already reviewed it.
+
+Requires the intelligence database and `migrations/003_campaign_verdict_cache.sql`.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PHISHY_CAMPAIGN_CACHE_ENABLED` | `false` | Reuse recent verdicts for same-campaign reports |
+| `PHISHY_CAMPAIGN_CACHE_TTL_HOURS` | `24` | How long a verdict may be reused before re-analysis (max 168) |
+
 ### Email Commands (Security Team Correspondence)
 
 When enabled, the security team can direct Phishy by replying to its analysis reports. Phishy matches the reply to the analysis (via the email thread or the quoted `Analysis ID:` line), executes the command, and replies with the completed actions.
@@ -135,6 +150,8 @@ Metrics appear in the **`Phishy`** namespace, dimensioned by `Provider` and `Mod
 | `EstimatedCostUSD` | Estimated spend per analysis (per-model pricing, including the 10% Bedrock regional-endpoint premium) |
 | `ProcessingTimeMs` | End-to-end analysis latency |
 | `PhishingDetected` | 1 if the verdict was phishing, 0 otherwise |
+| `CampaignCacheHits` | Reports answered from the campaign verdict cache (no AI call) |
+| `EstimatedCostSavedUSD` | Approximate spend avoided by cache hits |
 
 Useful starting points: a dashboard widget on `SUM(EstimatedCostUSD)` per day, and a billing alarm such as "alert when `SUM(EstimatedCostUSD)` over 24h exceeds $X". Set `PHISHY_DISABLE_METRICS=true` to turn emission off.
 
