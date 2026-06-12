@@ -103,6 +103,7 @@ The analysis report includes:
 | Document | Description |
 |----------|-------------|
 | [docs/QUICK_START.md](docs/QUICK_START.md) | 15-minute setup guide |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | How Phishy works: pipeline, trust boundaries, provenance model |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | All configuration options |
 | [docs/INTELLIGENCE.md](docs/INTELLIGENCE.md) | Threat intelligence features |
 | [docs/DATABASE.md](docs/DATABASE.md) | Intelligence database schema & migrations |
