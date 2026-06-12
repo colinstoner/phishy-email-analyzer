@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/colinstoner/phishy-email-analyzer/actions/workflows/ci.yml/badge.svg)](https://github.com/colinstoner/phishy-email-analyzer/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Node.js >= 18](https://img.shields.io/badge/node-%3E%3D18-brightgreen)](package.json)
+[![Node.js >= 22](https://img.shields.io/badge/node-%3E%3D22-brightgreen)](package.json)
 
 AI-powered phishing email analysis tool that uses Claude to evaluate suspicious emails and provide detailed security reports.
 
@@ -41,13 +41,6 @@ ANTHROPIC_API_KEY=sk-ant-... npm run try examples/sample-phish.eml   # + real Cl
 ```
 
 The dry run shows exactly what the deployed Lambda would see: MIME parsing, forwarded-header extraction, SafeLinks/redirect unwrapping, and content-integrity flags — on a bundled fictional sample. Point it at any `.eml` you export from your mail client.
-
-## What Reports Look Like
-
-| | |
-|---|---|
-| ![Phishing scam report](examples/Best%20Buy%20Scam.png) | ![Crypto scam report](examples/BlockFi%20Scam.png) |
-| ![Newsletter cleared](examples/Action%20Network%20Newsletter.png) | ![Legitimate email cleared](examples/The%20Palms%20Newsletter.png) |
 
 ## How It Works
 

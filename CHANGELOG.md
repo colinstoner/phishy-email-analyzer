@@ -5,16 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [3.0.0] - 2026-06-12
 
 ### Added
 - Local try-it CLI (`npm run try <file.eml>` / `npx phishy-try`): parses any `.eml` exactly as the deployed Lambda would — MIME, forwarded headers, link unwrapping, content-integrity flags — with no AWS required; add `ANTHROPIC_API_KEY` for a live Claude verdict. Bundled fictional sample in `examples/sample-phish.eml`
 - Community infrastructure: issue templates (bug/feature with data-hygiene guidance), PR template with the security-invariant checklist, Dependabot (npm + actions, AWS SDK grouped), and CodeQL scanning
-- README: "Try It in 60 Seconds" quick start and example report screenshots
-
-## [3.0.0] - 2026-06-12
-
-### Added
+- README: "Try It in 60 Seconds" quick start
 - **Structured threat verdicts** (migration 004): the model produces a categorical verdict (`bec`, `phishing`, `malware_delivery`, `spam`, `graymail`, `suspicious`, `legitimate`) and a 0–100 risk score on an axis separate from confidence — a confidently-legitimate email is high confidence, low risk. Queryable `verdict`/`risk_score` columns; the full assessment persists in `analysis_result` JSONB; legacy `isPhishing`/confidence are derived so existing consumers keep working
 - **Risk fusion** (`risk.fusion.ts`): deterministically fuses the model verdict with Phishy's own intelligence — known indicators and active campaigns raise the risk floor, a security-team ruling overrides (verdict included), a safe-sender match caps — and returns the explanation trail shown in the report
 - **Attributed IOC extraction**: indicators are attributed to the original (forwarded) sender, never the reporter — previously the victim could be recorded as the attacker. The model nominates IOCs structurally (sender/payload/infrastructure roles), merged with regex extraction; open-redirect and tracker chains are unwrapped so the final destination is the high-value indicator; free-mail provider domains are excluded as domain indicators; configured SafeDomains/SafeSenders are honored during extraction
