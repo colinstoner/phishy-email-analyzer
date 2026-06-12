@@ -190,14 +190,21 @@ Phishy detected ${campaign.detectionCount} of these in the last few hours.
       </div>
     </div>
 
-    ${campaign.sampleIndicators.length > 0 ? `
+    ${
+      campaign.sampleIndicators.length > 0
+        ? `
     <div class="section">
       <div class="section-title">Red Flags</div>
       <ul>
-        ${campaign.sampleIndicators.slice(0, 3).map(i => `<li>${this.escapeHtml(i)}</li>`).join('')}
+        ${campaign.sampleIndicators
+          .slice(0, 3)
+          .map(i => `<li>${this.escapeHtml(i)}</li>`)
+          .join('')}
       </ul>
     </div>
-    ` : ''}
+    `
+        : ''
+    }
 
     <div class="section">
       <div class="section-title">What to Do</div>

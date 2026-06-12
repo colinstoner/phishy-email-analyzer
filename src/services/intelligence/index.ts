@@ -13,16 +13,9 @@ export {
   IntelligenceStats,
 } from './database.service';
 
-export {
-  CampaignAlertService,
-  CampaignAlertConfig,
-} from './campaign.service';
+export { CampaignAlertService, CampaignAlertConfig } from './campaign.service';
 
-export {
-  extractIOCs,
-  IOCExtractionOptions,
-  IOCSourceContext,
-} from './ioc.extractor';
+export { extractIOCs, IOCExtractionOptions, IOCSourceContext } from './ioc.extractor';
 
 export {
   PatternDetectorService,

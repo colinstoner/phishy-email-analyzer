@@ -34,10 +34,7 @@ export interface AIProvider {
   /**
    * Analyze email for phishing indicators
    */
-  analyzeEmail(
-    emailData: ExtractedEmailData,
-    options?: AnalysisOptions
-  ): Promise<AnalysisResult>;
+  analyzeEmail(emailData: ExtractedEmailData, options?: AnalysisOptions): Promise<AnalysisResult>;
 
   /**
    * Send a raw prompt and get response
@@ -156,7 +153,9 @@ export function parseAnalysisResponse(
 /**
  * Extract analysis fields from non-JSON text
  */
-function extractFieldsFromText(text: string): Omit<AnalysisResult, 'rawResponse' | 'processingTimeMs' | 'provider' | 'model'> {
+function extractFieldsFromText(
+  text: string
+): Omit<AnalysisResult, 'rawResponse' | 'processingTimeMs' | 'provider' | 'model'> {
   const summaryMatch = text.match(/"summary"\s*:\s*"([^"]+)"/i);
   const isPhishingMatch = text.match(/"isPhishing"\s*:\s*(true|false)/i);
   const confidenceMatch = text.match(/"confidence"\s*:\s*"([^"]+)"/i);

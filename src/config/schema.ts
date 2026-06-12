@@ -22,25 +22,27 @@ const BedrockConfigSchema = z.object({
   timeout: z.number().positive().default(60000),
 });
 
-const AIConfigSchema = z.object({
-  provider: z.enum(['anthropic', 'bedrock']).default('anthropic'),
-  anthropic: AnthropicConfigSchema.optional(),
-  bedrock: BedrockConfigSchema.optional(),
-  fallbackProvider: z.enum(['anthropic', 'bedrock']).optional(),
-}).refine(
-  (data) => {
-    // Require anthropic config when provider is anthropic
-    if (data.provider === 'anthropic') {
-      return data.anthropic?.apiKey && data.anthropic.apiKey.length > 0;
+const AIConfigSchema = z
+  .object({
+    provider: z.enum(['anthropic', 'bedrock']).default('anthropic'),
+    anthropic: AnthropicConfigSchema.optional(),
+    bedrock: BedrockConfigSchema.optional(),
+    fallbackProvider: z.enum(['anthropic', 'bedrock']).optional(),
+  })
+  .refine(
+    data => {
+      // Require anthropic config when provider is anthropic
+      if (data.provider === 'anthropic') {
+        return data.anthropic?.apiKey && data.anthropic.apiKey.length > 0;
+      }
+      // Bedrock doesn't require additional config (uses IAM)
+      return true;
+    },
+    {
+      message: 'Anthropic API key is required when using anthropic provider',
+      path: ['anthropic', 'apiKey'],
     }
-    // Bedrock doesn't require additional config (uses IAM)
-    return true;
-  },
-  {
-    message: 'Anthropic API key is required when using anthropic provider',
-    path: ['anthropic', 'apiKey'],
-  }
-);
+  );
 
 /**
  * Email configuration schema

@@ -99,7 +99,12 @@ export class S3Service {
   /**
    * Put object to S3
    */
-  async putObject(bucket: string, key: string, content: string, contentType?: string): Promise<void> {
+  async putObject(
+    bucket: string,
+    key: string,
+    content: string,
+    contentType?: string
+  ): Promise<void> {
     logger.info('Putting object to S3', { bucket, key, contentLength: content.length });
 
     await withRetry(

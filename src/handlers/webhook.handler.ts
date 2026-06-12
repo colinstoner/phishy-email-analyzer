@@ -67,19 +67,15 @@ export interface WebhookDeliveryResult {
  * Private/internal IP ranges that should be blocked for SSRF protection
  */
 const BLOCKED_IP_RANGES = [
-  /^10\./,                          // 10.0.0.0/8
-  /^172\.(1[6-9]|2[0-9]|3[0-1])\./,  // 172.16.0.0/12
-  /^192\.168\./,                     // 192.168.0.0/16
-  /^127\./,                          // 127.0.0.0/8 (loopback)
-  /^169\.254\./,                     // 169.254.0.0/16 (link-local, AWS metadata)
-  /^0\./,                            // 0.0.0.0/8
+  /^10\./, // 10.0.0.0/8
+  /^172\.(1[6-9]|2[0-9]|3[0-1])\./, // 172.16.0.0/12
+  /^192\.168\./, // 192.168.0.0/16
+  /^127\./, // 127.0.0.0/8 (loopback)
+  /^169\.254\./, // 169.254.0.0/16 (link-local, AWS metadata)
+  /^0\./, // 0.0.0.0/8
 ];
 
-const BLOCKED_HOSTNAMES = [
-  'localhost',
-  'metadata.google.internal',
-  'metadata',
-];
+const BLOCKED_HOSTNAMES = ['localhost', 'metadata.google.internal', 'metadata'];
 
 export class WebhookService {
   private webhooks: WebhookConfig[];
@@ -88,9 +84,7 @@ export class WebhookService {
 
   constructor(webhooks: WebhookConfig[] = []) {
     // Filter to enabled webhooks and validate URLs for SSRF
-    this.webhooks = webhooks
-      .filter(w => w.enabled)
-      .filter(w => this.isUrlSafe(w.url));
+    this.webhooks = webhooks.filter(w => w.enabled).filter(w => this.isUrlSafe(w.url));
     this.defaultRetries = 3;
     this.defaultTimeoutMs = 10000;
   }
@@ -146,9 +140,7 @@ export class WebhookService {
 
     const severity = this.determineSeverity(analysis);
     const event: WebhookEvent =
-      severity === 'critical' || severity === 'high'
-        ? 'threat.high_confidence'
-        : 'threat.detected';
+      severity === 'critical' || severity === 'high' ? 'threat.high_confidence' : 'threat.detected';
 
     const payload: WebhookPayload = {
       event,
@@ -269,9 +261,7 @@ export class WebhookService {
    * Deliver payload to webhooks that match the event
    */
   private async deliverToMatchingWebhooks(payload: WebhookPayload): Promise<void> {
-    const matchingWebhooks = this.webhooks.filter(w =>
-      w.events.includes(payload.event)
-    );
+    const matchingWebhooks = this.webhooks.filter(w => w.events.includes(payload.event));
 
     if (matchingWebhooks.length === 0) {
       logger.debug('No webhooks configured for event', { event: payload.event });
@@ -378,9 +368,7 @@ export class WebhookService {
   /**
    * Determine severity from analysis result
    */
-  private determineSeverity(
-    analysis: AnalysisResult
-  ): 'critical' | 'high' | 'medium' | 'low' {
+  private determineSeverity(analysis: AnalysisResult): 'critical' | 'high' | 'medium' | 'low' {
     if (!analysis.isPhishing) return 'low';
 
     const confidence = analysis.confidence.toLowerCase();

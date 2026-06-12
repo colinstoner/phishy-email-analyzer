@@ -25,5 +25,5 @@ export async function handler(
   }
 
   // Fallback - try SES handler for backwards compatibility
-  return sesHandler(event as SESEvent, context);
+  return sesHandler(event, context);
 }

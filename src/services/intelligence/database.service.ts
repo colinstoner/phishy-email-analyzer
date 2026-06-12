@@ -177,7 +177,7 @@ export class IntelligenceDatabaseService {
     this.pool = new Pool(config);
 
     // Handle pool errors
-    this.pool.on('error', (err) => {
+    this.pool.on('error', err => {
       logger.error('Unexpected error on idle client', { error: err.message });
     });
   }
@@ -371,10 +371,7 @@ export class IntelligenceDatabaseService {
   async getAnalysis(id: string): Promise<EmailAnalysisRecord | null> {
     await this.initialize();
 
-    const result = await this.pool.query(
-      'SELECT * FROM email_analyses WHERE id = $1',
-      [id]
-    );
+    const result = await this.pool.query('SELECT * FROM email_analyses WHERE id = $1', [id]);
 
     if (result.rows.length === 0) {
       return null;
@@ -489,10 +486,7 @@ export class IntelligenceDatabaseService {
   /**
    * Lookup indicators by value
    */
-  async lookupIndicators(
-    type: IndicatorType,
-    values: string[]
-  ): Promise<ThreatIndicatorRecord[]> {
+  async lookupIndicators(type: IndicatorType, values: string[]): Promise<ThreatIndicatorRecord[]> {
     await this.initialize();
 
     const hashes = values.map(v => this.hashIndicator(type, v));
@@ -511,10 +505,7 @@ export class IntelligenceDatabaseService {
   /**
    * Get active indicators
    */
-  async getActiveIndicators(
-    type?: IndicatorType,
-    limit = 100
-  ): Promise<ThreatIndicatorRecord[]> {
+  async getActiveIndicators(type?: IndicatorType, limit = 100): Promise<ThreatIndicatorRecord[]> {
     await this.initialize();
 
     let query = `
@@ -697,8 +688,14 @@ export class IntelligenceDatabaseService {
            is_active = TRUE
          RETURNING id, campaign_signature, detection_count, unique_recipients,
                    first_seen_at, alert_sent_at`,
-        [signature, senderDomain.toLowerCase(), normalizedSubject, recipientEmail.toLowerCase(),
-         riskLevel, indicators.slice(0, 5)]
+        [
+          signature,
+          senderDomain.toLowerCase(),
+          normalizedSubject,
+          recipientEmail.toLowerCase(),
+          riskLevel,
+          indicators.slice(0, 5),
+        ]
       );
 
       const row = result.rows[0];
@@ -720,7 +717,7 @@ export class IntelligenceDatabaseService {
         uniqueRecipients.length >= 2 &&
         hoursActive <= 4 &&
         (riskLevel === 'high' || riskLevel === 'critical') &&
-        (!alertSentAt || (Date.now() - alertSentAt.getTime()) > 24 * 60 * 60 * 1000);
+        (!alertSentAt || Date.now() - alertSentAt.getTime() > 24 * 60 * 60 * 1000);
 
       return {
         campaignId,
@@ -748,10 +745,7 @@ export class IntelligenceDatabaseService {
   async markCampaignAlerted(campaignId: string): Promise<void> {
     await this.initialize();
 
-    await this.pool.query(
-      'UPDATE campaigns SET alert_sent_at = NOW() WHERE id = $1',
-      [campaignId]
-    );
+    await this.pool.query('UPDATE campaigns SET alert_sent_at = NOW() WHERE id = $1', [campaignId]);
 
     logger.info('Marked campaign as alerted', { campaignId });
   }
@@ -762,10 +756,7 @@ export class IntelligenceDatabaseService {
   async getCampaignDetails(campaignId: string): Promise<CampaignRecord | null> {
     await this.initialize();
 
-    const result = await this.pool.query(
-      'SELECT * FROM campaigns WHERE id = $1',
-      [campaignId]
-    );
+    const result = await this.pool.query('SELECT * FROM campaigns WHERE id = $1', [campaignId]);
 
     if (result.rows.length === 0) {
       return null;
@@ -798,11 +789,11 @@ export class IntelligenceDatabaseService {
       .replace(/re:\s*/gi, '')
       .replace(/fw:\s*/gi, '')
       .replace(/fwd:\s*/gi, '')
-      .replace(/\d+/g, '#')          // Replace numbers with #
-      .replace(/[^\w\s#]/g, '')       // Remove special chars except #
-      .replace(/\s+/g, ' ')           // Normalize whitespace
+      .replace(/\d+/g, '#') // Replace numbers with #
+      .replace(/[^\w\s#]/g, '') // Remove special chars except #
+      .replace(/\s+/g, ' ') // Normalize whitespace
       .trim()
-      .substring(0, 100);             // Limit length
+      .substring(0, 100); // Limit length
   }
 
   /**
@@ -909,9 +900,7 @@ export class IntelligenceDatabaseService {
    * Hash an indicator value for storage
    */
   private hashIndicator(type: IndicatorType, value: string): string {
-    return createHash('sha256')
-      .update(`${type}:${value.toLowerCase()}`)
-      .digest('hex');
+    return createHash('sha256').update(`${type}:${value.toLowerCase()}`).digest('hex');
   }
 
   /**

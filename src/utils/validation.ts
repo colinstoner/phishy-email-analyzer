@@ -92,9 +92,8 @@ export function extractUrls(content: string): string[] {
   if (!content) return [];
 
   // Limit content length to prevent ReDoS
-  const safeContent = content.length > MAX_CONTENT_LENGTH
-    ? content.substring(0, MAX_CONTENT_LENGTH)
-    : content;
+  const safeContent =
+    content.length > MAX_CONTENT_LENGTH ? content.substring(0, MAX_CONTENT_LENGTH) : content;
 
   const urls: Set<string> = new Set();
 
@@ -125,9 +124,7 @@ export function extractHrefUrls(html: string): string[] {
   if (!html) return [];
 
   // Limit content length to prevent ReDoS
-  const safeHtml = html.length > MAX_CONTENT_LENGTH
-    ? html.substring(0, MAX_CONTENT_LENGTH)
-    : html;
+  const safeHtml = html.length > MAX_CONTENT_LENGTH ? html.substring(0, MAX_CONTENT_LENGTH) : html;
 
   const urls: Set<string> = new Set();
   const hrefRegex = /<a\s+(?:[^>]*?\s+)?href=["']([^"']*)["'][^>]*>/gi;
@@ -150,9 +147,7 @@ export function sanitizeForLogging(value: string, maxLength = 100): string {
   if (!value) return '';
 
   // Truncate long strings
-  const truncated = value.length > maxLength
-    ? value.substring(0, maxLength) + '...'
-    : value;
+  const truncated = value.length > maxLength ? value.substring(0, maxLength) + '...' : value;
 
   // Remove potential sensitive patterns
   return truncated

@@ -115,9 +115,7 @@ export function analyzeRecipientContext(
     const signatureLower = signatureBlock.toLowerCase();
     for (const role of HIGH_VALUE_ROLES) {
       if (signatureLower.includes(role)) {
-        if (!detectedRole) {
-          detectedRole = role.charAt(0).toUpperCase() + role.slice(1);
-        }
+        detectedRole ??= role.charAt(0).toUpperCase() + role.slice(1);
         roleIndicators.push(`Signature mentions: ${role}`);
         break;
       }
@@ -201,7 +199,9 @@ export function formatRecipientContextForPrompt(context: RecipientContext): stri
   }
 
   if (context.isHighValueTarget) {
-    lines.push(`HIGH-VALUE TARGET: This recipient appears to work in a role commonly targeted by BEC/phishing attacks (finance, HR, executive, etc.). Consider this when assessing risk.`);
+    lines.push(
+      `HIGH-VALUE TARGET: This recipient appears to work in a role commonly targeted by BEC/phishing attacks (finance, HR, executive, etc.). Consider this when assessing risk.`
+    );
   }
 
   return lines.join('\n');

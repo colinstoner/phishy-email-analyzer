@@ -41,12 +41,7 @@ const ESSENTIAL_HEADER_NAMES = [
 /**
  * Headers that might contain original sender information in forwarded emails
  */
-const ORIGINAL_SENDER_HEADERS = [
-  'X-Original-From',
-  'X-Sender',
-  'Original-From',
-  'X-Envelope-From',
-];
+const ORIGINAL_SENDER_HEADERS = ['X-Original-From', 'X-Sender', 'Original-From', 'X-Envelope-From'];
 
 export class EmailParserService {
   private s3Service: S3Service;
@@ -465,7 +460,9 @@ export class EmailParserService {
     if (typeof recipients === 'string') return recipients;
     if (Array.isArray(recipients)) {
       return recipients
-        .map(r => (typeof r === 'object' && r !== null ? (r as { email?: string }).email ?? '' : String(r)))
+        .map(r =>
+          typeof r === 'object' && r !== null ? ((r as { email?: string }).email ?? '') : String(r)
+        )
         .filter(Boolean)
         .join(', ');
     }
@@ -475,10 +472,7 @@ export class EmailParserService {
   /**
    * Find original forwarder from various sources
    */
-  private findOriginalForwarder(
-    msg: EmailMessage,
-    headers: Record<string, string>
-  ): string {
+  private findOriginalForwarder(msg: EmailMessage, headers: Record<string, string>): string {
     // Check X-Forwarded-For header
     if (headers['X-Forwarded-For']) {
       return headers['X-Forwarded-For'];

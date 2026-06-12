@@ -179,7 +179,9 @@ Auto-escalate threshold: ${profile.analysisConfig.autoEscalateThreshold ?? 'Defa
     if (profile.analysisConfig.additionalPromptContext) {
       // Sanitize additional context to prevent prompt injection
       // Limit length and remove potentially dangerous patterns
-      const sanitizedContext = sanitizePromptContext(profile.analysisConfig.additionalPromptContext);
+      const sanitizedContext = sanitizePromptContext(
+        profile.analysisConfig.additionalPromptContext
+      );
       if (sanitizedContext) {
         sections.push(`\nAdditional context: ${sanitizedContext}`);
       }

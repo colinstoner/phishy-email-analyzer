@@ -229,13 +229,12 @@ export class PatternDetectorService {
     });
 
     // Look for similar impersonation attempts
-    const impersonationMatches = recentAnalyses.filter(a =>
-      a.vipImpersonationDetected ||
-      a.indicators.some(
-        i =>
-          i.toLowerCase().includes('impersonat') ||
-          i.toLowerCase().includes('spoof')
-      )
+    const impersonationMatches = recentAnalyses.filter(
+      a =>
+        a.vipImpersonationDetected ||
+        a.indicators.some(
+          i => i.toLowerCase().includes('impersonat') || i.toLowerCase().includes('spoof')
+        )
     );
 
     if (impersonationMatches.length >= (this.options.minMatchCount ?? 3)) {
@@ -251,7 +250,8 @@ export class PatternDetectorService {
         patternCriteria: criteria,
         matchCount: impersonationMatches.length,
         isConfirmedThreat: true,
-        firstDetectedAt: impersonationMatches[impersonationMatches.length - 1]?.createdAt ?? new Date(),
+        firstDetectedAt:
+          impersonationMatches[impersonationMatches.length - 1]?.createdAt ?? new Date(),
         lastDetectedAt: new Date(),
       });
 

@@ -143,10 +143,7 @@ export function validateProfile(profile: unknown): EnterpriseProfile {
 /**
  * Create a minimal profile
  */
-export function createMinimalProfile(
-  name: string,
-  domains: string[]
-): EnterpriseProfile {
+export function createMinimalProfile(name: string, domains: string[]): EnterpriseProfile {
   return {
     name,
     organization: {

@@ -14,7 +14,8 @@ const logger = createLogger('ioc-extractor');
 /**
  * IP address regex pattern
  */
-const IP_REGEX = /\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b/g;
+const IP_REGEX =
+  /\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b/g;
 
 /**
  * Hash patterns (MD5, SHA1, SHA256)
@@ -85,12 +86,9 @@ export function extractIOCs(
   }
 
   // Combine all text content for analysis
-  const allContent = [
-    emailData.text,
-    emailData.html,
-    emailData.subject,
-    ...emailData.links,
-  ].join(' ');
+  const allContent = [emailData.text, emailData.html, emailData.subject, ...emailData.links].join(
+    ' '
+  );
 
   // Extract URLs
   if (opts.extractUrls) {
@@ -100,7 +98,14 @@ export function extractIOCs(
 
   // Extract domains
   if (opts.extractDomains) {
-    const domains = extractDomainIOCs(emailData, allContent, baseConfidence, severity, now, baseMetadata);
+    const domains = extractDomainIOCs(
+      emailData,
+      allContent,
+      baseConfidence,
+      severity,
+      now,
+      baseMetadata
+    );
     indicators.push(...domains);
   }
 
@@ -385,16 +390,23 @@ function isSafeUrl(url: string): boolean {
  */
 function isSafeDomain(domain: string): boolean {
   const safeDomains = [
-    'google.com', 'microsoft.com', 'apple.com', 'amazon.com',
-    'facebook.com', 'linkedin.com', 'twitter.com',
-    'github.com', 'slack.com', 'zoom.us',
-    'salesforce.com', 'office.com', 'outlook.com',
+    'google.com',
+    'microsoft.com',
+    'apple.com',
+    'amazon.com',
+    'facebook.com',
+    'linkedin.com',
+    'twitter.com',
+    'github.com',
+    'slack.com',
+    'zoom.us',
+    'salesforce.com',
+    'office.com',
+    'outlook.com',
   ];
 
   const lowerDomain = domain.toLowerCase();
-  return safeDomains.some(safe =>
-    lowerDomain === safe || lowerDomain.endsWith('.' + safe)
-  );
+  return safeDomains.some(safe => lowerDomain === safe || lowerDomain.endsWith('.' + safe));
 }
 
 /**
@@ -431,8 +443,10 @@ function isPrivateIP(ip: string): boolean {
  */
 function containsSuspiciousUrlPatterns(url: string): boolean {
   const suspiciousPatterns = [
-    /bit\.ly/i, /tinyurl/i, /goo\.gl/i, // URL shorteners
-    /@/,  // @ in URL (credential stealing)
+    /bit\.ly/i,
+    /tinyurl/i,
+    /goo\.gl/i, // URL shorteners
+    /@/, // @ in URL (credential stealing)
     /\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/, // IP address URLs
     /-login|signin-|secure-|verify-/i, // Impersonation patterns
     /\.php\?.*=/i, // PHP with parameters
@@ -473,7 +487,5 @@ function containsSuspiciousEmailPatterns(email: string): boolean {
  * Hash a value for storage
  */
 function hashValue(type: string, value: string): string {
-  return createHash('sha256')
-    .update(`${type}:${value.toLowerCase()}`)
-    .digest('hex');
+  return createHash('sha256').update(`${type}:${value.toLowerCase()}`).digest('hex');
 }

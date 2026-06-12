@@ -13,18 +13,10 @@ import { AnthropicProvider } from '../services/ai/anthropic.provider';
 import { BedrockProvider } from '../services/ai/bedrock.provider';
 import { AIProvider } from '../services/ai/provider.interface';
 import { EnterpriseProfile, validateProfile } from '../models/profile.model';
-import {
-  LambdaResponse,
-  ProcessingResult,
-  EmailMessage,
-  ExtractedEmailData,
-} from '../types';
+import { LambdaResponse, ProcessingResult, EmailMessage, ExtractedEmailData } from '../types';
 import { createLogger } from '../utils/logger';
 import { extractEmailAddress, domainMatches } from '../utils/validation';
-import {
-  IntelligenceDatabaseService,
-  CampaignAlertService,
-} from '../services/intelligence';
+import { IntelligenceDatabaseService, CampaignAlertService } from '../services/intelligence';
 import { extractIOCs, IOCSourceContext } from '../services/intelligence/ioc.extractor';
 
 const logger = createLogger('lambda-handler');
@@ -52,10 +44,7 @@ let cachedServices: {
 /**
  * Main Lambda handler function
  */
-export async function handler(
-  event: SESEvent,
-  _context: Context
-): Promise<APIGatewayProxyResult> {
+export async function handler(event: SESEvent, _context: Context): Promise<APIGatewayProxyResult> {
   logger.info('=== PHISHY STARTING ===');
 
   try {
@@ -274,10 +263,7 @@ function createAIProvider(
 /**
  * Load enterprise profile from S3 or inline
  */
-async function loadProfile(
-  profilePath: string,
-  region: string
-): Promise<EnterpriseProfile> {
+async function loadProfile(profilePath: string, region: string): Promise<EnterpriseProfile> {
   // Check if it's an S3 path
   if (profilePath.startsWith('s3://')) {
     const match = profilePath.match(/^s3:\/\/([^/]+)\/(.+)$/);
@@ -458,9 +444,7 @@ async function processEmailEvent(
   // Send analysis if we have a valid recipient
   if (isValidEmailRecipient(recipient)) {
     // Use different CC list for safelist users vs enterprise users
-    const ccOverride = isSafelistUser
-      ? config.notification.safeSenderSecurity
-      : undefined; // undefined uses default securityTeamDistribution
+    const ccOverride = isSafelistUser ? config.notification.safeSenderSecurity : undefined; // undefined uses default securityTeamDistribution
 
     const emailResult = await services.sesNotifier.sendAnalysisReport(
       recipient,
@@ -511,12 +495,12 @@ function checkForDuplicate(
 /**
  * Validate email for processing
  */
-function validateEmail(
-  emailData: ExtractedEmailData,
-  config: PhishyConfig
-): ProcessingResult {
+function validateEmail(emailData: ExtractedEmailData, config: PhishyConfig): ProcessingResult {
   // Skip if already an analysis email
-  if (emailData.subject?.includes('Phishy Analysis') || emailData.subject?.includes('Phishing Analysis')) {
+  if (
+    emailData.subject?.includes('Phishy Analysis') ||
+    emailData.subject?.includes('Phishing Analysis')
+  ) {
     logger.info('Skipping analysis email');
     return { status: 'skipped', reason: 'already_analyzed' };
   }
@@ -594,9 +578,7 @@ function isValidEmailRecipient(email: string): boolean {
 /**
  * Map analysis confidence to risk level for campaign tracking
  */
-function mapConfidenceToRiskLevel(
-  confidence: string
-): 'critical' | 'high' | 'medium' | 'low' {
+function mapConfidenceToRiskLevel(confidence: string): 'critical' | 'high' | 'medium' | 'low' {
   const normalized = confidence.toLowerCase();
   if (normalized.includes('very high')) return 'critical';
   if (normalized.includes('high')) return 'high';
@@ -611,12 +593,12 @@ function normalizeConfidenceToNumber(confidence: string): number {
   const normalized = confidence.toLowerCase();
   if (normalized.includes('very high')) return 0.95;
   if (normalized.includes('high')) return 0.85;
-  if (normalized.includes('medium')) return 0.60;
-  if (normalized.includes('low')) return 0.30;
+  if (normalized.includes('medium')) return 0.6;
+  if (normalized.includes('low')) return 0.3;
   // Try to parse as number if it's already numeric (assume 0-100 scale)
   const parsed = parseInt(confidence, 10);
   if (!isNaN(parsed)) return Math.min(1, Math.max(0, parsed / 100));
-  return 0.50; // Default to medium
+  return 0.5; // Default to medium
 }
 
 /**
@@ -638,10 +620,7 @@ function maintainCacheSize(): void {
 /**
  * Create standardized API response
  */
-function createResponse(
-  statusCode: number,
-  body: Record<string, unknown>
-): LambdaResponse {
+function createResponse(statusCode: number, body: Record<string, unknown>): LambdaResponse {
   return {
     statusCode,
     headers: {

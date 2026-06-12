@@ -83,11 +83,13 @@ export function isRetryableHttpError(error: Error): boolean {
   const message = error.message.toLowerCase();
 
   // Network errors
-  if (message.includes('econnrefused') ||
-      message.includes('econnreset') ||
-      message.includes('etimedout') ||
-      message.includes('socket hang up') ||
-      message.includes('network')) {
+  if (
+    message.includes('econnrefused') ||
+    message.includes('econnreset') ||
+    message.includes('etimedout') ||
+    message.includes('socket hang up') ||
+    message.includes('network')
+  ) {
     return true;
   }
 
@@ -116,6 +118,8 @@ export function isRetryableHttpError(error: Error): boolean {
 /**
  * Create a retry wrapper with predefined options
  */
-export function createRetryWrapper(options: Partial<RetryOptions> = {}): <T>(fn: () => Promise<T>) => Promise<T> {
+export function createRetryWrapper(
+  options: Partial<RetryOptions> = {}
+): <T>(fn: () => Promise<T>) => Promise<T> {
   return <T>(fn: () => Promise<T>) => withRetry(fn, options);
 }

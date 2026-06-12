@@ -4,16 +4,9 @@
  */
 
 import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
-import {
-  SecretsManagerClient,
-  GetSecretValueCommand,
-} from '@aws-sdk/client-secrets-manager';
+import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 import { Readable } from 'stream';
-import {
-  PhishyConfig,
-  PartialPhishyConfig,
-  safeValidateConfig,
-} from './schema';
+import { PhishyConfig, PartialPhishyConfig, safeValidateConfig } from './schema';
 import { createLogger } from '../utils/logger';
 
 const logger = createLogger('config');
@@ -190,9 +183,7 @@ async function resolveSecrets(config: PartialPhishyConfig): Promise<PartialPhish
     const region = process.env.AWS_REGION ?? 'us-east-1';
     const client = new SecretsManagerClient({ region });
 
-    const response = await client.send(
-      new GetSecretValueCommand({ SecretId: connectionString })
-    );
+    const response = await client.send(new GetSecretValueCommand({ SecretId: connectionString }));
 
     let resolvedConnectionString: string;
 
@@ -238,7 +229,9 @@ async function resolveSecrets(config: PartialPhishyConfig): Promise<PartialPhish
     logger.error('Failed to fetch secret from Secrets Manager', {
       error: error instanceof Error ? error.message : String(error),
     });
-    throw new Error(`Failed to resolve database secret: ${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(
+      `Failed to resolve database secret: ${error instanceof Error ? error.message : String(error)}`
+    );
   }
 }
 
@@ -302,7 +295,10 @@ function parseEnvValue(key: string, value: string): unknown {
     key.includes('DISTRIBUTION') ||
     key.includes('SAFE_SENDER_SECURITY')
   ) {
-    return value.split(',').map(s => s.trim()).filter(Boolean);
+    return value
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean);
   }
 
   // Numbers
@@ -348,10 +344,7 @@ function mergeConfigs(
       typeof result[key] === 'object' &&
       result[key] !== null
     ) {
-      result[key] = mergeConfigs(
-        result[key] as PartialPhishyConfig,
-        value as PartialPhishyConfig
-      );
+      result[key] = mergeConfigs(result[key] as PartialPhishyConfig, value as PartialPhishyConfig);
     } else if (value !== undefined) {
       result[key] = value;
     }

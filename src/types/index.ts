@@ -85,7 +85,14 @@ export interface AnalysisResult {
 /**
  * Confidence level for analysis results
  */
-export type ConfidenceLevel = 'Very High' | 'High' | 'Medium' | 'Low' | 'Very Low' | 'Unknown' | 'N/A';
+export type ConfidenceLevel =
+  | 'Very High'
+  | 'High'
+  | 'Medium'
+  | 'Low'
+  | 'Very Low'
+  | 'Unknown'
+  | 'N/A';
 
 /**
  * Processing result for a single email event

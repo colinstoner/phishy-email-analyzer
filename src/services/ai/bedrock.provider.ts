@@ -3,10 +3,7 @@
  * Implements AI provider interface for AWS Bedrock Claude models
  */
 
-import {
-  BedrockRuntimeClient,
-  InvokeModelCommand,
-} from '@aws-sdk/client-bedrock-runtime';
+import { BedrockRuntimeClient, InvokeModelCommand } from '@aws-sdk/client-bedrock-runtime';
 import {
   AIProvider,
   AnalysisOptions,
@@ -125,7 +122,10 @@ export class BedrockProvider implements AIProvider {
   private async sendPromptWithUsage(
     prompt: string,
     options?: AnalysisOptions
-  ): Promise<{ text: string; usage?: { inputTokens: number; outputTokens: number; totalTokens: number } }> {
+  ): Promise<{
+    text: string;
+    usage?: { inputTokens: number; outputTokens: number; totalTokens: number };
+  }> {
     const maxTokens = options?.maxTokens ?? this.maxTokens;
     // Note: timeout is handled by SDK defaults, not directly configurable per-request
     // Future enhancement: add AbortController support for per-request timeout
@@ -149,7 +149,8 @@ export class BedrockProvider implements AIProvider {
         const requestBody = {
           anthropic_version: 'bedrock-2023-05-31',
           max_tokens: maxTokens,
-          system: 'You are a security analyst helping to identify phishing emails. Always provide your analysis in the requested JSON format.',
+          system:
+            'You are a security analyst helping to identify phishing emails. Always provide your analysis in the requested JSON format.',
           messages: [
             {
               role: 'user',

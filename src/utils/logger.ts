@@ -32,7 +32,11 @@ class Logger {
     return LOG_LEVELS[level] >= LOG_LEVELS[this.minLevel];
   }
 
-  private formatEntry(level: LogLevel, message: string, context?: Record<string, unknown>): LogEntry {
+  private formatEntry(
+    level: LogLevel,
+    message: string,
+    context?: Record<string, unknown>
+  ): LogEntry {
     return {
       timestamp: new Date().toISOString(),
       level,

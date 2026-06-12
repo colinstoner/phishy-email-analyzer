@@ -36,10 +36,7 @@ const FORWARDED_HEADERS = [
 /**
  * Build complete HTML email for analysis report
  */
-export function buildEmailHtml(
-  analysis: AnalysisResult,
-  emailData: ExtractedEmailData
-): string {
+export function buildEmailHtml(analysis: AnalysisResult, emailData: ExtractedEmailData): string {
   const timestamp = new Date().toLocaleString();
   const analysisHtml = buildAnalysisSection(analysis);
   const originalSubject = emailData.subject;
@@ -339,7 +336,7 @@ export function buildPlainTextReport(
   lines.push(buildOriginalEmailTextSection(emailData));
 
   lines.push(divider);
-  lines.push('This analysis was performed by Phishy powered by Anthropic\'s Claude AI.');
+  lines.push("This analysis was performed by Phishy powered by Anthropic's Claude AI.");
   lines.push(`Report generated: ${new Date().toLocaleString()}`);
 
   return lines.join('\n');
@@ -400,13 +397,14 @@ function buildOriginalEmailSection(emailData: ExtractedEmailData): string {
       : '<em>No email content available</em>';
 
   // Only show forwarded headers section if we found any
-  const forwardedHeadersSection = Object.keys(emailData.forwardedHeaders || {}).length > 0
-    ? `
+  const forwardedHeadersSection =
+    Object.keys(emailData.forwardedHeaders || {}).length > 0
+      ? `
                 <div class="email-section email-forwarded-headers" style="background-color: #fff3cd; border: 1px solid #ffc107;">
                     <h3>Original Sender Info (from forwarded message)</h3>
                     ${forwardedHeadersHtml}
                 </div>`
-    : '';
+      : '';
 
   return `
             <div class="original-email">
@@ -495,7 +493,9 @@ function buildOriginalEmailTextSection(emailData: ExtractedEmailData): string {
   lines.push(bodyText);
   if (truncated) {
     lines.push('');
-    lines.push(`[TRUNCATED - Original length exceeded ${MAX_BODY_LENGTH.toLocaleString()} characters]`);
+    lines.push(
+      `[TRUNCATED - Original length exceeded ${MAX_BODY_LENGTH.toLocaleString()} characters]`
+    );
   }
   lines.push('');
 
