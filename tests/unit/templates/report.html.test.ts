@@ -2,20 +2,24 @@
  * Report rendering tests — focus on the employee-facing communication layer.
  */
 
-import { buildEmailHtml, buildPlainTextReport, ReportOptions } from '../../../src/templates/report.html';
+import {
+  buildEmailHtml,
+  buildPlainTextReport,
+  ReportOptions,
+} from '../../../src/templates/report.html';
 import { AnalysisResult, ExtractedEmailData } from '../../../src/types';
 
 function email(overrides: Partial<ExtractedEmailData> = {}): ExtractedEmailData {
   return {
-    from_email: 'reporter@novoconstruction.com',
+    from_email: 'reporter@example.com',
     subject: 'Fwd: something',
     text: 'body',
     html: '<p>body</p>',
     headers: {},
     forwardedHeaders: {},
     attachments: [],
-    sender: 'reporter@novoconstruction.com',
-    to: 'phishy@novoconstruction.com',
+    sender: 'reporter@example.com',
+    to: 'phishy@example.com',
     original_sender: 'attacker@evil.test',
     originalForwarder: '',
     links: [],
@@ -39,13 +43,26 @@ function analysis(overrides: Partial<AnalysisResult> = {}): AnalysisResult {
 
 const becOptions: ReportOptions = {
   analysisId: 'abc-123-def',
-  risk: { verdict: 'bec', riskScore: 90, riskLevel: 'critical', reasons: ['Sender domain seen in 3 prior reports.'] },
+  risk: {
+    verdict: 'bec',
+    riskScore: 90,
+    riskLevel: 'critical',
+    reasons: ['Sender domain seen in 3 prior reports.'],
+  },
 };
 
 describe('buildEmailHtml', () => {
   it('keeps the risk score prominent (employees engage with it)', () => {
     const html = buildEmailHtml(
-      analysis({ assessment: { verdict: 'bec', riskScore: 90, verdictConfidence: 0.9, threatVectors: ['wire_fraud'], targeting: 'targeted' } }),
+      analysis({
+        assessment: {
+          verdict: 'bec',
+          riskScore: 90,
+          verdictConfidence: 0.9,
+          threatVectors: ['wire_fraud'],
+          targeting: 'targeted',
+        },
+      }),
       email(),
       becOptions
     );
@@ -63,7 +80,15 @@ describe('buildEmailHtml', () => {
 
   it('includes a threat-vector-driven teaching block', () => {
     const html = buildEmailHtml(
-      analysis({ assessment: { verdict: 'bec', riskScore: 90, verdictConfidence: 0.9, threatVectors: ['wire_fraud'], targeting: 'targeted' } }),
+      analysis({
+        assessment: {
+          verdict: 'bec',
+          riskScore: 90,
+          verdictConfidence: 0.9,
+          threatVectors: ['wire_fraud'],
+          targeting: 'targeted',
+        },
+      }),
       email(),
       becOptions
     );
@@ -104,7 +129,15 @@ describe('buildEmailHtml', () => {
 describe('buildPlainTextReport', () => {
   it('mirrors the verdict, score, action, and teaching block', () => {
     const text = buildPlainTextReport(
-      analysis({ assessment: { verdict: 'bec', riskScore: 90, verdictConfidence: 0.9, threatVectors: ['wire_fraud'], targeting: 'targeted' } }),
+      analysis({
+        assessment: {
+          verdict: 'bec',
+          riskScore: 90,
+          verdictConfidence: 0.9,
+          threatVectors: ['wire_fraud'],
+          targeting: 'targeted',
+        },
+      }),
       email(),
       becOptions
     );
