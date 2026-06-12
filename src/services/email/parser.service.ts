@@ -24,6 +24,7 @@ import {
   stripHtml,
 } from '../../utils/validation';
 import { S3Service } from '../storage/s3.service';
+import { buildLinkFacts, canonicalizeText, findAnchorMismatches } from '../../utils/canonicalize';
 
 const logger = createLogger('email-parser');
 
@@ -536,8 +537,19 @@ export class EmailParserService {
     };
 
     emailData.originalForwarder = this.findOriginalForwarder(msg, emailData.headers);
-    emailData.links = this.extractLinks(emailData.html || emailData.text);
     emailData.forwardedHeaders = this.extractForwardedHeaders(emailData.text);
+
+    // Canonicalize hostile content: links are unwrapped to their true
+    // destinations (gateway wrappers removed), the body is normalized, and
+    // every raw-vs-canonical divergence becomes a flag — obfuscation is
+    // itself an indicator.
+    const rawLinks = this.extractLinks(emailData.html || emailData.text);
+    emailData.linkFacts = buildLinkFacts(rawLinks);
+    emailData.links = emailData.linkFacts.map(f => f.canonical);
+
+    const { canonical, flags } = canonicalizeText(emailData.text);
+    emailData.canonicalText = canonical;
+    emailData.contentFlags = [...flags, ...findAnchorMismatches(emailData.html)];
 
     return emailData;
   }

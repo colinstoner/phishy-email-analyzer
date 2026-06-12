@@ -62,7 +62,24 @@ export interface ExtractedEmailData {
   to: string;
   original_sender: string;
   originalForwarder: string;
+  /** Canonical (unwrapped, deduplicated) link destinations */
   links: string[];
+  /** Per-link raw → canonical mapping with divergence flags */
+  linkFacts?: LinkFact[];
+  /** Canonicalized body text (NFKC, invisibles stripped, entities decoded) */
+  canonicalText?: string;
+  /** Obfuscation indicators found during canonicalization — themselves signals */
+  contentFlags?: string[];
+}
+
+/**
+ * A link as found (raw) and as it truly resolves (canonical), with
+ * divergence flags — produced by the canonicalizer
+ */
+export interface LinkFact {
+  raw: string;
+  canonical: string;
+  flags: string[];
 }
 
 /**
