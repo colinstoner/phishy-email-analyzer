@@ -171,4 +171,76 @@ describe('parseAnalysisResponse', () => {
     // String 'true' should not be truthy in our implementation
     expect(result.isPhishing).toBe(false);
   });
+
+  describe('structured verdict', () => {
+    it('parses a verdict and derives isPhishing + confidence from risk', () => {
+      const response = JSON.stringify({
+        summary: 'BEC attempt',
+        verdict: 'bec',
+        riskScore: 88,
+        verdictConfidence: 0.9,
+        threatVectors: ['wire_fraud', 'reconnaissance'],
+        targeting: 'targeted',
+        indicators: ['Gmail sender impersonating CEO'],
+        recommendations: ['Call the CEO directly'],
+      });
+
+      const result = parseAnalysisResponse(response, provider, model, processingTime);
+
+      expect(result.assessment?.verdict).toBe('bec');
+      expect(result.assessment?.riskScore).toBe(88);
+      expect(result.assessment?.threatVectors).toEqual(['wire_fraud', 'reconnaissance']);
+      expect(result.isPhishing).toBe(true); // derived: bec is malicious
+      expect(result.confidence).toBe('Very High'); // derived from riskScore 88
+    });
+
+    it('treats a confident-legitimate verdict as not phishing', () => {
+      const response = JSON.stringify({
+        summary: 'A real VSP survey',
+        verdict: 'legitimate',
+        riskScore: 5,
+        verdictConfidence: 0.95,
+        threatVectors: [],
+        targeting: 'mass',
+      });
+
+      const result = parseAnalysisResponse(response, provider, model, processingTime);
+
+      expect(result.assessment?.verdict).toBe('legitimate');
+      expect(result.isPhishing).toBe(false);
+      expect(result.confidence).toBe('Very Low'); // low risk -> low confidence label
+    });
+
+    it('clamps out-of-range scores and drops unknown vectors', () => {
+      const response = JSON.stringify({
+        summary: 'x',
+        verdict: 'phishing',
+        riskScore: 250,
+        verdictConfidence: 9,
+        threatVectors: ['credential_harvest', 'mind_control'],
+        targeting: 'nonsense',
+      });
+
+      const result = parseAnalysisResponse(response, provider, model, processingTime);
+
+      expect(result.assessment?.riskScore).toBe(100);
+      expect(result.assessment?.verdictConfidence).toBe(1);
+      expect(result.assessment?.threatVectors).toEqual(['credential_harvest']);
+      expect(result.assessment?.targeting).toBe('unknown');
+    });
+
+    it('ignores an unknown verdict and falls back to legacy fields', () => {
+      const response = JSON.stringify({
+        summary: 'x',
+        verdict: 'definitely_evil',
+        isPhishing: true,
+        confidence: 'High',
+      });
+
+      const result = parseAnalysisResponse(response, provider, model, processingTime);
+
+      expect(result.assessment).toBeUndefined();
+      expect(result.isPhishing).toBe(true);
+    });
+  });
 });

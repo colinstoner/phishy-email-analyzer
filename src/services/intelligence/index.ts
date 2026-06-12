@@ -21,6 +21,9 @@ export { CampaignAlertService, CampaignAlertConfig } from './campaign.service';
 
 export { extractIOCs, IOCExtractionOptions, IOCSourceContext } from './ioc.extractor';
 
+export { fuseRisk, scoreToLevel } from './risk.fusion';
+export type { FusionSignals, RiskDecision, RiskLevel } from './risk.fusion';
+
 export {
   PatternDetectorService,
   PatternDetectionOptions,

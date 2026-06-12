@@ -43,7 +43,29 @@ export interface ReportOptions {
    * bodies survive mail clients that strip threading headers).
    */
   analysisId?: string;
+  /**
+   * Fused risk decision (verdict + 0-100 score + the intelligence reasons
+   * behind it). When present the report leads with this instead of the raw
+   * confidence label.
+   */
+  risk?: {
+    verdict: string;
+    riskScore: number;
+    riskLevel: string;
+    reasons: string[];
+  };
 }
+
+/** Human-facing label and color for each verdict category */
+const VERDICT_DISPLAY: Record<string, { label: string; cssClass: string }> = {
+  bec: { label: 'BUSINESS EMAIL COMPROMISE', cssClass: 'verdict-phishing' },
+  phishing: { label: 'PHISHING', cssClass: 'verdict-phishing' },
+  malware_delivery: { label: 'MALWARE DELIVERY', cssClass: 'verdict-phishing' },
+  suspicious: { label: 'SUSPICIOUS', cssClass: 'verdict-suspicious' },
+  spam: { label: 'SPAM', cssClass: 'verdict-suspicious' },
+  graymail: { label: 'GRAYMAIL (LEGITIMATE BULK)', cssClass: 'verdict-legitimate' },
+  legitimate: { label: 'LIKELY LEGITIMATE', cssClass: 'verdict-legitimate' },
+};
 
 /**
  * Build complete HTML email for analysis report
@@ -54,7 +76,7 @@ export function buildEmailHtml(
   options?: ReportOptions
 ): string {
   const timestamp = new Date().toLocaleString();
-  const analysisHtml = buildAnalysisSection(analysis);
+  const analysisHtml = buildAnalysisSection(analysis, options);
   const originalSubject = emailData.subject;
 
   return `<!DOCTYPE html>
@@ -116,6 +138,10 @@ export function buildEmailHtml(
             }
             .verdict-legitimate {
                 color: #28a745;
+                font-weight: bold;
+            }
+            .verdict-suspicious {
+                color: #fd7e14;
                 font-weight: bold;
             }
             .metadata {
@@ -249,7 +275,7 @@ export function buildEmailHtml(
 /**
  * Build the analysis section HTML
  */
-function buildAnalysisSection(analysis: AnalysisResult): string {
+function buildAnalysisSection(analysis: AnalysisResult, options?: ReportOptions): string {
   let html = '';
 
   // Summary
@@ -257,14 +283,28 @@ function buildAnalysisSection(analysis: AnalysisResult): string {
     html += `<p><strong>Summary:</strong> ${escapeHtml(analysis.summary)}</p>`;
   }
 
-  // Verdict
-  const isPhishing = analysis.isPhishing;
-  const verdictClass = isPhishing ? 'verdict-phishing' : 'verdict-legitimate';
-  const verdictText = isPhishing ? 'POTENTIALLY MALICIOUS' : 'LIKELY LEGITIMATE';
-  html += `<p><strong>Verdict:</strong> <span class="${verdictClass}">${verdictText}</span></p>`;
-
-  // Confidence
-  html += `<p><strong>Confidence:</strong> ${normalizeConfidence(analysis.confidence)}</p>`;
+  // Verdict + risk. Prefer the fused decision; fall back to the binary verdict.
+  if (options?.risk) {
+    const display = VERDICT_DISPLAY[options.risk.verdict] ?? {
+      label: options.risk.verdict.toUpperCase(),
+      cssClass: analysis.isPhishing ? 'verdict-phishing' : 'verdict-legitimate',
+    };
+    html += `<p><strong>Verdict:</strong> <span class="${display.cssClass}">${escapeHtml(display.label)}</span></p>`;
+    html += `<p><strong>Risk:</strong> ${options.risk.riskScore}/100 (${escapeHtml(options.risk.riskLevel)})</p>`;
+    if (options.risk.reasons.length) {
+      html += `<p><strong>Why:</strong></p><ul>`;
+      for (const reason of options.risk.reasons) {
+        html += `<li>${escapeHtml(reason)}</li>`;
+      }
+      html += `</ul>`;
+    }
+  } else {
+    const isPhishing = analysis.isPhishing;
+    const verdictClass = isPhishing ? 'verdict-phishing' : 'verdict-legitimate';
+    const verdictText = isPhishing ? 'POTENTIALLY MALICIOUS' : 'LIKELY LEGITIMATE';
+    html += `<p><strong>Verdict:</strong> <span class="${verdictClass}">${verdictText}</span></p>`;
+    html += `<p><strong>Confidence:</strong> ${normalizeConfidence(analysis.confidence)}</p>`;
+  }
 
   // Indicators
   if (analysis.indicators?.length) {
@@ -310,10 +350,22 @@ export function buildPlainTextReport(
     lines.push('');
   }
 
-  // Verdict
-  const verdictText = analysis.isPhishing ? 'POTENTIALLY MALICIOUS' : 'LIKELY LEGITIMATE';
-  lines.push(`Verdict: ${verdictText}`);
-  lines.push(`Confidence: ${normalizeConfidence(analysis.confidence)}`);
+  // Verdict + risk
+  if (options?.risk) {
+    const label = VERDICT_DISPLAY[options.risk.verdict]?.label ?? options.risk.verdict.toUpperCase();
+    lines.push(`Verdict: ${label}`);
+    lines.push(`Risk: ${options.risk.riskScore}/100 (${options.risk.riskLevel})`);
+    if (options.risk.reasons.length) {
+      lines.push('Why:');
+      for (const reason of options.risk.reasons) {
+        lines.push(`  - ${reason}`);
+      }
+    }
+  } else {
+    const verdictText = analysis.isPhishing ? 'POTENTIALLY MALICIOUS' : 'LIKELY LEGITIMATE';
+    lines.push(`Verdict: ${verdictText}`);
+    lines.push(`Confidence: ${normalizeConfidence(analysis.confidence)}`);
+  }
   lines.push('');
 
   // Indicators

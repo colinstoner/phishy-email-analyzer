@@ -116,9 +116,10 @@ describe('extractIOCs', () => {
   });
 
   describe('Email extraction', () => {
-    it('should extract sender email as IOC for phishing', () => {
+    it('should extract the original (forwarded) sender as IOC, not the reporter', () => {
       const emailData = createMockEmailData({
-        from_email: 'fake-support@malicious-domain.com',
+        from_email: 'reporter@mycompany.com',
+        original_sender: 'Fake Support <fake-support@malicious-domain.com>',
       });
 
       const analysis = createMockAnalysis(true, 'High');
@@ -127,6 +128,221 @@ describe('extractIOCs', () => {
       const emailIOCs = iocs.filter(i => i.indicatorType === 'email');
       expect(emailIOCs.length).toBe(1);
       expect(emailIOCs[0].indicatorValue).toBe('fake-support@malicious-domain.com');
+      expect(emailIOCs[0].metadata?.extractionContext).toBe('original_sender_email');
+    });
+  });
+
+  describe('Attribution', () => {
+    const sourceContext = {
+      analysisId: 'a-1',
+      messageId: 'm-1',
+      reporterEmail: 'reporter@mycompany.com',
+      reporterDomain: 'mycompany.com',
+      subject: 'Fwd: suspicious',
+    };
+
+    it('never emits the reporter as an indicator', () => {
+      const emailData = createMockEmailData({
+        from_email: 'reporter@mycompany.com',
+        original_sender: 'reporter@mycompany.com', // parser fallback edge case
+        links: ['https://mycompany.com/legit'],
+      });
+
+      const iocs = extractIOCs(emailData, createMockAnalysis(true), {}, sourceContext);
+
+      expect(iocs.some(i => i.indicatorValue.includes('mycompany.com'))).toBe(false);
+    });
+
+    it('records the reporter as provenance metadata', () => {
+      const emailData = createMockEmailData({
+        from_email: 'reporter@mycompany.com',
+        original_sender: 'attacker@evil.example',
+      });
+
+      const iocs = extractIOCs(emailData, createMockAnalysis(true), {}, sourceContext);
+
+      expect(iocs.length).toBeGreaterThan(0);
+      expect(iocs.every(i => i.metadata?.reportedBy === 'reporter@mycompany.com')).toBe(true);
+    });
+
+    it('respects configured safe domains and senders', () => {
+      const emailData = createMockEmailData({
+        original_sender: 'partner@trusted-partner.com',
+        links: ['https://internal-tool.mycompany.com/page'],
+      });
+
+      const iocs = extractIOCs(emailData, createMockAnalysis(true), {
+        safeDomains: ['mycompany.com'],
+        safeSenders: ['partner@trusted-partner.com'],
+      });
+
+      expect(iocs.some(i => i.indicatorType === 'email')).toBe(false);
+      expect(iocs.some(i => i.indicatorValue.includes('mycompany.com'))).toBe(false);
+    });
+  });
+
+  describe('Redirect unwrapping', () => {
+    it('surfaces the final destination behind an open redirector', () => {
+      const emailData = createMockEmailData({
+        links: ['https://maps.google.si/url?q=https%3A%2F%2Fevil-landing.store%2Fpage'],
+      });
+
+      const iocs = extractIOCs(emailData, createMockAnalysis(true, 'Very High'));
+
+      const finalDomain = iocs.find(
+        i => i.indicatorType === 'domain' && i.indicatorValue === 'evil-landing.store'
+      );
+      expect(finalDomain).toBeDefined();
+      expect(finalDomain?.severity).toBe('critical');
+      expect(finalDomain?.metadata?.extractionContext).toBe('final_url_domain');
+
+      const finalUrl = iocs.find(
+        i => i.indicatorType === 'url' && i.indicatorValue === 'https://evil-landing.store/page'
+      );
+      expect(finalUrl?.metadata?.extractionContext).toBe('final_url');
+    });
+
+    it('marks redirect intermediaries low severity', () => {
+      const emailData = createMockEmailData({
+        links: ['https://tracker.example.net/r?url=https%3A%2F%2Fevil-landing.store%2F'],
+      });
+
+      const iocs = extractIOCs(emailData, createMockAnalysis(true, 'Very High'));
+
+      const intermediary = iocs.find(
+        i => i.indicatorType === 'domain' && i.indicatorValue === 'tracker.example.net'
+      );
+      expect(intermediary?.severity).toBe('low');
+      expect(intermediary?.metadata?.extractionContext).toBe('redirect_intermediary');
+    });
+
+    it('decodes JWT tracker tokens to find the destination (Feb 2026 regression)', () => {
+      // Modeled on the real campaign: google.si open redirect -> monday.com
+      // tracker whose JWT payload carries the true landing page
+      const jwtPayload = Buffer.from(
+        JSON.stringify({ originalUrl: 'https://talamalove.store/.nc', emailId: 'x' })
+      ).toString('base64url');
+      const trackerUrl = `https://trackingservice.example.com/tracker/link?token=hdr.${jwtPayload}.sig`;
+      const outerUrl = `https://maps.google.si/url?q=${encodeURIComponent(trackerUrl)}`;
+
+      const emailData = createMockEmailData({ links: [outerUrl] });
+      const iocs = extractIOCs(emailData, createMockAnalysis(true, 'Very High'));
+
+      const landing = iocs.find(
+        i => i.indicatorType === 'domain' && i.indicatorValue === 'talamalove.store'
+      );
+      expect(landing).toBeDefined();
+      expect(landing?.severity).toBe('critical');
+
+      const google = iocs.find(
+        i => i.indicatorType === 'domain' && i.indicatorValue === 'maps.google.si'
+      );
+      expect(google?.severity).toBe('low');
+    });
+  });
+
+  describe('free-mail and provider noise', () => {
+    it('keeps a throwaway-gmail sender address but not gmail.com as a domain', () => {
+      const emailData = createMockEmailData({
+        original_sender: 'CEO Impersonator <dpcxzut@gmail.com>',
+      });
+
+      const iocs = extractIOCs(emailData, createMockAnalysis(true, 'High'));
+
+      expect(iocs.some(i => i.indicatorType === 'email' && i.indicatorValue === 'dpcxzut@gmail.com')).toBe(
+        true
+      );
+      expect(iocs.some(i => i.indicatorType === 'domain' && i.indicatorValue === 'gmail.com')).toBe(false);
+    });
+
+    it('drops free-mail domains nominated by the AI', () => {
+      const analysis = {
+        ...createMockAnalysis(true),
+        iocs: [{ type: 'domain' as const, value: 'gmail.com', role: 'sender' as const }],
+      };
+
+      const iocs = extractIOCs(createMockEmailData({}), analysis);
+
+      expect(iocs.some(i => i.indicatorValue === 'gmail.com')).toBe(false);
+    });
+
+    it('treats aka.ms (M365 sender banner) as safe', () => {
+      const emailData = createMockEmailData({
+        links: ['https://aka.ms/LearnAboutSenderIdentification'],
+      });
+
+      const iocs = extractIOCs(emailData, createMockAnalysis(true, 'High'));
+
+      expect(iocs.some(i => i.indicatorValue.includes('aka.ms'))).toBe(false);
+    });
+  });
+
+  describe('IP/domain typing', () => {
+    it('does not store URL IP hosts as domain indicators', () => {
+      const emailData = createMockEmailData({
+        links: ['http://203.0.113.50/verify?token=abc'],
+      });
+
+      const iocs = extractIOCs(emailData, createMockAnalysis(true));
+
+      expect(iocs.some(i => i.indicatorType === 'domain' && i.indicatorValue === '203.0.113.50')).toBe(
+        false
+      );
+      expect(iocs.some(i => i.indicatorType === 'ip' && i.indicatorValue === '203.0.113.50')).toBe(
+        true
+      );
+    });
+  });
+
+  describe('AI-nominated IOCs', () => {
+    it('merges structured IOCs from the analysis with role-based severity', () => {
+      const emailData = createMockEmailData({});
+      const analysis = {
+        ...createMockAnalysis(true, 'Very High'),
+        iocs: [
+          { type: 'domain' as const, value: 'evil-sender.jp', role: 'sender' as const },
+          { type: 'domain' as const, value: 'tracker-relay.com', role: 'infrastructure' as const },
+        ],
+      };
+
+      const iocs = extractIOCs(emailData, analysis);
+
+      const sender = iocs.find(i => i.indicatorValue === 'evil-sender.jp');
+      expect(sender?.severity).toBe('critical');
+      expect(sender?.metadata?.extractionContext).toBe('ai_nominated:sender');
+
+      const infra = iocs.find(i => i.indicatorValue === 'tracker-relay.com');
+      expect(infra?.severity).toBe('medium');
+    });
+
+    it('filters AI nominations through the same allowlists', () => {
+      const emailData = createMockEmailData({});
+      const analysis = {
+        ...createMockAnalysis(true),
+        iocs: [{ type: 'domain' as const, value: 'mycompany.com', role: 'sender' as const }],
+      };
+
+      const iocs = extractIOCs(emailData, analysis, { safeDomains: ['mycompany.com'] });
+
+      expect(iocs.some(i => i.indicatorValue === 'mycompany.com')).toBe(false);
+    });
+
+    it('dedupes against regex-extracted indicators, keeping higher confidence', () => {
+      const emailData = createMockEmailData({
+        original_sender: 'attacker@evil-sender.jp',
+      });
+      const analysis = {
+        ...createMockAnalysis(true),
+        iocs: [{ type: 'email' as const, value: 'attacker@evil-sender.jp', role: 'sender' as const }],
+      };
+
+      const iocs = extractIOCs(emailData, analysis);
+
+      const matches = iocs.filter(
+        i => i.indicatorType === 'email' && i.indicatorValue === 'attacker@evil-sender.jp'
+      );
+      expect(matches.length).toBe(1);
+      expect(matches[0].confidenceScore).toBe(0.8);
     });
   });
 

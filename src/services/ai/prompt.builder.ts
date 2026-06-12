@@ -137,11 +137,42 @@ Analyze this email for phishing indicators. Check for:
 Return your analysis as JSON:
 {
   "summary": "2-3 sentence summary for a non-technical employee",
-  "isPhishing": true/false,
-  "confidence": "High/Medium/Low",
+  "verdict": "bec|phishing|malware_delivery|spam|graymail|suspicious|legitimate",
+  "riskScore": 0-100,
+  "verdictConfidence": 0.0-1.0,
+  "threatVectors": ["credential_harvest|wire_fraud|gift_card_fraud|malware|reconnaissance|data_exfiltration|extortion|other"],
+  "targeting": "targeted|mass|unknown",
   "indicators": ["Array of specific suspicious indicators found"],
-  "recommendations": ["Array of recommended actions"]
-}`;
+  "recommendations": ["Array of recommended actions"],
+  "iocs": [{"type": "domain|url|email|ip", "value": "the indicator", "role": "sender|payload|infrastructure"}]
+}
+
+Field guidance:
+- "verdict": what the email IS. bec = executive/vendor impersonation aimed at
+  fraud (often no link - a reply-bait "are you available?"); phishing =
+  credential harvesting; malware_delivery = malicious attachment/payload;
+  spam = unsolicited bulk with no clear harm; graymail = legitimate bulk the
+  recipient may not want (marketing, surveys, newsletters); suspicious = off
+  but unconfirmed; legitimate = expected, benign mail.
+- "riskScore": harm if the employee ACTS on it, independent of how sure you
+  are. Confirmed legitimate = 0-10. Graymail/spam = 10-30. A convincing
+  credential-harvest or wire-fraud BEC = 80-100. Do NOT raise risk just
+  because you are confident it is safe.
+- "verdictConfidence": how certain you are of the verdict itself, separate
+  from risk. "Certainly a legitimate survey" is verdictConfidence 0.9, riskScore 5.
+- "threatVectors": empty [] for legitimate/graymail/spam. reconnaissance =
+  probing or opening a back-channel before the real ask (classic BEC opener).
+- "targeting": targeted = references this org, its people, or its business;
+  mass = generic blast that could go to anyone.
+
+For "iocs" (only when verdict is bec/phishing/malware_delivery/suspicious, otherwise []): machine-readable
+indicators of compromise for the threat-intelligence database. Attribute
+carefully - never include the reporter/forwarder or their organization.
+- role "sender": the original sender's address and domain (the attacker)
+- role "payload": where the attack leads - final link destinations after
+  unwrapping redirects/trackers, credential-harvesting hosts, malware URLs
+- role "infrastructure": relays, open redirectors, and tracking services
+  abused along the way`;
 }
 
 /**

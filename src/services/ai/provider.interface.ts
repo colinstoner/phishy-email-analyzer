@@ -3,7 +3,16 @@
  * Defines the contract for AI analysis providers
  */
 
-import { AnalysisResult, ExtractedEmailData } from '../../types';
+import {
+  AnalysisResult,
+  AINominatedIOC,
+  ExtractedEmailData,
+  ThreatAssessment,
+  ThreatVerdict,
+  ThreatVector,
+  Targeting,
+  MALICIOUS_VERDICTS,
+} from '../../types';
 import { EnterpriseProfile } from '../../models/profile.model';
 import { ConversationRequest, ConversationResponse } from './conversation.types';
 
@@ -91,10 +100,105 @@ export interface ProviderConfig {
  */
 export interface AIAnalysisResponse {
   summary: string;
-  isPhishing: boolean;
-  confidence: string;
+  /** Legacy boolean verdict (quick-analysis path and older prompts) */
+  isPhishing?: boolean;
+  /** Legacy confidence string (quick-analysis path and older prompts) */
+  confidence?: string;
+  /** Next-gen structured verdict */
+  verdict?: string;
+  riskScore?: number;
+  verdictConfidence?: number;
+  threatVectors?: string[];
+  targeting?: string;
   indicators: string[];
   recommendations: string[];
+  iocs?: AINominatedIOC[];
+}
+
+const IOC_TYPES = new Set(['domain', 'url', 'email', 'ip']);
+const IOC_ROLES = new Set(['sender', 'payload', 'infrastructure']);
+
+const VERDICTS: readonly ThreatVerdict[] = [
+  'bec',
+  'phishing',
+  'malware_delivery',
+  'spam',
+  'graymail',
+  'suspicious',
+  'legitimate',
+];
+const THREAT_VECTORS: readonly ThreatVector[] = [
+  'credential_harvest',
+  'wire_fraud',
+  'gift_card_fraud',
+  'malware',
+  'reconnaissance',
+  'data_exfiltration',
+  'extortion',
+  'other',
+];
+const TARGETINGS: readonly Targeting[] = ['targeted', 'mass', 'unknown'];
+
+function clampScore(value: unknown, lo: number, hi: number, fallback: number): number {
+  if (typeof value !== 'number' || Number.isNaN(value)) return fallback;
+  return Math.min(hi, Math.max(lo, value));
+}
+
+/**
+ * Build a structured assessment from the model output. Returns undefined when
+ * the response has no `verdict` field (legacy/quick path), so callers fall
+ * back to the boolean isPhishing.
+ */
+function sanitizeAssessment(parsed: AIAnalysisResponse): ThreatAssessment | undefined {
+  if (typeof parsed.verdict !== 'string') return undefined;
+  const verdict = parsed.verdict.toLowerCase().trim() as ThreatVerdict;
+  if (!VERDICTS.includes(verdict)) return undefined;
+
+  const vectors = Array.isArray(parsed.threatVectors)
+    ? (parsed.threatVectors
+        .map(v => (typeof v === 'string' ? v.toLowerCase().trim() : ''))
+        .filter(v => THREAT_VECTORS.includes(v as ThreatVector)) as ThreatVector[])
+    : [];
+
+  const targeting =
+    typeof parsed.targeting === 'string' && TARGETINGS.includes(parsed.targeting.toLowerCase().trim() as Targeting)
+      ? (parsed.targeting.toLowerCase().trim() as Targeting)
+      : 'unknown';
+
+  return {
+    verdict,
+    riskScore: Math.round(clampScore(parsed.riskScore, 0, 100, MALICIOUS_VERDICTS.includes(verdict) ? 75 : 5)),
+    verdictConfidence: clampScore(parsed.verdictConfidence, 0, 1, 0.5),
+    threatVectors: [...new Set(vectors)],
+    targeting,
+  };
+}
+
+/** Map a 0-100 risk score to the legacy confidence label for display/back-compat */
+function riskScoreToConfidence(score: number): string {
+  if (score >= 85) return 'Very High';
+  if (score >= 60) return 'High';
+  if (score >= 35) return 'Medium';
+  if (score >= 15) return 'Low';
+  return 'Very Low';
+}
+
+/**
+ * Keep only well-formed IOC nominations; the model occasionally improvises
+ * shapes and a bad entry must not poison the indicator store.
+ */
+function sanitizeIOCs(value: unknown): AINominatedIOC[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const iocs = value.filter(
+    (entry): entry is AINominatedIOC =>
+      typeof entry === 'object' &&
+      entry !== null &&
+      IOC_TYPES.has((entry as AINominatedIOC).type) &&
+      IOC_ROLES.has((entry as AINominatedIOC).role) &&
+      typeof (entry as AINominatedIOC).value === 'string' &&
+      (entry as AINominatedIOC).value.trim().length > 0
+  );
+  return iocs.length > 0 ? iocs : undefined;
 }
 
 /**
@@ -132,13 +236,25 @@ export function parseAnalysisResponse(
     }
 
     const parsed = JSON.parse(jsonText) as AIAnalysisResponse;
+    const assessment = sanitizeAssessment(parsed);
+
+    // Derive the legacy fields from the structured verdict when present, so
+    // every downstream consumer keeps working unchanged.
+    const isPhishing = assessment
+      ? MALICIOUS_VERDICTS.includes(assessment.verdict)
+      : parsed.isPhishing === true;
+    const confidence = assessment
+      ? normalizeConfidence(riskScoreToConfidence(assessment.riskScore))
+      : normalizeConfidence(parsed.confidence);
 
     return {
       summary: parsed.summary ?? 'Analysis completed',
-      isPhishing: parsed.isPhishing === true,
-      confidence: normalizeConfidence(parsed.confidence),
+      isPhishing,
+      confidence,
+      assessment,
       indicators: Array.isArray(parsed.indicators) ? parsed.indicators : [],
       recommendations: Array.isArray(parsed.recommendations) ? parsed.recommendations : [],
+      iocs: sanitizeIOCs(parsed.iocs),
       rawResponse: responseText,
       processingTimeMs,
       provider,

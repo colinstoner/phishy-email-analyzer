@@ -32,6 +32,9 @@ export interface EmailAnalysisRecord {
   processingTimeMs: number;
   /** Flood-detection signature, also the campaign verdict cache key (migration 003) */
   campaignSignature?: string;
+  /** Structured verdict label and fused 0-100 risk score (migration 004) */
+  verdict?: string;
+  riskScore?: number;
   createdAt?: Date;
 }
 
@@ -380,7 +383,24 @@ export class IntelligenceDatabaseService {
   async storeAnalysis(record: EmailAnalysisRecord): Promise<string> {
     await this.initialize();
 
-    const baseParams = [
+    // Always-present columns (migration 001).
+    const columns: string[] = [
+      'profile_id',
+      'message_id',
+      'from_email',
+      'from_domain',
+      'subject',
+      'is_phishing',
+      'confidence_score',
+      'risk_level',
+      'analysis_result',
+      'indicators',
+      'vip_impersonation_detected',
+      'ai_provider',
+      'ai_model',
+      'processing_time_ms',
+    ];
+    const values: unknown[] = [
       record.profileId ?? null,
       record.messageId,
       record.fromEmail,
@@ -397,44 +417,55 @@ export class IntelligenceDatabaseService {
       record.processingTimeMs,
     ];
 
-    let result;
+    // Migration-gated columns, newest migration last. Each carries the
+    // migration that adds it so a missing column degrades to a clear warning.
+    const optional: { column: string; value: unknown; migration: string }[] = [];
     if (record.campaignSignature) {
-      try {
-        result = await this.pool.query(
-          `INSERT INTO email_analyses
-           (profile_id, message_id, from_email, from_domain, subject, is_phishing,
-            confidence_score, risk_level, analysis_result, indicators,
-            vip_impersonation_detected, ai_provider, ai_model, processing_time_ms,
-            campaign_signature)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-           RETURNING id`,
-          [...baseParams, record.campaignSignature]
-        );
-      } catch (error) {
-        // 42703 = campaign_signature column missing (migration 003 not applied)
-        if ((error as { code?: string }).code !== '42703') {
-          throw error;
-        }
-        logger.warn(
-          'campaign_signature column missing — apply migrations/003_campaign_verdict_cache.sql; storing analysis without it'
-        );
-      }
+      optional.push({
+        column: 'campaign_signature',
+        value: record.campaignSignature,
+        migration: '003_campaign_verdict_cache.sql',
+      });
+    }
+    if (record.verdict) {
+      optional.push({ column: 'verdict', value: record.verdict, migration: '004_structured_verdict.sql' });
+    }
+    if (typeof record.riskScore === 'number') {
+      optional.push({ column: 'risk_score', value: record.riskScore, migration: '004_structured_verdict.sql' });
     }
 
-    result ??= await this.pool.query(
-      `INSERT INTO email_analyses
-       (profile_id, message_id, from_email, from_domain, subject, is_phishing,
-        confidence_score, risk_level, analysis_result, indicators,
-        vip_impersonation_detected, ai_provider, ai_model, processing_time_ms)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-       RETURNING id`,
-      baseParams
-    );
-
-    const id = result.rows[0].id as string;
-    logger.debug('Stored email analysis', { id, messageId: record.messageId });
-
-    return id;
+    // Try with all optional columns; on a missing-column error (42703) drop
+    // the offending migration's columns and retry, down to the base set.
+    let dropAfter = optional.length;
+    for (;;) {
+      const opt = optional.slice(0, dropAfter);
+      const allColumns = [...columns, ...opt.map(o => o.column)];
+      const allValues = [...values, ...opt.map(o => o.value)];
+      const placeholders = allValues.map((_, i) => `$${i + 1}`).join(', ');
+      try {
+        const result = await this.pool.query(
+          `INSERT INTO email_analyses (${allColumns.join(', ')})
+           VALUES (${placeholders})
+           RETURNING id`,
+          allValues
+        );
+        const id = result.rows[0].id as string;
+        logger.debug('Stored email analysis', { id, messageId: record.messageId });
+        return id;
+      } catch (error) {
+        if ((error as { code?: string }).code !== '42703' || dropAfter === 0) {
+          throw error;
+        }
+        const dropped = opt[dropAfter - 1];
+        logger.warn(
+          `${dropped.column} column missing — apply migrations/${dropped.migration}; storing analysis without it`
+        );
+        // Drop every trailing column from the same migration in one step.
+        while (dropAfter > 0 && optional[dropAfter - 1].migration === dropped.migration) {
+          dropAfter--;
+        }
+      }
+    }
   }
 
   /**
