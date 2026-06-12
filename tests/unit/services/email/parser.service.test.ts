@@ -123,6 +123,31 @@ describe('EmailParserService', () => {
       expect(result[0].msg.from_email).toBe('ok@example.org');
     });
 
+    it('should strip trust-bearing fields from external payloads', async () => {
+      const parser = makeParser();
+      const payload = JSON.stringify([
+        {
+          msg: {
+            from_email: 'attacker@example.com',
+            subject: 'Re: Phishing Analysis: anything',
+            text: 'false positive',
+            // Forged trust fields an external caller must not control
+            authVerdicts: { spf: 'PASS', dkim: 'PASS' },
+            s3Location: { bucket: 'victim-bucket', key: 'important-object' },
+            s3Reference: 's3://victim-bucket/important-object',
+          },
+        },
+      ]);
+
+      const result = await parser.parseEmailEvents(payload);
+
+      expect(result).toHaveLength(1);
+      expect(result[0].msg.authVerdicts).toBeUndefined();
+      expect(result[0].msg.s3Location).toBeUndefined();
+      expect(result[0].msg.s3Reference).toBeUndefined();
+      expect(result[0].msg.from_email).toBe('attacker@example.com');
+    });
+
     it('should parse a JSON string containing SES Records', async () => {
       const parser = makeParser();
       const payload = JSON.stringify({
@@ -352,6 +377,92 @@ describe('EmailParserService', () => {
       // would mislead cleanup and provenance
       expect(msg.s3Reference).toBeNull();
       expect(msg.s3Location).toBeUndefined();
+    });
+
+    it('should parse a message/rfc822 attachment (forward-as-attachment) into a forwarded block', async () => {
+      const innerEmail = [
+        'From: "Example Billing" <billing@examp1e-secure.test>',
+        'To: victim@example.com',
+        'Subject: Your account is suspended',
+        'Reply-To: collect@example-evil.test',
+        'Authentication-Results: spf=fail smtp.mailfrom=examp1e-secure.test',
+        'Content-Type: text/plain; charset=utf-8',
+        '',
+        'Click https://examp1e-secure.test/verify within 24 hours.',
+      ].join(CRLF);
+
+      const outerEmail = [
+        'From: employee@example.com',
+        'To: phishy@example.com',
+        'Subject: FW: found this in my inbox',
+        'MIME-Version: 1.0',
+        'Content-Type: multipart/mixed; boundary="outer-boundary"',
+        '',
+        '--outer-boundary',
+        'Content-Type: text/plain; charset=utf-8',
+        '',
+        'This looks fake to me, please check.',
+        '--outer-boundary',
+        'Content-Type: message/rfc822',
+        '',
+        innerEmail,
+        '--outer-boundary--',
+        '',
+      ].join(CRLF);
+
+      const parser = makeParser();
+      const record = makeSESRecord({ content: outerEmail });
+
+      const events = await parser.parseSESRecords([record]);
+      const msg = events[0].msg;
+
+      // The employee's note and the inner email both survive
+      expect(msg.text).toContain('This looks fake to me');
+      expect(msg.text).toContain('---------- Forwarded message ---------');
+      expect(msg.text).toContain('Click https://examp1e-secure.test/verify');
+
+      // The inner message's full headers are surfaced for analysis
+      const forwarded = parser.extractForwardedHeaders(msg.text);
+      expect(forwarded['Original-From']).toContain('billing@examp1e-secure.test');
+      expect(forwarded['Original-Subject']).toBe('Your account is suspended');
+      expect(forwarded['Original-Reply-To']).toContain('collect@example-evil.test');
+    });
+
+    it('should surface attachment metadata without carrying content', async () => {
+      const pdfBytes = Buffer.from('%PDF-1.4 fake invoice payload');
+      const rawEmail = [
+        'From: sender@example-unknown.net',
+        'To: victim@example.com',
+        'Subject: Invoice attached',
+        'MIME-Version: 1.0',
+        'Content-Type: multipart/mixed; boundary="b1"',
+        '',
+        '--b1',
+        'Content-Type: text/plain',
+        '',
+        'Please see the attached invoice.',
+        '--b1',
+        'Content-Type: application/pdf; name="invoice.pdf"',
+        'Content-Disposition: attachment; filename="invoice.pdf"',
+        'Content-Transfer-Encoding: base64',
+        '',
+        pdfBytes.toString('base64'),
+        '--b1--',
+        '',
+      ].join(CRLF);
+
+      const parser = makeParser();
+      const record = makeSESRecord({ content: rawEmail });
+
+      const events = await parser.parseSESRecords([record]);
+      const attachments = events[0].msg.attachments ?? [];
+
+      expect(attachments).toHaveLength(1);
+      expect(attachments[0].filename).toBe('invoice.pdf');
+      expect(attachments[0].contentType).toBe('application/pdf');
+      expect(attachments[0].size).toBe(pdfBytes.length);
+      expect(attachments[0].sha256).toMatch(/^[0-9a-f]{64}$/);
+      expect(attachments[0].content).toBeUndefined();
     });
 
     it('should still process records with very short content', async () => {

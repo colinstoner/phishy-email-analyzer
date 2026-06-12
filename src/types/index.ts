@@ -42,6 +42,8 @@ export interface EmailAttachment {
   filename: string;
   contentType: string;
   size: number;
+  /** SHA-256 of the attachment body — metadata for analysis; content is never executed or forwarded */
+  sha256?: string;
   content?: string | Buffer;
 }
 

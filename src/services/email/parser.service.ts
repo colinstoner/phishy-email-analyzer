@@ -3,8 +3,12 @@
  * Handles parsing of email messages from various sources
  */
 
+import { simpleParser, ParsedMail, Attachment } from 'mailparser';
+import { createHash } from 'crypto';
+import { z } from 'zod';
 import {
   EmailMessage,
+  EmailAttachment,
   ExtractedEmailData,
   SESRecord,
   SESEvent,
@@ -22,6 +26,43 @@ import {
 import { S3Service } from '../storage/s3.service';
 
 const logger = createLogger('email-parser');
+
+/** Cap on attachment metadata entries carried per message */
+const MAX_ATTACHMENTS = 20;
+
+/**
+ * Schema for events arriving from outside SES (API Gateway, tests).
+ * Trust-bearing fields (authVerdicts, s3Location, s3Reference) are
+ * deliberately absent — Zod strips unknown keys, so external callers
+ * cannot inject them.
+ */
+const ExternalEmailMessageSchema = z.object({
+  from_email: z.string().default(''),
+  subject: z.string().default('No Subject'),
+  text: z.string().default(''),
+  html: z.string().nullable().default(null),
+  headers: z.record(z.string(), z.string()).default({}),
+  to: z.string().default(''),
+  original_sender: z.string().optional(),
+  messageId: z.string().optional(),
+});
+
+const ExternalEmailEventSchema = z.object({
+  msg: ExternalEmailMessageSchema,
+});
+
+/**
+ * Reduce a parsed attachment to safe metadata: name, type, size, and SHA-256.
+ * Content is never carried forward, executed, or shown to the model.
+ */
+function toAttachmentMeta(attachment: Attachment): EmailAttachment {
+  return {
+    filename: attachment.filename ?? '(unnamed)',
+    contentType: attachment.contentType,
+    size: attachment.size,
+    sha256: createHash('sha256').update(attachment.content).digest('hex'),
+  };
+}
 
 /**
  * Essential email headers for security analysis
@@ -121,16 +162,25 @@ export class EmailParserService {
   }
 
   /**
-   * Validate externally supplied event payloads instead of blind-casting:
-   * an event must carry an object `msg`. Non-conforming entries are dropped
-   * with a warning rather than crashing mid-pipeline.
+   * Validate externally supplied event payloads against a schema instead of
+   * blind-casting. Non-conforming entries are dropped with a warning rather
+   * than crashing mid-pipeline.
+   *
+   * Only the allowed fields survive (Zod strips unknown keys): external
+   * callers must not be able to supply trust-bearing fields like
+   * `authVerdicts` (forged SPF/DKIM would defeat the email-command
+   * authorization) or `s3Location` (would aim cleanup at arbitrary objects).
+   * Those are only meaningful when derived from SES receipts.
    */
   private validateEventShapes(events: unknown[]): EmailEvent[] {
-    const valid = events.filter((event): event is EmailEvent => {
-      if (typeof event !== 'object' || event === null) return false;
-      const msg = (event as { msg?: unknown }).msg;
-      return typeof msg === 'object' && msg !== null;
-    });
+    const valid: EmailEvent[] = [];
+
+    for (const event of events) {
+      const result = ExternalEmailEventSchema.safeParse(event);
+      if (result.success) {
+        valid.push(result.data as EmailEvent);
+      }
+    }
 
     if (valid.length < events.length) {
       logger.warn('Dropped malformed email events from payload', {
@@ -161,7 +211,7 @@ export class EmailParserService {
             logger.warn('Empty or very short email content received');
           }
 
-          const forwarded = this.parseEmailContent(content);
+          const forwarded = await this.parseRawEmail(content);
 
           const msg: EmailMessage = {
             from_email: record.ses.mail.source,
@@ -169,6 +219,7 @@ export class EmailParserService {
             headers: this.extractHeaders(record.ses.mail.headers),
             text: forwarded.text || record.ses.mail.commonHeaders?.subject || 'No email content',
             html: forwarded.html,
+            attachments: forwarded.attachments,
             to: record.ses.mail.destination?.join(', ') ?? '',
             original_sender: record.ses.mail.commonHeaders?.from?.[0] ?? '',
             messageId: record.ses.mail.messageId ?? '',
@@ -269,46 +320,78 @@ export class EmailParserService {
   }
 
   /**
-   * Parse email content (raw or processed)
+   * Parse raw email content with a real MIME parser (mailparser). Handles
+   * nested multiparts, all transfer encodings, charsets, and header folding —
+   * the cases the previous regex-based parsing silently mangled.
+   *
+   * If the message carries a `message/rfc822` attachment ("forward as
+   * attachment" — the one forwarding mode that preserves the original's full
+   * headers), the inner message is parsed too and surfaced as a synthesized
+   * forwarded block, so downstream forwarded-header extraction and analysis
+   * see the original email rather than just the wrapper.
    */
-  private parseEmailContent(content: string): { text: string; html: string | null } {
-    const result = { text: '', html: null as string | null };
+  private async parseRawEmail(content: string): Promise<{
+    text: string;
+    html: string | null;
+    attachments: EmailAttachment[];
+  }> {
+    const result: { text: string; html: string | null; attachments: EmailAttachment[] } = {
+      text: '',
+      html: null,
+      attachments: [],
+    };
 
     if (!content) return result;
 
-    // Check if it's raw email format
+    // Non-RFC822 payloads (plain pasted text, header-only fallbacks) skip the
+    // MIME parser and are treated as a bare body
     const isRawEmail =
       content.includes('From:') &&
       (content.includes('Content-Type:') || content.includes('MIME-Version:'));
 
-    if (isRawEmail) {
-      // Extract HTML content
-      const htmlMatch = content.match(/<html[\s\S]*?<\/html>/i);
-      if (htmlMatch) {
-        result.html = htmlMatch[0];
-      }
-
-      // Extract text content
-      const bodyStart = content.indexOf('\r\n\r\n');
-      if (bodyStart > 0) {
-        result.text = content.substring(bodyStart + 4);
-        if (containsHtml(result.text)) {
-          result.text = stripHtml(result.text);
-        }
-      }
-
-      // Handle MIME multipart
-      if (content.includes('Content-Type: multipart/')) {
-        const mimeText = this.extractTextFromMIME(content);
-        if (mimeText) {
-          result.text = mimeText;
-        }
-      }
-    } else {
+    if (!isRawEmail) {
       result.text = content;
       if (containsHtml(content)) {
         result.html = content;
       }
+      return result;
+    }
+
+    let parsed: ParsedMail;
+    try {
+      parsed = await simpleParser(content);
+    } catch (error) {
+      logger.warn('MIME parsing failed — treating content as plain text', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      result.text = content;
+      return result;
+    }
+
+    result.text = parsed.text ?? '';
+    result.html = typeof parsed.html === 'string' ? parsed.html : null;
+
+    for (const attachment of parsed.attachments.slice(0, MAX_ATTACHMENTS)) {
+      // Forward-as-attachment: parse the embedded original email
+      if (attachment.contentType === 'message/rfc822') {
+        const embedded = await this.parseEmbeddedMessage(attachment);
+        if (embedded) {
+          result.text = `${result.text.trim()}\n\n${embedded.forwardBlock}`.trim();
+          if (!result.html && embedded.html) {
+            result.html = embedded.html;
+          }
+          result.attachments.push(...embedded.attachments);
+          continue;
+        }
+      }
+      result.attachments.push(toAttachmentMeta(attachment));
+    }
+
+    if (parsed.attachments.length > MAX_ATTACHMENTS) {
+      logger.warn('Attachment metadata truncated', {
+        total: parsed.attachments.length,
+        kept: MAX_ATTACHMENTS,
+      });
     }
 
     // Generate text from HTML if needed
@@ -320,75 +403,53 @@ export class EmailParserService {
   }
 
   /**
-   * Extract text content from MIME formatted email
+   * Parse a message/rfc822 attachment — the original email forwarded as an
+   * attachment — into a synthesized forwarded block that downstream
+   * forwarded-header extraction already understands, plus its attachments.
    */
-  private extractTextFromMIME(mimeContent: string): string {
+  private async parseEmbeddedMessage(attachment: Attachment): Promise<{
+    forwardBlock: string;
+    html: string | null;
+    attachments: EmailAttachment[];
+  } | null> {
     try {
-      // Look for text/plain part
-      const textPartMatch = mimeContent.match(
-        /Content-Type: text\/plain[\s\S]*?(?=Content-Type:|--)/i
-      );
-      if (textPartMatch) {
-        const text = this.extractMIMEPartContent(textPartMatch[0]);
-        if (text) return text;
+      const inner = await simpleParser(attachment.content);
+
+      const headerLines: string[] = ['---------- Forwarded message ---------'];
+      if (inner.from?.text) headerLines.push(`From: ${inner.from.text}`);
+      if (inner.date) headerLines.push(`Date: ${inner.date.toUTCString()}`);
+      if (inner.subject) headerLines.push(`Subject: ${inner.subject}`);
+      const innerTo = Array.isArray(inner.to) ? inner.to[0] : inner.to;
+      if (innerTo?.text) headerLines.push(`To: ${innerTo.text}`);
+      const innerReplyTo = inner.replyTo;
+      if (innerReplyTo?.text) headerLines.push(`Reply-To: ${innerReplyTo.text}`);
+      const authResults = inner.headers.get('authentication-results');
+      if (authResults) {
+        headerLines.push(`Authentication-Results: ${String(authResults)}`);
       }
 
-      // Fall back to HTML part
-      const htmlPartMatch = mimeContent.match(
-        /Content-Type: text\/html[\s\S]*?(?=Content-Type:|--)/i
-      );
-      if (htmlPartMatch) {
-        const html = this.extractMIMEPartContent(htmlPartMatch[0]);
-        if (html) return stripHtml(html);
-      }
+      const innerText = inner.text ?? (typeof inner.html === 'string' ? stripHtml(inner.html) : '');
 
-      return '';
+      const innerAttachments = inner.attachments
+        .slice(0, MAX_ATTACHMENTS)
+        .map(a => toAttachmentMeta(a));
+
+      logger.info('Parsed message/rfc822 attachment (forward-as-attachment)', {
+        innerSubject: inner.subject?.substring(0, 50),
+        innerAttachments: innerAttachments.length,
+      });
+
+      return {
+        forwardBlock: `${headerLines.join('\n')}\n\n${innerText}`,
+        html: typeof inner.html === 'string' ? inner.html : null,
+        attachments: innerAttachments,
+      };
     } catch (error) {
-      logger.error('Error extracting text from MIME', {
+      logger.warn('Failed to parse message/rfc822 attachment', {
         error: error instanceof Error ? error.message : String(error),
       });
-      return '';
+      return null;
     }
-  }
-
-  /**
-   * Extract and decode content from a MIME part
-   */
-  private extractMIMEPartContent(partContent: string): string {
-    const bodyStartIdx = partContent.indexOf('\r\n\r\n');
-    if (bodyStartIdx === -1) return '';
-
-    const headers = partContent.substring(0, bodyStartIdx).toLowerCase();
-    let body = partContent.substring(bodyStartIdx + 4).trim();
-
-    // Check for base64 encoding
-    if (headers.includes('content-transfer-encoding: base64')) {
-      try {
-        // Remove line breaks and decode
-        const cleaned = body.replace(/[\r\n\s]/g, '');
-        body = Buffer.from(cleaned, 'base64').toString('utf-8');
-      } catch (e) {
-        logger.warn('Failed to decode base64 content', {
-          error: e instanceof Error ? e.message : String(e),
-        });
-      }
-    }
-
-    // Check for quoted-printable encoding
-    if (headers.includes('content-transfer-encoding: quoted-printable')) {
-      body = this.decodeQuotedPrintable(body);
-    }
-
-    return body;
-  }
-
-  /**
-   * Decode quoted-printable encoded content
-   */
-  private decodeQuotedPrintable(text: string): string {
-    return text
-      .replace(/=\r?\n/g, '') // Remove soft line breaks
-      .replace(/=([0-9A-Fa-f]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
   }
 
   /**

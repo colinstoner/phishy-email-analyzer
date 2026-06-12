@@ -40,10 +40,54 @@ Parameters:
     AllowedValues: ['true', 'false']
     Default: 'false'
     Description: Delete raw emails from S3 once processed.
+  IntelligenceDbSecretArn:
+    Type: String
+    Default: ''
+    Description: >
+      Optional. ARN of a Secrets Manager secret holding the Postgres connection
+      string for the threat-intelligence database (a raw connection string, or
+      JSON with connectionString/url, or username/password/host fields). Leave
+      empty to disable intelligence features. When set, VpcId and SubnetIds are
+      required so the Lambda can reach the database privately. Note: with
+      AIProvider=anthropic the VPC also needs NAT egress to reach
+      api.anthropic.com - interface endpoints only cover AWS services.
+  VpcId:
+    Type: String
+    Default: ''
+    Description: VPC the intelligence database lives in. Required when IntelligenceDbSecretArn is set.
+  SubnetIds:
+    Type: String
+    Default: ''
+    Description: Comma-separated subnet IDs (two or more AZs recommended) for the Lambda's VPC config. Required when IntelligenceDbSecretArn is set.
+  DatabaseSecurityGroupId:
+    Type: String
+    Default: ''
+    Description: Optional. Security group of the Postgres instance. When set, an ingress rule allowing port 5432 from the Lambda's security group is added to it.
+  CreateVpcEndpoints:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Default: 'true'
+    Description: >
+      Create interface endpoints (bedrock-runtime, SES API, Secrets Manager)
+      so the VPC-attached Lambda can reach AWS services without a NAT gateway
+      (about USD 22/month). Set to false if the VPC already has these
+      endpoints (only one private-DNS endpoint per service is allowed per
+      VPC) or a NAT gateway. The VPC must also have an S3 gateway endpoint or
+      NAT route - the Lambda fetches raw emails from S3.
 
 Conditions:
   UseAnthropic: !Equals [!Ref AIProvider, anthropic]
   UseBedrock: !Equals [!Ref AIProvider, bedrock]
+  UseIntelligence: !Not [!Equals [!Ref IntelligenceDbSecretArn, '']]
+  CreateEndpoints: !And
+    - !Condition UseIntelligence
+    - !Equals [!Ref CreateVpcEndpoints, 'true']
+  CreateBedrockEndpoint: !And
+    - !Condition CreateEndpoints
+    - !Condition UseBedrock
+  HasDatabaseSg: !And
+    - !Condition UseIntelligence
+    - !Not [!Equals [!Ref DatabaseSecurityGroupId, '']]
 
 Resources:
   EmailBucket:
@@ -111,6 +155,14 @@ Resources:
           SAFE_DOMAINS: !Ref SafeDomains
           PHISHY_AWS_REGION: !Ref AWS::Region
           DELETE_EMAILS_AFTER_PROCESSING: !Ref DeleteEmailsAfterProcessing
+          PHISHY_INTELLIGENCE_ENABLED: !If [UseIntelligence, 'true', !Ref AWS::NoValue]
+          PHISHY_DB_CONNECTION: !If [UseIntelligence, !Ref IntelligenceDbSecretArn, !Ref AWS::NoValue]
+      VpcConfig: !If
+        - UseIntelligence
+        - SecurityGroupIds:
+            - !Ref LambdaSecurityGroup
+          SubnetIds: !Split [',', !Ref SubnetIds]
+        - !Ref AWS::NoValue
       Policies:
         - Statement:
             - Sid: SendReports
@@ -136,6 +188,92 @@ Resources:
                   - !Sub 'arn:aws:bedrock:*::foundation-model/anthropic.claude-*'
                   - !Sub 'arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*'
           - !Ref AWS::NoValue
+        - !If
+          - UseIntelligence
+          - AWSLambdaVPCAccessExecutionRole
+          - !Ref AWS::NoValue
+        - !If
+          - UseIntelligence
+          - Statement:
+              - Sid: ReadDbCredentials
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref IntelligenceDbSecretArn
+          - !Ref AWS::NoValue
+
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: UseIntelligence
+    Properties:
+      GroupDescription: Phishy Lambda egress
+      VpcId: !Ref VpcId
+
+  # Lets the Lambda reach the intelligence database without opening the
+  # database to anything else.
+  DatabaseIngressFromLambda:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasDatabaseSg
+    Properties:
+      GroupId: !Ref DatabaseSecurityGroupId
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !GetAtt LambdaSecurityGroup.GroupId
+      Description: Phishy Lambda to Postgres
+
+  EndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: CreateEndpoints
+    Properties:
+      GroupDescription: HTTPS from Phishy Lambda to VPC interface endpoints
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !GetAtt LambdaSecurityGroup.GroupId
+
+  # A VPC-attached Lambda has no internet access, so every AWS service the
+  # code calls needs a private path: these interface endpoints for Bedrock,
+  # the SES API, and Secrets Manager, plus an S3 gateway endpoint (or NAT)
+  # the VPC must already provide. CloudWatch metrics need nothing - they are
+  # emitted as EMF log lines through the Lambda log pipeline.
+  BedrockRuntimeEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateBedrockEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.bedrock-runtime'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: !Split [',', !Ref SubnetIds]
+      SecurityGroupIds:
+        - !Ref EndpointSecurityGroup
+
+  SesApiEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.email'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: !Split [',', !Ref SubnetIds]
+      SecurityGroupIds:
+        - !Ref EndpointSecurityGroup
+
+  SecretsManagerEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.secretsmanager'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: !Split [',', !Ref SubnetIds]
+      SecurityGroupIds:
+        - !Ref EndpointSecurityGroup
 
   SESInvokePermission:
     Type: AWS::Lambda::Permission

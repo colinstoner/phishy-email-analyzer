@@ -40,6 +40,7 @@
     "@aws-sdk/client-secrets-manager": "^3.990.0",
     "@aws-sdk/client-ses": "^3.787.0",
     "axios": "^1.7.0",
+    "mailparser": "^3.9.9",
     "pg": "^8.13.0",
     "zod": "^4.3.6"
   },
@@ -48,6 +49,7 @@
     "@smithy/util-stream": "^4.5.12",
     "@types/aws-lambda": "^8.10.145",
     "@types/jest": "^30.0.0",
+    "@types/mailparser": "^3.4.6",
     "@types/node": "^22.10.0",
     "@types/pg": "^8.11.10",
     "@typescript-eslint/eslint-plugin": "^8.18.0",
