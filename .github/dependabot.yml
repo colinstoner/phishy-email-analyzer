@@ -3,15 +3,28 @@ updates:
   - package-ecosystem: npm
     directory: '/'
     schedule:
-      interval: weekly
+      interval: monthly
     groups:
+      # AWS SDK packages move together — bundle them into one PR.
       aws-sdk:
         patterns:
           - '@aws-sdk/*'
+      # All dev tooling (eslint/jest/ts/prettier/...) in one PR.
       dev-dependencies:
         dependency-type: development
+      # Everything else that ships at runtime in one PR, so routine
+      # minor/patch bumps don't each open a separate review.
+      production-dependencies:
+        dependency-type: production
+        exclude-patterns:
+          - '@aws-sdk/*'
     open-pull-requests-limit: 5
   - package-ecosystem: github-actions
     directory: '/'
     schedule:
-      interval: weekly
+      interval: monthly
+    groups:
+      # Collapse all GitHub Action version bumps into a single PR.
+      github-actions:
+        patterns:
+          - '*'
