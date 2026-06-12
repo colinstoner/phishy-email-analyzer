@@ -22,23 +22,28 @@ const logger = createLogger('bedrock-provider');
  * Supported Bedrock Claude models
  *
  * Primary recommendations:
- * - CLAUDE_SONNET_4_5: Best balance of quality and speed for phishing analysis (recommended)
+ * - CLAUDE_OPUS_4_8: Most capable model — best detection quality (default)
+ * - CLAUDE_SONNET_4_6: Best balance of quality, speed, and cost
  * - CLAUDE_HAIKU_4_5: Fastest option for high-volume or quick-scan scenarios
+ *
+ * ID formats: Opus 4.8/4.7 have no ARN-versioned IDs — they use the bare
+ * `anthropic.` form via the same InvokeModel call. Opus 4.6 / Sonnet 4.6 use
+ * `global.` (dynamic routing) by default; swap to a regional prefix (`us.`,
+ * `eu.`, ...) for data-residency requirements, at a 10% pricing premium.
  */
 export const BEDROCK_CLAUDE_MODELS = {
-  // Claude 4.5 models (recommended)
-  CLAUDE_SONNET_4_5: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
+  // Current models (recommended)
+  CLAUDE_OPUS_4_8: 'anthropic.claude-opus-4-8',
+  CLAUDE_OPUS_4_6: 'global.anthropic.claude-opus-4-6-v1',
+  CLAUDE_SONNET_4_6: 'global.anthropic.claude-sonnet-4-6',
   CLAUDE_HAIKU_4_5: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
-  // Claude 4 models
+  // Previous generation (still active)
+  CLAUDE_SONNET_4_5: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
+  // Deprecated on Bedrock (avoid for new deployments)
   CLAUDE_SONNET_4: 'us.anthropic.claude-sonnet-4-20250514-v1:0',
-  CLAUDE_OPUS_4: 'us.anthropic.claude-opus-4-20250514-v1:0',
-  // Legacy models (for backwards compatibility)
-  CLAUDE_3_5_SONNET: 'anthropic.claude-3-5-sonnet-20241022-v2:0',
-  CLAUDE_3_SONNET: 'anthropic.claude-3-sonnet-20240229-v1:0',
-  CLAUDE_3_HAIKU: 'anthropic.claude-3-haiku-20240307-v1:0',
 } as const;
 
-const DEFAULT_MODEL = BEDROCK_CLAUDE_MODELS.CLAUDE_SONNET_4_5;
+const DEFAULT_MODEL = BEDROCK_CLAUDE_MODELS.CLAUDE_OPUS_4_8;
 const DEFAULT_MAX_TOKENS = 4096;
 const DEFAULT_TIMEOUT_MS = 60000;
 
@@ -139,8 +144,9 @@ export class BedrockProvider implements AIProvider {
       maxTokens,
     });
 
-    // Log full prompt for debugging refusals
-    logger.info('Full prompt being sent', {
+    // Full prompt contains the reported email's content — debug level only,
+    // so it never lands in CloudWatch logs at default log levels.
+    logger.debug('Full prompt being sent', {
       prompt: prompt,
     });
 

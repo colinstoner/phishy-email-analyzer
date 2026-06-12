@@ -10,14 +10,14 @@ import { z } from 'zod';
  */
 const AnthropicConfigSchema = z.object({
   apiKey: z.string().min(1, 'Anthropic API key is required'),
-  model: z.string().default('claude-sonnet-4-5-20250514'),
+  model: z.string().default('claude-opus-4-8'),
   maxTokens: z.number().positive().default(4096),
   timeout: z.number().positive().default(60000),
 });
 
 const BedrockConfigSchema = z.object({
   region: z.string().default('us-east-1'),
-  modelId: z.string().default('us.anthropic.claude-sonnet-4-5-20250929-v1:0'),
+  modelId: z.string().default('anthropic.claude-opus-4-8'),
   maxTokens: z.number().positive().default(4096),
   timeout: z.number().positive().default(60000),
 });

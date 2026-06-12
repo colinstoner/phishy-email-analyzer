@@ -6,6 +6,7 @@
 // Set test environment variables
 process.env.NODE_ENV = 'test';
 process.env.LOG_LEVEL = 'error'; // Reduce log noise during tests
+process.env.PHISHY_DISABLE_METRICS = 'true'; // No EMF lines on stdout during tests
 
 // Mock environment variables commonly needed
 process.env.PHISHY_AWS_REGION = 'us-east-1';

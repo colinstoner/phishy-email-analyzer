@@ -16,6 +16,8 @@ import { EnterpriseProfile, validateProfile } from '../models/profile.model';
 import { LambdaResponse, ProcessingResult, EmailMessage, ExtractedEmailData } from '../types';
 import { createLogger } from '../utils/logger';
 import { extractEmailAddress, domainMatches } from '../utils/validation';
+import { estimateCostUsd } from '../utils/pricing';
+import { emitAIUsageMetric } from '../utils/metrics';
 import { IntelligenceDatabaseService, CampaignAlertService } from '../services/intelligence';
 import { extractIOCs, IOCSourceContext } from '../services/intelligence/ioc.extractor';
 
@@ -330,6 +332,28 @@ async function processEmailEvent(
   // Analyze with AI
   const analysis = await services.analysisService.analyzeEmail(emailData);
 
+  // Emit CloudWatch usage/cost metrics for every analysis, regardless of
+  // whether the intelligence database is enabled
+  const estimatedCostUsd = analysis.tokenUsage
+    ? estimateCostUsd(
+        analysis.model ?? 'unknown',
+        analysis.tokenUsage.inputTokens,
+        analysis.tokenUsage.outputTokens
+      )
+    : 0;
+  if (analysis.tokenUsage) {
+    emitAIUsageMetric({
+      provider: analysis.provider ?? 'unknown',
+      model: analysis.model ?? 'unknown',
+      inputTokens: analysis.tokenUsage.inputTokens,
+      outputTokens: analysis.tokenUsage.outputTokens,
+      totalTokens: analysis.tokenUsage.totalTokens,
+      estimatedCostUsd,
+      processingTimeMs: analysis.processingTimeMs ?? 0,
+      isPhishing: analysis.isPhishing,
+    });
+  }
+
   // Store analysis in intelligence database (only for enterprise users, not safelist)
   if (services.intelligenceDb && !isSafelistUser) {
     try {
@@ -356,11 +380,6 @@ async function processEmailEvent(
       // Store AI usage for cost tracking
       if (analysis.tokenUsage) {
         try {
-          // Calculate estimated cost (Claude Sonnet 4.5 pricing: $3/1M input, $15/1M output)
-          const inputCost = (analysis.tokenUsage.inputTokens / 1_000_000) * 3;
-          const outputCost = (analysis.tokenUsage.outputTokens / 1_000_000) * 15;
-          const estimatedCostUsd = inputCost + outputCost;
-
           await services.intelligenceDb.storeAIUsage({
             analysisId,
             provider: analysis.provider ?? 'bedrock',

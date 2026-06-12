@@ -24,23 +24,24 @@ const ANTHROPIC_API_ENDPOINT = 'https://api.anthropic.com/v1/messages';
  * Supported Anthropic Claude models
  *
  * Primary recommendations:
- * - claude-sonnet-4-5-20250514: Best balance of quality and speed (recommended)
- * - claude-haiku-4-5-20250514: Fastest option for high-volume scenarios
+ * - CLAUDE_OPUS_4_8: Most capable model — best detection quality (default)
+ * - CLAUDE_SONNET_4_6: Best balance of quality, speed, and cost
+ * - CLAUDE_HAIKU_4_5: Fastest option for high-volume scenarios
+ *
+ * Note: Claude 3.x models are retired and return 404 from the API; the
+ * previous 4.5 entries here carried invalid date suffixes and never worked.
  */
 export const ANTHROPIC_CLAUDE_MODELS = {
-  // Claude 4.5 models (recommended)
-  CLAUDE_SONNET_4_5: 'claude-sonnet-4-5-20250514',
-  CLAUDE_HAIKU_4_5: 'claude-haiku-4-5-20250514',
-  // Claude 4 models
-  CLAUDE_OPUS_4: 'claude-opus-4-20250514',
-  CLAUDE_SONNET_4: 'claude-sonnet-4-20250514',
-  // Legacy models (for backwards compatibility)
-  CLAUDE_3_5_SONNET: 'claude-3-5-sonnet-20241022',
-  CLAUDE_3_SONNET: 'claude-3-sonnet-20240229',
-  CLAUDE_3_HAIKU: 'claude-3-haiku-20240307',
+  // Current models (recommended)
+  CLAUDE_OPUS_4_8: 'claude-opus-4-8',
+  CLAUDE_SONNET_4_6: 'claude-sonnet-4-6',
+  CLAUDE_HAIKU_4_5: 'claude-haiku-4-5',
+  // Previous generation (still active)
+  CLAUDE_OPUS_4_5: 'claude-opus-4-5',
+  CLAUDE_SONNET_4_5: 'claude-sonnet-4-5',
 } as const;
 
-const DEFAULT_MODEL = ANTHROPIC_CLAUDE_MODELS.CLAUDE_SONNET_4_5;
+const DEFAULT_MODEL = ANTHROPIC_CLAUDE_MODELS.CLAUDE_OPUS_4_8;
 const DEFAULT_MAX_TOKENS = 4096;
 const DEFAULT_TIMEOUT_MS = 60000;
 
@@ -91,10 +92,15 @@ export class AnthropicProvider implements AIProvider {
     const essentialHeaders = this.essentialHeadersExtractor(emailData.headers);
     const prompt = buildPhishingAnalysisPrompt(emailData, essentialHeaders, this.profile);
 
-    const responseText = await this.sendPrompt(prompt, options);
+    const { text: responseText, usage } = await this.sendPromptWithUsage(prompt, options);
     const processingTimeMs = Date.now() - startTime;
 
     const result = parseAnalysisResponse(responseText, this.name, this.model, processingTimeMs);
+
+    // Add token usage to result for cost tracking
+    if (usage) {
+      result.tokenUsage = usage;
+    }
 
     logger.info('Email analysis completed', {
       isPhishing: result.isPhishing,
@@ -109,6 +115,20 @@ export class AnthropicProvider implements AIProvider {
    * Send a raw prompt to Anthropic API
    */
   async sendPrompt(prompt: string, options?: AnalysisOptions): Promise<string> {
+    const result = await this.sendPromptWithUsage(prompt, options);
+    return result.text;
+  }
+
+  /**
+   * Send a raw prompt to Anthropic API and return both text and usage data
+   */
+  private async sendPromptWithUsage(
+    prompt: string,
+    options?: AnalysisOptions
+  ): Promise<{
+    text: string;
+    usage?: { inputTokens: number; outputTokens: number; totalTokens: number };
+  }> {
     const maxTokens = options?.maxTokens ?? this.maxTokens;
     const timeout = options?.timeout ?? this.timeout;
 
@@ -143,11 +163,25 @@ export class AnthropicProvider implements AIProvider {
             throw new Error('Unexpected response format from Anthropic API');
           }
 
+          let usage: { inputTokens: number; outputTokens: number; totalTokens: number } | undefined;
+          const apiUsage = response.data?.usage;
+          if (
+            typeof apiUsage?.input_tokens === 'number' &&
+            typeof apiUsage?.output_tokens === 'number'
+          ) {
+            usage = {
+              inputTokens: apiUsage.input_tokens,
+              outputTokens: apiUsage.output_tokens,
+              totalTokens: apiUsage.input_tokens + apiUsage.output_tokens,
+            };
+            logger.info('Anthropic token usage', { ...usage, model: this.model });
+          }
+
           logger.debug('Received response from Anthropic API', {
             responseLength: content.length,
           });
 
-          return content as string;
+          return { text: content as string, usage };
         } catch (error) {
           if (axios.isAxiosError(error)) {
             const axiosError = error as AxiosError;

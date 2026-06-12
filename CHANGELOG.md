@@ -21,12 +21,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - AWS SAM template (`template.yaml`) for one-command deployment of the Lambda, S3 bucket, SES receipt rules, and IAM permissions
 - Versioned database migrations (`migrations/`) and schema documentation (`docs/DATABASE.md`)
 - Unit test suites for the email parser and analysis service
+- CloudWatch cost/usage metrics via Embedded Metric Format: every analysis emits tokens, estimated USD cost, latency, and verdict to the `Phishy` namespace, with no database or extra IAM required (`PHISHY_DISABLE_METRICS` to opt out)
+- Per-model pricing table for cost estimation, replacing hardcoded Sonnet rates; includes the 10% Bedrock regional-endpoint premium
+- Token usage capture for the Anthropic API provider (previously Bedrock-only)
 
 ### Changed
+- **Default model upgraded to Claude Opus 4.8** on both providers (`claude-opus-4-8` / `anthropic.claude-opus-4-8`); model catalogs refreshed with Opus 4.6, Sonnet 4.6, and current Bedrock `global.`/regional ID formats
+- Full-prompt logging in the Bedrock provider moved from info to debug level — reported email content no longer lands in CloudWatch logs at default log levels
 - **License changed from GPL-3.0 to Apache-2.0**
 - Bedrock model defaults and configuration updated for inference profiles and VPC endpoints
 
 ### Fixed
+- Anthropic provider model catalog contained invalid IDs (wrong date suffixes) that returned 404 from the API; catalog rebuilt with current model aliases
+- Cost estimation previously used hardcoded Sonnet 4.5 rates regardless of which model ran
 - Security fixes from audit: XSS in reports, ReDoS in extraction regexes, SSRF in webhook URLs, error detail disclosure, prompt injection hardening
 - Documentation listed environment variables the code never read: `BEDROCK_REGION` → `PHISHY_BEDROCK_REGION`, `BEDROCK_MODEL_ID` → `PHISHY_BEDROCK_MODEL`, `DELETE_AFTER_PROCESSING` → `DELETE_EMAILS_AFTER_PROCESSING`
 - Base64 MIME decoding for forwarded content

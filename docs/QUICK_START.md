@@ -129,7 +129,10 @@ If you're already on AWS, Bedrock is simpler - no external API key required.
    {
      "Effect": "Allow",
      "Action": ["bedrock:InvokeModel"],
-     "Resource": ["arn:aws:bedrock:*::foundation-model/anthropic.claude-*"]
+     "Resource": [
+       "arn:aws:bedrock:*::foundation-model/anthropic.claude-*",
+       "arn:aws:bedrock:*:YOUR-ACCOUNT-ID:inference-profile/*"
+     ]
    }
    ```
 

@@ -39,9 +39,9 @@ When the same setting is defined in multiple places, Phishy uses this priority (
 |----------|---------|-------------|
 | `PHISHY_AI_PROVIDER` | `anthropic` | AI provider: `anthropic` or `bedrock` |
 | `ANTHROPIC_API_KEY` | - | Anthropic API key (required for anthropic provider) |
-| `CLAUDE_MODEL` | `claude-sonnet-4-5-20250514` | Model for Anthropic provider |
+| `CLAUDE_MODEL` | `claude-opus-4-8` | Model for Anthropic provider |
 | `PHISHY_BEDROCK_REGION` | `us-east-1` | AWS region for Bedrock |
-| `PHISHY_BEDROCK_MODEL` | `us.anthropic.claude-sonnet-4-5-20250514-v1:0` | Bedrock model ID |
+| `PHISHY_BEDROCK_MODEL` | `anthropic.claude-opus-4-8` | Bedrock model ID |
 
 > Max tokens and request timeout are file-config only (`ai.anthropic.maxTokens` / `ai.bedrock.timeout`, etc.) — see the example configuration below.
 
@@ -103,6 +103,26 @@ The Lambda execution role needs `secretsmanager:GetSecretValue` permission for t
 |----------|---------|-------------|
 | `LOG_LEVEL` | `info` | Log level: debug, info, warn, error |
 
+### Cost Tracking (CloudWatch Metrics)
+
+Every analysis emits token usage and estimated cost to CloudWatch via [Embedded Metric Format](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch_Embedded_Metric_Format_Specification.html) — structured log lines that CloudWatch converts to metrics automatically. No SDK calls, no extra IAM permissions, and it works whether or not the intelligence database is enabled.
+
+Metrics appear in the **`Phishy`** namespace, dimensioned by `Provider` and `Model`:
+
+| Metric | Meaning |
+|--------|---------|
+| `AnalysisCount` | Analyses performed |
+| `InputTokens` / `OutputTokens` / `TotalTokens` | Token consumption |
+| `EstimatedCostUSD` | Estimated spend per analysis (per-model pricing, including the 10% Bedrock regional-endpoint premium) |
+| `ProcessingTimeMs` | End-to-end analysis latency |
+| `PhishingDetected` | 1 if the verdict was phishing, 0 otherwise |
+
+Useful starting points: a dashboard widget on `SUM(EstimatedCostUSD)` per day, and a billing alarm such as "alert when `SUM(EstimatedCostUSD)` over 24h exceeds $X". Set `PHISHY_DISABLE_METRICS=true` to turn emission off.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PHISHY_DISABLE_METRICS` | `false` | Set `true` to disable CloudWatch EMF metrics |
+
 ---
 
 ## File-Based Configuration
@@ -122,7 +142,7 @@ For more complex setups, use a JSON configuration file.
     "provider": "bedrock",
     "bedrock": {
       "region": "us-east-1",
-      "modelId": "us.anthropic.claude-sonnet-4-5-20250514-v1:0",
+      "modelId": "anthropic.claude-opus-4-8",
       "maxTokens": 4096,
       "timeout": 60000
     },
