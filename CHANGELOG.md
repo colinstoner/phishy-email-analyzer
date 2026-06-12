@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Example report screenshots in the README (one per tone), rendered from the live report template via `scripts/render-report-samples.js` — invented data only
+- Example report screenshots in the README (four scenarios across the three tones), rendered from the live report template via `scripts/render-report-samples.js` — invented data only
 
 ## [3.0.0] - 2026-06-12
 
