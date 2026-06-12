@@ -56,15 +56,87 @@ export interface ReportOptions {
   };
 }
 
-/** Human-facing label and color for each verdict category */
-const VERDICT_DISPLAY: Record<string, { label: string; cssClass: string }> = {
-  bec: { label: 'BUSINESS EMAIL COMPROMISE', cssClass: 'verdict-phishing' },
-  phishing: { label: 'PHISHING', cssClass: 'verdict-phishing' },
-  malware_delivery: { label: 'MALWARE DELIVERY', cssClass: 'verdict-phishing' },
-  suspicious: { label: 'SUSPICIOUS', cssClass: 'verdict-suspicious' },
-  spam: { label: 'SPAM', cssClass: 'verdict-suspicious' },
-  graymail: { label: 'GRAYMAIL (LEGITIMATE BULK)', cssClass: 'verdict-legitimate' },
-  legitimate: { label: 'LIKELY LEGITIMATE', cssClass: 'verdict-legitimate' },
+/**
+ * Per-verdict presentation for the employee report: a label, a color tone, a
+ * plain-language gloss (most employees don't know what "BEC" means), and the
+ * one-line "what to do" framing. tone drives the banner color and whether the
+ * email reads as urgent, cautious, or reassuring.
+ */
+type VerdictTone = 'danger' | 'caution' | 'safe';
+const VERDICT_DISPLAY: Record<
+  string,
+  { label: string; tone: VerdictTone; plain: string; action: string }
+> = {
+  bec: {
+    label: 'BUSINESS EMAIL COMPROMISE',
+    tone: 'danger',
+    plain: 'Someone is impersonating a colleague, executive, or vendor to trick you into sending money, data, or credentials.',
+    action: 'Do not reply or act on the request. Verify it with the real person through a known phone number or in person.',
+  },
+  phishing: {
+    label: 'PHISHING',
+    tone: 'danger',
+    plain: 'This email is trying to steal your password or personal information, usually through a fake login page.',
+    action: 'Do not click any links or enter any information. Delete it.',
+  },
+  malware_delivery: {
+    label: 'MALWARE DELIVERY',
+    tone: 'danger',
+    plain: 'This email is trying to get you to open a file or link that would infect your device.',
+    action: 'Do not open the attachment or click any links. Delete it.',
+  },
+  suspicious: {
+    label: 'SUSPICIOUS',
+    tone: 'caution',
+    plain: "We couldn't confirm this is an attack, but something about it is off.",
+    action: "Treat it with caution. Don't act on it until you've verified the sender another way.",
+  },
+  spam: {
+    label: 'SPAM',
+    tone: 'caution',
+    plain: 'This looks like unwanted bulk email rather than a targeted attack.',
+    action: 'No real harm expected — you can safely delete it.',
+  },
+  graymail: {
+    label: 'LEGITIMATE BULK EMAIL',
+    tone: 'safe',
+    plain: 'This is real, legitimate mail (a newsletter, survey, or marketing message) — just the kind you may not want.',
+    action: "It's safe. If you'd rather not receive these, use the unsubscribe link.",
+  },
+  legitimate: {
+    label: 'LIKELY LEGITIMATE',
+    tone: 'safe',
+    plain: 'This appears to be a genuine, expected email with no signs of an attack.',
+    action: 'It looks safe to proceed as normal.',
+  },
+};
+
+const TONE_CLASS: Record<VerdictTone, string> = {
+  danger: 'verdict-phishing',
+  caution: 'verdict-suspicious',
+  safe: 'verdict-legitimate',
+};
+
+/**
+ * "How to spot this next time" tips, keyed by the threat vector the model
+ * identified. Turns each report into a small, specific lesson.
+ */
+const THREAT_VECTOR_TIPS: Record<string, string> = {
+  credential_harvest:
+    'Legitimate services never ask you to confirm your password through an email link. Go to the site directly instead of clicking.',
+  wire_fraud:
+    'Always verify payment or banking changes by phone using a number you already trust — never the contact details in the email.',
+  gift_card_fraud:
+    'No real executive will ask you to buy gift cards. Treat any gift-card request as fraud.',
+  malware:
+    "Don't open unexpected attachments. If a file seems important, confirm with the sender through another channel first.",
+  reconnaissance:
+    "Attackers often open with a harmless-looking note (\"Are you available?\") to start a conversation before the real ask. Be wary of unexpected messages like that.",
+  data_exfiltration:
+    'Be cautious about sharing internal data or documents in response to unsolicited requests.',
+  extortion:
+    "Threatening emails demanding payment are almost always bluffs. Don't pay — report it.",
+  other: 'When an email pressures you to act quickly or secretly, slow down and verify before doing anything.',
 };
 
 /**
@@ -144,12 +216,46 @@ export function buildEmailHtml(
                 color: #fd7e14;
                 font-weight: bold;
             }
+            .thanks {
+                color: #555;
+                font-style: italic;
+                margin-bottom: 16px;
+            }
+            .verdict-banner {
+                border-radius: 6px;
+                padding: 14px 16px;
+                margin: 12px 0;
+            }
+            .verdict-line {
+                margin: 0;
+                font-size: 18px;
+            }
+            .risk-score {
+                margin: 6px 0 0 0;
+                font-size: 15px;
+            }
+            .verdict-phishing-bg {
+                background-color: #fdecea;
+                border-left: 4px solid #dc3545;
+            }
+            .verdict-suspicious-bg {
+                background-color: #fff4e5;
+                border-left: 4px solid #fd7e14;
+            }
+            .verdict-legitimate-bg {
+                background-color: #e9f7ef;
+                border-left: 4px solid #28a745;
+            }
             .metadata {
                 padding: 15px 20px;
                 background-color: #f8f9fa;
                 border-top: 1px solid #eee;
                 font-size: 13px;
                 color: #6c757d;
+            }
+            .ref-line {
+                font-size: 11px;
+                color: #adb5bd;
             }
             .metadata p {
                 margin: 5px 0;
@@ -258,9 +364,7 @@ export function buildEmailHtml(
             <div class="metadata">
                 <p><strong>Analyzed Email Subject:</strong> ${escapeHtml(originalSubject)}</p>
                 <p><strong>From:</strong> ${escapeHtml(emailData.from_email)}</p>
-                ${analysis.provider ? `<p><strong>AI Provider:</strong> ${escapeHtml(analysis.provider)} (${escapeHtml(analysis.model ?? 'unknown')})</p>` : ''}
-                ${analysis.processingTimeMs ? `<p><strong>Processing Time:</strong> ${analysis.processingTimeMs}ms</p>` : ''}
-                ${options?.analysisId ? `<p><strong>Analysis ID:</strong> ${escapeHtml(options.analysisId)}</p>` : ''}
+                ${options?.analysisId ? `<p class="ref-line">Reference: ${escapeHtml(options.analysisId)}</p>` : ''}
             </div>
             ${buildOriginalEmailSection(emailData)}
             <div class="footer">
@@ -278,45 +382,62 @@ export function buildEmailHtml(
 function buildAnalysisSection(analysis: AnalysisResult, options?: ReportOptions): string {
   let html = '';
 
+  const display = options?.risk ? VERDICT_DISPLAY[options.risk.verdict] : undefined;
+  const tone: VerdictTone = display?.tone ?? (analysis.isPhishing ? 'danger' : 'safe');
+
+  // Thank the reporter every time — reinforcing the habit is the point, and it
+  // keeps people forwarding even when the email turns out to be harmless.
+  const thanks =
+    tone === 'safe'
+      ? 'Thanks for checking — flagging anything that looks off is exactly the right habit.'
+      : 'Good catch, and thanks for reporting. Sending this to Phishy helped protect you and your colleagues.';
+  html += `<p class="thanks">${thanks}</p>`;
+
+  // Verdict banner: label + plain-language gloss + the prominent score/level
+  // employees engage with.
+  if (options?.risk) {
+    const label = display?.label ?? options.risk.verdict.toUpperCase();
+    html += `<div class="verdict-banner ${TONE_CLASS[tone]}-bg">`;
+    html += `<p class="verdict-line"><span class="${TONE_CLASS[tone]}">${escapeHtml(label)}</span></p>`;
+    html += `<p class="risk-score">Risk score: <strong>${options.risk.riskScore}/100</strong> (${escapeHtml(options.risk.riskLevel)})</p>`;
+    html += `</div>`;
+    if (display?.plain) {
+      html += `<p><strong>What this means:</strong> ${escapeHtml(display.plain)}</p>`;
+    }
+  } else {
+    const verdictText = analysis.isPhishing ? 'POTENTIALLY MALICIOUS' : 'LIKELY LEGITIMATE';
+    html += `<div class="verdict-banner ${TONE_CLASS[tone]}-bg">`;
+    html += `<p class="verdict-line"><span class="${TONE_CLASS[tone]}">${verdictText}</span></p>`;
+    html += `<p class="risk-score">Confidence: <strong>${normalizeConfidence(analysis.confidence)}</strong></p>`;
+    html += `</div>`;
+  }
+
+  // What to do — the single most important line, framed by verdict.
+  if (display?.action) {
+    html += `<p><strong>What to do:</strong> ${escapeHtml(display.action)}</p>`;
+  }
+
   // Summary
   if (analysis.summary) {
     html += `<p><strong>Summary:</strong> ${escapeHtml(analysis.summary)}</p>`;
   }
 
-  // Verdict + risk. Prefer the fused decision; fall back to the binary verdict.
-  if (options?.risk) {
-    const display = VERDICT_DISPLAY[options.risk.verdict] ?? {
-      label: options.risk.verdict.toUpperCase(),
-      cssClass: analysis.isPhishing ? 'verdict-phishing' : 'verdict-legitimate',
-    };
-    html += `<p><strong>Verdict:</strong> <span class="${display.cssClass}">${escapeHtml(display.label)}</span></p>`;
-    html += `<p><strong>Risk:</strong> ${options.risk.riskScore}/100 (${escapeHtml(options.risk.riskLevel)})</p>`;
-    if (options.risk.reasons.length) {
-      html += `<p><strong>Why:</strong></p><ul>`;
-      for (const reason of options.risk.reasons) {
-        html += `<li>${escapeHtml(reason)}</li>`;
-      }
-      html += `</ul>`;
-    }
-  } else {
-    const isPhishing = analysis.isPhishing;
-    const verdictClass = isPhishing ? 'verdict-phishing' : 'verdict-legitimate';
-    const verdictText = isPhishing ? 'POTENTIALLY MALICIOUS' : 'LIKELY LEGITIMATE';
-    html += `<p><strong>Verdict:</strong> <span class="${verdictClass}">${verdictText}</span></p>`;
-    html += `<p><strong>Confidence:</strong> ${normalizeConfidence(analysis.confidence)}</p>`;
+  // Why Phishy reached this verdict — the model's indicators plus the
+  // intelligence reasons behind the score.
+  const whyItems = [...(analysis.indicators ?? [])];
+  if (options?.risk?.reasons.length) {
+    whyItems.push(...options.risk.reasons);
   }
-
-  // Indicators
-  if (analysis.indicators?.length) {
-    html += `<h3>Suspicious Indicators</h3>`;
+  if (whyItems.length) {
+    html += `<h3>Why we flagged it</h3>`;
     html += '<ul>';
-    for (const indicator of analysis.indicators) {
-      html += `<li>${escapeHtml(indicator)}</li>`;
+    for (const item of whyItems) {
+      html += `<li>${escapeHtml(item)}</li>`;
     }
     html += '</ul>';
   }
 
-  // Recommendations
+  // Recommendations from the analysis
   if (analysis.recommendations?.length) {
     html += `<h3>Recommendations</h3>`;
     html += '<ul>';
@@ -326,7 +447,32 @@ function buildAnalysisSection(analysis: AnalysisResult, options?: ReportOptions)
     html += '</ul>';
   }
 
+  // Teaching moment: how to spot this kind of email next time, driven by the
+  // threat vectors the model identified.
+  const tips = buildTeachingTips(analysis);
+  if (tips.length) {
+    html += `<h3>How to spot this next time</h3>`;
+    html += '<ul>';
+    for (const tip of tips) {
+      html += `<li>${escapeHtml(tip)}</li>`;
+    }
+    html += '</ul>';
+  }
+
   return html;
+}
+
+/** Pick the "how to spot it" tips for the threat vectors in this assessment */
+function buildTeachingTips(analysis: AnalysisResult): string[] {
+  const vectors = analysis.assessment?.threatVectors ?? [];
+  const tips: string[] = [];
+  for (const vector of vectors) {
+    const tip = THREAT_VECTOR_TIPS[vector];
+    if (tip && !tips.includes(tip)) {
+      tips.push(tip);
+    }
+  }
+  return tips;
 }
 
 /**
@@ -344,35 +490,49 @@ export function buildPlainTextReport(
   lines.push(divider);
   lines.push('');
 
-  // Summary
-  if (analysis.summary) {
-    lines.push(`Summary: ${analysis.summary}`);
-    lines.push('');
-  }
+  const display = options?.risk ? VERDICT_DISPLAY[options.risk.verdict] : undefined;
+  const tone: VerdictTone = display?.tone ?? (analysis.isPhishing ? 'danger' : 'safe');
+
+  // Thank the reporter
+  lines.push(
+    tone === 'safe'
+      ? 'Thanks for checking — flagging anything that looks off is exactly the right habit.'
+      : 'Good catch, and thanks for reporting. Sending this to Phishy helped protect you and your colleagues.'
+  );
+  lines.push('');
 
   // Verdict + risk
   if (options?.risk) {
-    const label = VERDICT_DISPLAY[options.risk.verdict]?.label ?? options.risk.verdict.toUpperCase();
-    lines.push(`Verdict: ${label}`);
-    lines.push(`Risk: ${options.risk.riskScore}/100 (${options.risk.riskLevel})`);
-    if (options.risk.reasons.length) {
-      lines.push('Why:');
-      for (const reason of options.risk.reasons) {
-        lines.push(`  - ${reason}`);
-      }
+    lines.push(`Verdict: ${display?.label ?? options.risk.verdict.toUpperCase()}`);
+    lines.push(`Risk score: ${options.risk.riskScore}/100 (${options.risk.riskLevel})`);
+    if (display?.plain) {
+      lines.push(`What this means: ${display.plain}`);
     }
   } else {
     const verdictText = analysis.isPhishing ? 'POTENTIALLY MALICIOUS' : 'LIKELY LEGITIMATE';
     lines.push(`Verdict: ${verdictText}`);
     lines.push(`Confidence: ${normalizeConfidence(analysis.confidence)}`);
   }
+  if (display?.action) {
+    lines.push(`What to do: ${display.action}`);
+  }
   lines.push('');
 
-  // Indicators
-  if (analysis.indicators?.length) {
-    lines.push('Suspicious Indicators:');
-    for (const indicator of analysis.indicators) {
-      lines.push(`  - ${indicator}`);
+  // Summary
+  if (analysis.summary) {
+    lines.push(`Summary: ${analysis.summary}`);
+    lines.push('');
+  }
+
+  // Why we flagged it (indicators + intelligence reasons)
+  const whyItems = [...(analysis.indicators ?? [])];
+  if (options?.risk?.reasons.length) {
+    whyItems.push(...options.risk.reasons);
+  }
+  if (whyItems.length) {
+    lines.push('Why we flagged it:');
+    for (const item of whyItems) {
+      lines.push(`  - ${item}`);
     }
     lines.push('');
   }
@@ -386,22 +546,24 @@ export function buildPlainTextReport(
     lines.push('');
   }
 
+  // How to spot this next time
+  const tips = buildTeachingTips(analysis);
+  if (tips.length) {
+    lines.push('How to spot this next time:');
+    for (const tip of tips) {
+      lines.push(`  - ${tip}`);
+    }
+    lines.push('');
+  }
+
   // Metadata
   lines.push(divider);
   lines.push('Email Details:');
   lines.push(`  Subject: ${emailData.subject}`);
   lines.push(`  From: ${emailData.from_email}`);
 
-  if (analysis.provider) {
-    lines.push(`  AI Provider: ${analysis.provider} (${analysis.model ?? 'unknown'})`);
-  }
-
-  if (analysis.processingTimeMs) {
-    lines.push(`  Processing Time: ${analysis.processingTimeMs}ms`);
-  }
-
   if (options?.analysisId) {
-    lines.push(`  Analysis ID: ${options.analysisId}`);
+    lines.push(`  Reference: ${options.analysisId}`);
   }
 
   lines.push('');

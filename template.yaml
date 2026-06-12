@@ -40,6 +40,19 @@ Parameters:
     AllowedValues: ['true', 'false']
     Default: 'false'
     Description: Delete raw emails from S3 once processed.
+  CampaignAlertsEnabled:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Default: 'false'
+    Description: >
+      When true, Phishy broadcasts an employee warning to CampaignAlertDistribution
+      once the same attack is reported by multiple people in a short window
+      (>=3 reports, >=2 recipients, within 4 hours). Requires intelligence to be
+      enabled (a database) and CampaignAlertDistribution to be set.
+  CampaignAlertDistribution:
+    Type: String
+    Default: ''
+    Description: Address the campaign broadcast is sent to (e.g. all-staff@yourdomain.com). Required when CampaignAlertsEnabled is true.
   SafeSenders:
     Type: String
     Default: ''
@@ -103,6 +116,10 @@ Conditions:
   HasSafeSenders: !Not [!Equals [!Ref SafeSenders, '']]
   HasSafeSenderSecurity: !Not [!Equals [!Ref SafeSenderSecurity, '']]
   HasProfile: !Not [!Equals [!Ref ProfileS3Uri, '']]
+  UseCampaignAlerts: !And
+    - !Condition UseIntelligence
+    - !Equals [!Ref CampaignAlertsEnabled, 'true']
+    - !Not [!Equals [!Ref CampaignAlertDistribution, '']]
 
 Resources:
   EmailBucket:
@@ -177,6 +194,8 @@ Resources:
           PHISHY_PROFILE: !If [HasProfile, !Ref ProfileS3Uri, !Ref AWS::NoValue]
           PHISHY_INTELLIGENCE_ENABLED: !If [UseIntelligence, 'true', !Ref AWS::NoValue]
           PHISHY_DB_CONNECTION: !If [UseIntelligence, !Ref IntelligenceDbSecretArn, !Ref AWS::NoValue]
+          PHISHY_CAMPAIGN_ALERTS_ENABLED: !If [UseCampaignAlerts, 'true', !Ref AWS::NoValue]
+          PHISHY_CAMPAIGN_ALERTS_DISTRIBUTION: !If [UseCampaignAlerts, !Ref CampaignAlertDistribution, !Ref AWS::NoValue]
       VpcConfig: !If
         - UseIntelligence
         - SecurityGroupIds:
