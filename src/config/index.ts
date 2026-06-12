@@ -241,7 +241,8 @@ async function resolveSecrets(config: PartialPhishyConfig): Promise<PartialPhish
       error: error instanceof Error ? error.message : String(error),
     });
     throw new Error(
-      `Failed to resolve database secret: ${error instanceof Error ? error.message : String(error)}`
+      `Failed to resolve database secret: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error }
     );
   }
 }
