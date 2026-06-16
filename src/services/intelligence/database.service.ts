@@ -1234,7 +1234,7 @@ export class IntelligenceDatabaseService {
          LEFT JOIN analysis_feedback af ON af.analysis_id = ea.id
          WHERE ea.campaign_signature = $1
            AND ea.created_at > NOW() - ($2 * INTERVAL '1 hour')
-           AND (ea.ai_provider <> 'cache' OR af.verdict IS NOT NULL)
+           AND (ea.ai_provider NOT IN ('cache', 'none') OR af.verdict IS NOT NULL)
          ORDER BY (af.verdict IS NOT NULL) DESC, ea.created_at DESC
          LIMIT 1`,
         [signature, windowHours]
@@ -1257,7 +1257,7 @@ export class IntelligenceDatabaseService {
            FROM email_analyses
            WHERE campaign_signature = $1
              AND created_at > NOW() - ($2 * INTERVAL '1 hour')
-             AND ai_provider <> 'cache'
+             AND ai_provider NOT IN ('cache', 'none')
            ORDER BY created_at DESC
            LIMIT 1`,
           [signature, windowHours]

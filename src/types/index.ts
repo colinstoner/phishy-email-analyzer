@@ -114,7 +114,8 @@ export type ThreatVerdict =
   | 'spam' // unsolicited bulk, no clear harm
   | 'graymail' // legitimate bulk the user may not want (marketing, surveys)
   | 'suspicious' // can't confirm malicious, but off
-  | 'legitimate';
+  | 'legitimate'
+  | 'undetermined'; // analysis could not be completed (model unreachable) — NOT a clean bill of health
 
 /** The mechanism by which a malicious email causes harm */
 export type ThreatVector =
@@ -156,6 +157,15 @@ export interface AnalysisResult {
   confidence: ConfidenceLevel;
   indicators: string[];
   recommendations: string[];
+  /**
+   * The model never produced this result — analysis could not be completed
+   * (e.g. the provider was unreachable after retries). Such a result must
+   * never be presented as a "legitimate"/safe verdict, cached, or stored as a
+   * reusable verdict. Distinct from a genuine isPhishing:false ruling.
+   */
+  analysisFailed?: boolean;
+  /** Human-readable reason analysis could not be completed (when analysisFailed) */
+  failureReason?: string;
   /** Structured verdict (next-gen). isPhishing/confidence are derived from it. */
   assessment?: ThreatAssessment;
   /** Structured IOCs the model identified during analysis */

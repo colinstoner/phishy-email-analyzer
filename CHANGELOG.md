@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Example report screenshots in the README (four scenarios across the three tones), rendered from the live report template via `scripts/render-report-samples.js` — invented data only
+- `AnalysisFailureCount` CloudWatch metric (EMF, dimensioned by Provider/Model) emitted when the model can't be reached after retries — a provider outage is now alarmable instead of silent
+- New `undetermined` threat verdict for analyses that could not be completed, rendered as an amber **"ANALYSIS UNAVAILABLE"** report (risk shown as "not assessed") that explicitly tells the reporter the email was *not* checked
+
+### Fixed
+- **A failed AI analysis no longer reports as "safe."** When the provider was unreachable, the error result (`isPhishing:false`) was fused to a `legitimate` verdict and the reporter received a green "LIKELY LEGITIMATE — safe to proceed" report for an un-analyzed email. Analysis failure now carries an explicit `analysisFailed` flag, routes to the `undetermined` verdict (never capped to "safe" by the safe-sender allowlist, still escalated by known indicators / active campaigns / security-team rulings), and renders the honest caution report above
+- Failed analyses are no longer stored as a reusable verdict, and the campaign verdict cache excludes failure placeholders (`ai_provider = 'none'`) — preventing a transient outage from poisoning the cache with a false "legitimate" served to future identical emails
+
+### Changed
+- Bedrock analysis retry budget widened to ride out transient `InternalServerException`/throttling windows: 4 attempts backing off ~15s/30s/60s (was 3 × ~1s). Lambda `Timeout` raised 90→180s to accommodate (kept in sync with the `ANALYSIS_*` constants in `bedrock.provider.ts`)
+- Bedrock invocation errors now log the SDK exception name, HTTP status, and request id — the bare "Bedrock is unable to process your request." message alone was too generic to triage
 
 ## [3.0.0] - 2026-06-12
 

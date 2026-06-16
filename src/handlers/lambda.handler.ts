@@ -23,7 +23,11 @@ import {
 import { createLogger } from '../utils/logger';
 import { extractEmailAddress, domainMatches } from '../utils/validation';
 import { estimateCostUsd } from '../utils/pricing';
-import { emitAIUsageMetric, emitCampaignCacheHitMetric } from '../utils/metrics';
+import {
+  emitAIUsageMetric,
+  emitAnalysisFailureMetric,
+  emitCampaignCacheHitMetric,
+} from '../utils/metrics';
 import { ReportOptions } from '../templates/report.html';
 import { EmailCommandService } from '../services/commands/email.command.service';
 import { AgenticAnalyzer } from '../services/ai/agentic/agentic.analyzer';
@@ -441,6 +445,19 @@ async function processEmailEvent(
   // Analyze with AI (cache miss or cache disabled)
   analysis ??= await services.analysisService.analyzeEmail(emailData);
 
+  // The model never produced a verdict (provider unreachable after retries).
+  // The reporter still gets an honest "analysis unavailable" report below, but
+  // this is an operational failure: surface it as a distinct, alarmable metric
+  // so a provider outage is visible and isn't counted as a clean analysis.
+  if (analysis.analysisFailed) {
+    emitAnalysisFailureMetric(analysis.provider ?? 'unknown', analysis.model ?? 'unknown');
+    logger.error('Analysis could not be completed — sending "analysis unavailable" report', {
+      reporter: emailData.from_email,
+      subject: emailData.subject,
+      failureReason: analysis.failureReason,
+    });
+  }
+
   // Emit CloudWatch usage/cost metrics for every analysis, regardless of
   // whether the intelligence database is enabled
   const estimatedCostUsd = analysis.tokenUsage
@@ -505,9 +522,12 @@ async function processEmailEvent(
   analysis.isPhishing = riskDecision.isPhishing;
   analysis.confidence = riskDecision.confidence;
 
-  // Store analysis in intelligence database (only for enterprise users, not safelist)
+  // Store analysis in intelligence database (only for enterprise users, not
+  // safelist). A failed analysis is never stored: it carries no real verdict
+  // and persisting it would seed the campaign verdict cache with a placeholder
+  // that could be served as a verdict to future identical emails.
   let storedAnalysisId: string | undefined;
-  if (services.intelligenceDb && !isSafelistUser) {
+  if (services.intelligenceDb && !isSafelistUser && !analysis.analysisFailed) {
     try {
       const analysisId = await services.intelligenceDb.storeAnalysis({
         messageId,

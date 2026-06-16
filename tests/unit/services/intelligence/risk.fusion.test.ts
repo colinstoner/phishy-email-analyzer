@@ -138,6 +138,40 @@ describe('fuseRisk', () => {
     const legacyClean = fuseRisk(result(undefined, { isPhishing: false, confidence: 'High' }));
     expect(legacyClean.riskLevel).toBe('safe');
   });
+
+  it('routes a failed analysis to undetermined, never legitimate/safe (the incident)', () => {
+    const decision = fuseRisk(result(undefined, { analysisFailed: true, isPhishing: false }));
+    expect(decision.verdict).toBe('undetermined');
+    expect(decision.isPhishing).toBe(false);
+    // The danger was the report calling an un-analyzed email "legitimate".
+    expect(decision.verdict).not.toBe('legitimate');
+    expect(decision.reasons.join(' ')).toMatch(/could not be completed/i);
+  });
+
+  it('does NOT let a safe-sender allowlist talk a failed analysis down to safe', () => {
+    const decision = fuseRisk(result(undefined, { analysisFailed: true, isPhishing: false }), {
+      isSafeSender: true,
+    });
+    expect(decision.verdict).toBe('undetermined');
+    expect(decision.reasons.join(' ')).not.toMatch(/trusted-sender allowlist/i);
+  });
+
+  it('escalates a failed analysis when hard intel flags it, without claiming a clean verdict', () => {
+    const decision = fuseRisk(result(undefined, { analysisFailed: true, isPhishing: false }), {
+      matchedIndicators: [indicator(3)],
+    });
+    expect(decision.verdict).toBe('suspicious');
+    expect(decision.riskScore).toBeGreaterThanOrEqual(60);
+    expect(decision.isPhishing).toBe(true);
+  });
+
+  it('lets a security-team confirmation still override a failed analysis', () => {
+    const decision = fuseRisk(result(undefined, { analysisFailed: true, isPhishing: false }), {
+      humanVerdict: 'confirmed_phishing',
+    });
+    expect(decision.verdict).toBe('phishing');
+    expect(decision.isPhishing).toBe(true);
+  });
 });
 
 describe('scoreToLevel', () => {

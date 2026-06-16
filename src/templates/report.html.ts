@@ -113,6 +113,14 @@ const VERDICT_DISPLAY: Record<
     plain: 'This appears to be a genuine, expected email with no signs of an attack.',
     action: 'It looks safe to proceed as normal.',
   },
+  undetermined: {
+    label: 'ANALYSIS UNAVAILABLE',
+    tone: 'caution',
+    plain:
+      "We couldn't analyze this email — our analysis service was temporarily unavailable. This is not a clean bill of health; the email has not been checked.",
+    action:
+      "Treat it with caution. Don't click links, open attachments, reply, or act on any request until you've verified the sender another way. Your security team has been notified.",
+  },
 };
 
 const TONE_CLASS: Record<VerdictTone, string> = {
@@ -404,7 +412,13 @@ function buildAnalysisSection(analysis: AnalysisResult, options?: ReportOptions)
     const label = display?.label ?? options.risk.verdict.toUpperCase();
     html += `<div class="verdict-banner ${TONE_CLASS[tone]}-bg">`;
     html += `<p class="verdict-line"><span class="${TONE_CLASS[tone]}">${escapeHtml(label)}</span></p>`;
-    html += `<p class="risk-score">Risk score: <strong>${options.risk.riskScore}/100</strong> (${escapeHtml(options.risk.riskLevel)})</p>`;
+    // A failed analysis has no real score — never render "0/100 (safe)", which
+    // would read as a clean bill of health for an email we never checked.
+    if (options.risk.verdict === 'undetermined') {
+      html += `<p class="risk-score">Risk score: <strong>not assessed</strong></p>`;
+    } else {
+      html += `<p class="risk-score">Risk score: <strong>${options.risk.riskScore}/100</strong> (${escapeHtml(options.risk.riskLevel)})</p>`;
+    }
     html += `</div>`;
     if (display?.plain) {
       html += `<p><strong>What this means:</strong> ${escapeHtml(display.plain)}</p>`;
@@ -509,7 +523,12 @@ export function buildPlainTextReport(
   // Verdict + risk
   if (options?.risk) {
     lines.push(`Verdict: ${display?.label ?? options.risk.verdict.toUpperCase()}`);
-    lines.push(`Risk score: ${options.risk.riskScore}/100 (${options.risk.riskLevel})`);
+    // A failed analysis has no real score — don't print "0/100 (safe)".
+    if (options.risk.verdict === 'undetermined') {
+      lines.push('Risk score: not assessed');
+    } else {
+      lines.push(`Risk score: ${options.risk.riskScore}/100 (${options.risk.riskLevel})`);
+    }
     if (display?.plain) {
       lines.push(`What this means: ${display.plain}`);
     }

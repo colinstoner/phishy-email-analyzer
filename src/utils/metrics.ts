@@ -66,6 +66,37 @@ export function emitAIUsageMetric(metric: AIUsageMetric): void {
 }
 
 /**
+ * Emit an analysis failure: the model could not be reached / did not produce a
+ * verdict after retries, so the report went out as "analysis unavailable"
+ * rather than a real verdict. Distinct from a successful analysis so it can be
+ * alarmed on — a spike means the provider is degraded and reporters are getting
+ * un-analyzed emails back.
+ */
+export function emitAnalysisFailureMetric(provider: string, model: string): void {
+  if (process.env.PHISHY_DISABLE_METRICS === 'true') {
+    return;
+  }
+
+  const emf = {
+    _aws: {
+      Timestamp: Date.now(),
+      CloudWatchMetrics: [
+        {
+          Namespace: NAMESPACE,
+          Dimensions: [['Provider', 'Model'], ['Provider']],
+          Metrics: [{ Name: 'AnalysisFailureCount', Unit: 'Count' }],
+        },
+      ],
+    },
+    Provider: provider,
+    Model: model,
+    AnalysisFailureCount: 1,
+  };
+
+  process.stdout.write(`${JSON.stringify(emf)}\n`);
+}
+
+/**
  * Emit a campaign verdict cache hit: a report answered from a recent analysis
  * of the same campaign instead of a fresh AI call. EstimatedCostSavedUSD
  * approximates what the skipped call would have cost (based on the most
