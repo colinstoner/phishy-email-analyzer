@@ -124,6 +124,35 @@ describe('buildEmailHtml', () => {
     expect(html).toContain('safe to proceed');
     expect(html).toContain('verdict-legitimate-bg');
   });
+
+  it('does not present a failed analysis as safe (the incident)', () => {
+    const html = buildEmailHtml(
+      analysis({
+        analysisFailed: true,
+        isPhishing: false,
+        summary: 'Analysis could not be completed: Bedrock is unable to process your request.',
+        indicators: [],
+        recommendations: [],
+      }),
+      email(),
+      {
+        risk: {
+          verdict: 'undetermined',
+          riskScore: 0,
+          riskLevel: 'safe',
+          reasons: [],
+        },
+      }
+    );
+    expect(html).toContain('ANALYSIS UNAVAILABLE');
+    expect(html).toContain('not assessed');
+    // Must never read as a clean bill of health: no "legitimate" label, no
+    // numeric score, and the banner uses the amber caution tone — not green.
+    expect(html).not.toContain('LIKELY LEGITIMATE');
+    expect(html).not.toContain('0/100');
+    expect(html).toContain('verdict-suspicious-bg');
+    expect(html).not.toContain('verdict-legitimate-bg"'); // banner class use, not the CSS rule
+  });
 });
 
 describe('buildPlainTextReport', () => {

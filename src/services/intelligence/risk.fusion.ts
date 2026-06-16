@@ -68,6 +68,12 @@ function scoreToConfidence(score: number): ConfidenceLevel {
  * path, cache hits from older analyses).
  */
 function baseScore(result: AnalysisResult): { score: number; verdict: ThreatVerdict } {
+  // The model never produced a verdict — analysis could not be completed.
+  // Start from 'undetermined' / 0 so this can never default to a "legitimate"
+  // base. Hard intel below may still escalate it; nothing caps it to "safe".
+  if (result.analysisFailed) {
+    return { score: 0, verdict: 'undetermined' };
+  }
   if (result.assessment) {
     return { score: result.assessment.riskScore, verdict: result.assessment.verdict };
   }
@@ -79,8 +85,9 @@ function baseScore(result: AnalysisResult): { score: number; verdict: ThreatVerd
 }
 
 export function fuseRisk(result: AnalysisResult, signals: FusionSignals = {}): RiskDecision {
-  const { score: initialScore, verdict } = baseScore(result);
+  const { score: initialScore, verdict: baseVerdict } = baseScore(result);
   let score = initialScore;
+  let verdict = baseVerdict;
   const reasons: string[] = [];
 
   // 1. Security-team ruling is authoritative — it overrides everything,
@@ -136,10 +143,31 @@ export function fuseRisk(result: AnalysisResult, signals: FusionSignals = {}): R
   }
 
   // 4. A safe-sender allowlist match caps risk — unless intel above already
-  //    proved malice (in which case the floors above stand).
-  if (signals.isSafeSender && !MALICIOUS_VERDICTS.includes(verdict) && matches.length === 0) {
+  //    proved malice (in which case the floors above stand). Never caps an
+  //    'undetermined' result: a failed analysis must not be talked down to safe.
+  if (
+    signals.isSafeSender &&
+    !MALICIOUS_VERDICTS.includes(verdict) &&
+    verdict !== 'undetermined' &&
+    matches.length === 0
+  ) {
     score = Math.min(score, 10);
     reasons.push('Reporter is on the trusted-sender allowlist.');
+  }
+
+  // 5. A failed analysis stays 'undetermined' unless hard intel above escalated
+  //    it. Always disclose that the email could not be assessed so the report
+  //    can't read as a clean bill of health.
+  if (result.analysisFailed) {
+    reasons.push(
+      'Automated analysis could not be completed (the AI provider was temporarily unavailable), ' +
+        'so Phishy could not assess this email — treat it with caution until you verify the sender another way.'
+    );
+    if (score > 0) {
+      // Known indicators or an active campaign flagged it even without the
+      // model. We can't name the threat type, but it isn't clean.
+      verdict = 'suspicious';
+    }
   }
 
   return finalize(verdict, score, reasons, undefined);

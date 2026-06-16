@@ -49,6 +49,40 @@ const DEFAULT_MODEL = BEDROCK_CLAUDE_MODELS.CLAUDE_OPUS_4_8;
 const DEFAULT_MAX_TOKENS = 4096;
 const DEFAULT_TIMEOUT_MS = 60000;
 
+/**
+ * Retry budget for the email-analysis call. Phishy is an async, email-latency
+ * workflow — a reporter waits seconds-to-minutes for a reply, not milliseconds —
+ * and Bedrock's transient failures (InternalServerException / throttling) are
+ * typically short windows. So we wait generously to ride them out rather than
+ * give up and send an "analysis unavailable" report.
+ *
+ * 4 attempts back off ~15s / 30s / 60s between tries (≈105s of waiting worst
+ * case). This is sized against the Lambda Timeout (180s) — keep them in sync:
+ * waits + per-attempt latency must stay comfortably under the function timeout.
+ */
+const ANALYSIS_MAX_RETRIES = 4;
+const ANALYSIS_BASE_DELAY_MS = 15000;
+const ANALYSIS_MAX_DELAY_MS = 60000;
+
+/**
+ * Pull the diagnostic detail out of an AWS SDK error. Bedrock surfaces a
+ * generic "Bedrock is unable to process your request." message; the useful
+ * triage data (exception name, HTTP status, request id) lives on the error
+ * object's `name` and `$metadata`, which the bare message drops.
+ */
+function bedrockErrorDetail(error: unknown): {
+  errorName: string;
+  httpStatusCode?: number;
+  requestId?: string;
+} {
+  const e = error as { name?: string; $metadata?: { httpStatusCode?: number; requestId?: string } };
+  return {
+    errorName: e?.name ?? 'UnknownError',
+    httpStatusCode: e?.$metadata?.httpStatusCode,
+    requestId: e?.$metadata?.requestId,
+  };
+}
+
 export interface BedrockConfig {
   region: string;
   modelId?: string;
@@ -269,7 +303,21 @@ export class BedrockProvider implements AIProvider {
           body: JSON.stringify(requestBody),
         });
 
-        const response = await this.client.send(command);
+        let response;
+        try {
+          response = await this.client.send(command);
+        } catch (sdkError) {
+          // Enrich the log with the SDK's exception name / HTTP status / request
+          // id — the message alone ("Bedrock is unable to process your request.")
+          // is too generic to triage. Rethrow the original so retry semantics,
+          // which key off the message, are unchanged.
+          logger.warn('Bedrock invocation error', {
+            model: this.model,
+            ...bedrockErrorDetail(sdkError),
+            message: sdkError instanceof Error ? sdkError.message : String(sdkError),
+          });
+          throw sdkError;
+        }
 
         if (!response.body) {
           throw new Error('Empty response from Bedrock');
@@ -299,8 +347,12 @@ export class BedrockProvider implements AIProvider {
         return { text: parsedResponse.text, usage };
       },
       {
-        maxRetries: 3,
-        baseDelayMs: 1000,
+        // Wait generously to ride out transient Bedrock blips — see the
+        // ANALYSIS_* constants. Only retryable (transient) errors actually wait;
+        // the non-retryable cases below throw immediately, no backoff.
+        maxRetries: ANALYSIS_MAX_RETRIES,
+        baseDelayMs: ANALYSIS_BASE_DELAY_MS,
+        maxDelayMs: ANALYSIS_MAX_DELAY_MS,
         shouldRetry: error => {
           const message = error.message || '';
           // Don't retry access denied errors

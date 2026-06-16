@@ -187,6 +187,9 @@ describe('AnalysisService', () => {
       expect(result.model).toBe('none');
       expect(result.indicators.length).toBeGreaterThan(0);
       expect(result.recommendations.length).toBeGreaterThan(0);
+      // The flag downstream code keys on to avoid presenting a failure as "safe".
+      expect(result.analysisFailed).toBe(true);
+      expect(result.failureReason).toContain('primary down');
     });
 
     it('should return an error result when primary fails and no fallback exists', async () => {

@@ -140,6 +140,12 @@ export class AnalysisService {
   private createErrorResult(errorMessage: string): AnalysisResult {
     return {
       summary: `Analysis could not be completed: ${errorMessage}`,
+      // analysisFailed — NOT isPhishing:false — is what downstream code keys on.
+      // isPhishing:false here is a placeholder, never a "this email is safe"
+      // ruling; risk fusion routes failures to an 'undetermined' verdict so the
+      // report can't read as a clean bill of health.
+      analysisFailed: true,
+      failureReason: errorMessage,
       isPhishing: false,
       confidence: 'N/A',
       indicators: ['Analysis could not be completed due to provider errors'],
