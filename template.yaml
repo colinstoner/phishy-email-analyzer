@@ -179,7 +179,8 @@ Resources:
       MemorySize: 1024
       # 180s accommodates the Bedrock analysis retry budget (~15s/30s/60s backoff
       # over 4 attempts ≈ 105s of waiting) so a transient provider blip is ridden
-      # out in-invocation rather than returning an "analysis unavailable" report.
+      # out within a single invocation rather than returning an "analysis
+      # unavailable" report.
       # Keep in sync with ANALYSIS_* retry constants in bedrock.provider.ts.
       Timeout: 180
       Environment:
