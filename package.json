@@ -44,7 +44,7 @@
     "@aws-sdk/client-secrets-manager": "^3.1068.0",
     "@aws-sdk/client-ses": "^3.1068.0",
     "axios": "^1.7.0",
-    "mailparser": "^3.9.9",
+    "mailparser": "^3.9.11",
     "pg": "^8.21.0",
     "zod": "^4.4.3"
   },
