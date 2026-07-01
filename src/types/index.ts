@@ -183,13 +183,7 @@ export interface AnalysisResult {
  * Confidence level for analysis results
  */
 export type ConfidenceLevel =
-  | 'Very High'
-  | 'High'
-  | 'Medium'
-  | 'Low'
-  | 'Very Low'
-  | 'Unknown'
-  | 'N/A';
+  'Very High' | 'High' | 'Medium' | 'Low' | 'Very Low' | 'Unknown' | 'N/A';
 
 /**
  * Processing result for a single email event
@@ -288,13 +282,7 @@ export interface EmailEvent {
  * Threat indicator types for IOC extraction
  */
 export type IndicatorType =
-  | 'domain'
-  | 'ip'
-  | 'url'
-  | 'email'
-  | 'hash'
-  | 'file_name'
-  | 'subject_pattern';
+  'domain' | 'ip' | 'url' | 'email' | 'hash' | 'file_name' | 'subject_pattern';
 
 /**
  * Threat indicator structure
