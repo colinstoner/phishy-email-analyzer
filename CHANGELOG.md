@@ -14,12 +14,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Example report screenshots in the README (four scenarios across the three tones), rendered from the live report template via `scripts/render-report-samples.js` — invented data only
 - `AnalysisFailureCount` CloudWatch metric (EMF, dimensioned by Provider/Model) emitted when the model can't be reached after retries — a provider outage is now alarmable instead of silent
 - New `undetermined` threat verdict for analyses that could not be completed, rendered as an amber **"ANALYSIS UNAVAILABLE"** report (risk shown as "not assessed") that explicitly tells the reporter the email was *not* checked
+- `ai.effort` setting (`PHISHY_AI_EFFORT`; `low`/`medium`/`high`/`xhigh`/`max`, default `medium`): how much the model thinks, and so the main cost and latency control. Sent as `output_config.effort` on every call path, only to models that accept it (`src/services/ai/model.capabilities.ts`)
+- **Refusal handling with a fallback model.** Claude Opus 5.5's safety classifiers can decline security content with `stop_reason: "refusal"`. A declined request is retried once on `ai.refusalFallbackModel` (`PHISHY_AI_REFUSAL_FALLBACK_MODEL`; default Claude Opus 4.8 in the same provider, empty string disables). If that model declines too, the reporter gets the "ANALYSIS UNAVAILABLE" report — a refusal is never a `legitimate` verdict and is never stored or cached. `reasoning_extraction` refusals are not retried; a refusal inside the agentic loop abandons the loop for the single-shot path
+- `AnalysisRefusalCount` CloudWatch metric (EMF, dimensioned by Provider/Model, category as the `RefusalCategory` property), emitted once per declined call
+- `ThinkingTokens` property on the usage metric line and `thinkingTokens` on a result's token usage, when the API reports the thinking share of output tokens
+- Model catalogs and the pricing table cover Claude Opus 5.5 / 5, Sonnet 5.5 / 5, Haiku 5.5 (including its over-100K-token prompt rate), and Fable 5.2 / 5.1 / 5
 
 ### Fixed
 - **A failed AI analysis no longer reports as "safe."** When the provider was unreachable, the error result (`isPhishing:false`) was fused to a `legitimate` verdict and the reporter received a green "LIKELY LEGITIMATE — safe to proceed" report for an un-analyzed email. Analysis failure now carries an explicit `analysisFailed` flag, routes to the `undetermined` verdict (never capped to "safe" by the safe-sender allowlist, still escalated by known indicators / active campaigns / security-team rulings), and renders the honest caution report above
 - Failed analyses are no longer stored as a reusable verdict, and the campaign verdict cache excludes failure placeholders (`ai_provider = 'none'`) — preventing a transient outage from poisoning the cache with a false "legitimate" served to future identical emails
+- **A truncated or malformed model reply no longer reads as "not phishing."** A reply cut off at `max_tokens`, text that is not JSON and states no explicit `isPhishing`, and JSON with neither a recognized `verdict` nor a boolean `isPhishing` all defaulted to `isPhishing:false`. Each is now an `analysisFailed` result
+- The Anthropic provider read `content[0].text`, which is a thinking block — not the answer — on models that think. Both providers now select text by block type on every path, through one shared module
+- A Bedrock refusal was thrown inside the retry loop and retried through the full ~105s backoff before failing; the Anthropic provider did not check for refusals at all. Refusals are now handled once, without backoff, identically on both providers
+- The agentic loop dropped thinking blocks when sending an assistant turn back. Turns are now replayed exactly as received
+- AI command parsing asked for 50 output tokens and provider health checks for 10, which a model that always thinks spends before writing anything. Both budgets now leave room for thinking
+- Anthropic authentication failures and Bedrock `ValidationException`s are no longer retried
+- Bedrock error logs no longer include the response body, which can hold model output derived from the reported email
 
 ### Changed
+- **Default model upgraded to Claude Opus 5.5** on both providers (`claude-opus-5-5` / `global.anthropic.claude-opus-5-5`). Opus 5.5 always thinks, and thinking counts toward `max_tokens`, so the default `maxTokens` rises 4096→16000. No `thinking` field is sent (the model rejects `disabled`). Deployments that pin a model or `maxTokens` in their own configuration keep their values; a pinned `maxTokens` of 4096 should be raised before moving to Opus 5.5
+- Removed the unused `temperature` analysis option: current models reject sampling parameters
+- The Bedrock refusal-fallback call gets one retry instead of the full analysis retry budget, keeping worst-case backoff (≈120s) inside the Lambda `Timeout` of 180s
 - Bedrock analysis retry budget widened to ride out transient `InternalServerException`/throttling windows: 4 attempts backing off ~15s/30s/60s (was 3 × ~1s). Lambda `Timeout` raised 90→180s to accommodate (kept in sync with the `ANALYSIS_*` constants in `bedrock.provider.ts`)
 - Bedrock invocation errors now log the SDK exception name, HTTP status, and request id — the bare "Bedrock is unable to process your request." message alone was too generic to triage
 

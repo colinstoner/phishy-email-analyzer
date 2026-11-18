@@ -4,21 +4,23 @@
  */
 
 import { z } from 'zod';
+import { EFFORT_LEVELS } from '../services/ai/model.capabilities';
 
 /**
  * AI Provider configuration schemas
  */
 const AnthropicConfigSchema = z.object({
   apiKey: z.string().min(1, 'Anthropic API key is required'),
-  model: z.string().default('claude-opus-4-8'),
-  maxTokens: z.number().positive().default(4096),
+  model: z.string().default('claude-opus-5-5'),
+  // Thinking counts toward max_tokens on Opus 5.5 — leave room for it
+  maxTokens: z.number().positive().default(16000),
   timeout: z.number().positive().default(60000),
 });
 
 const BedrockConfigSchema = z.object({
   region: z.string().default('us-east-1'),
-  modelId: z.string().default('global.anthropic.claude-opus-4-8'),
-  maxTokens: z.number().positive().default(4096),
+  modelId: z.string().default('global.anthropic.claude-opus-5-5'),
+  maxTokens: z.number().positive().default(16000),
   timeout: z.number().positive().default(60000),
 });
 
@@ -28,6 +30,18 @@ const AIConfigSchema = z
     anthropic: AnthropicConfigSchema.optional(),
     bedrock: BedrockConfigSchema.optional(),
     fallbackProvider: z.enum(['anthropic', 'bedrock']).optional(),
+    /**
+     * How much the model thinks, and so the main cost/latency control. Sent as
+     * output_config.effort to models that accept it; omitted for the rest.
+     */
+    effort: z.enum(EFFORT_LEVELS).default('medium'),
+    /**
+     * Model a request is retried on, once, when the primary provider's model
+     * declines it (stop_reason "refusal"). Must be a model ID for the primary
+     * provider. Unset: that provider's built-in default (`claude-opus-4-8` /
+     * `global.anthropic.claude-opus-4-8`). Empty string: no retry.
+     */
+    refusalFallbackModel: z.string().optional(),
   })
   .refine(
     data => {

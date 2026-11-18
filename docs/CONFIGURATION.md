@@ -39,11 +39,36 @@ When the same setting is defined in multiple places, Phishy uses this priority (
 |----------|---------|-------------|
 | `PHISHY_AI_PROVIDER` | `anthropic` | AI provider: `anthropic` or `bedrock` |
 | `ANTHROPIC_API_KEY` | - | Anthropic API key (required for anthropic provider) |
-| `CLAUDE_MODEL` | `claude-opus-4-8` | Model for Anthropic provider |
+| `CLAUDE_MODEL` | `claude-opus-5-5` | Model for Anthropic provider |
 | `PHISHY_BEDROCK_REGION` | `us-east-1` | AWS region for Bedrock |
-| `PHISHY_BEDROCK_MODEL` | `global.anthropic.claude-opus-4-8` | Bedrock model ID |
+| `PHISHY_BEDROCK_MODEL` | `global.anthropic.claude-opus-5-5` | Bedrock model ID (an inference-profile ID) |
+| `PHISHY_AI_EFFORT` | `medium` | How much the model thinks: `low`, `medium`, `high`, `xhigh`, or `max` (`ai.effort`) |
+| `PHISHY_AI_REFUSAL_FALLBACK_MODEL` | `claude-opus-4-8` / `global.anthropic.claude-opus-4-8` | Model a declined request is retried on once (`ai.refusalFallbackModel`). Set to an empty string to disable the retry |
 
-> Max tokens and request timeout are file-config only (`ai.anthropic.maxTokens` / `ai.bedrock.timeout`, etc.) — see the example configuration below.
+> Max tokens and request timeout are file-config only (`ai.anthropic.maxTokens` / `ai.bedrock.timeout`, etc.) — see the example configuration below. Both providers default to `maxTokens: 16000` and `timeout: 60000`.
+
+#### Effort and max tokens
+
+Claude Opus 5.5 always thinks before it answers, and thinking cannot be turned off. Two settings follow from that:
+
+- **`ai.effort`** is the control for how much it thinks, and so for cost and latency per email. `medium` is the model's own default and Phishy's. Lower it to `low` to cut cost and latency; raise it only if you have measured a detection gain. Phishy sends the value as `output_config.effort` to models that accept it and omits it for those that don't (Sonnet 4.5, Haiku 4.5, and any model ID it does not recognize). A level the model lacks is stepped down to the nearest one it has (`xhigh` on Opus 4.6 becomes `high`).
+- **`maxTokens`** caps thinking *plus* the answer. A limit sized for the JSON verdict alone cuts the reply off mid-answer, which is why the default is 16000. If you override it, leave room for thinking. A reply that hits the limit is treated as a failed analysis, never parsed as a verdict.
+
+Thinking tokens are billed as output tokens. They are already included in the `OutputTokens` metric; the share spent on thinking is logged as the `ThinkingTokens` property on each usage line (see Cost Tracking).
+
+#### Refusals
+
+Claude Opus 5.5 runs safety classifiers on incoming requests, and security content is one of the things they look for. A phishing email is, by design, full of that content, so the model will occasionally decline to analyze a reported email. This is not an error: the API answers normally with `stop_reason: "refusal"`.
+
+What Phishy does:
+
+1. Retries the same request **once** on `ai.refusalFallbackModel` (Claude Opus 4.8 by default, in the same provider). In agentic mode the tool loop is abandoned first and the retry uses the standard single-shot analysis.
+2. If that model declines too, or the retry is disabled, the reporter receives the **"ANALYSIS UNAVAILABLE"** report, which says the email was *not* checked. A refusal is never reported as "legitimate", never stored as a verdict, and never cached.
+3. Emits the `AnalysisRefusalCount` metric for every declined call.
+
+Refusals in the `reasoning_extraction` category are not retried: they mean the prompt asked the model to reproduce its reasoning, which a different model does not fix.
+
+`ai.refusalFallbackModel` must be a model ID for your **primary** provider (`claude-…` for Anthropic, an inference-profile ID such as `global.anthropic.claude-…` for Bedrock). The fallback model needs the same access as the primary one: on Bedrock, the Lambda role must be allowed to invoke it.
 
 ### Email Settings
 
@@ -262,10 +287,14 @@ Metrics appear in the **`Phishy`** namespace, dimensioned by `Provider` and `Mod
 | `EstimatedCostUSD` | Estimated spend per analysis (per-model pricing, including the 10% Bedrock regional-endpoint premium) |
 | `ProcessingTimeMs` | End-to-end analysis latency |
 | `PhishingDetected` | 1 if the verdict was phishing, 0 otherwise |
+| `AnalysisFailureCount` | Reports sent as "analysis unavailable" — the provider was unreachable, the model declined, or its reply was incomplete |
+| `AnalysisRefusalCount` | Model calls declined with `stop_reason: "refusal"`, counted against the model that declined. The category (`cyber`, `bio`, …) is the `RefusalCategory` property on the log line |
 | `CampaignCacheHits` | Reports answered from the campaign verdict cache (no AI call) |
 | `EstimatedCostSavedUSD` | Approximate spend avoided by cache hits |
 
-Useful starting points: a dashboard widget on `SUM(EstimatedCostUSD)` per day, and a billing alarm such as "alert when `SUM(EstimatedCostUSD)` over 24h exceeds $X". Set `PHISHY_DISABLE_METRICS=true` to turn emission off.
+`OutputTokens` includes thinking tokens. When the API reports the thinking share, each usage line also carries a `ThinkingTokens` property — a log field you can query with CloudWatch Logs Insights, not a separate metric.
+
+Useful starting points: a dashboard widget on `SUM(EstimatedCostUSD)` per day, a billing alarm such as "alert when `SUM(EstimatedCostUSD)` over 24h exceeds $X", and an alarm on `AnalysisRefusalCount` relative to `AnalysisCount`. Set `PHISHY_DISABLE_METRICS=true` to turn emission off.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -290,10 +319,12 @@ For more complex setups, use a JSON configuration file.
     "provider": "bedrock",
     "bedrock": {
       "region": "us-east-1",
-      "modelId": "global.anthropic.claude-opus-4-8",
-      "maxTokens": 4096,
+      "modelId": "global.anthropic.claude-opus-5-5",
+      "maxTokens": 16000,
       "timeout": 60000
     },
+    "effort": "medium",
+    "refusalFallbackModel": "global.anthropic.claude-opus-4-8",
     "fallbackProvider": "anthropic"
   },
   "email": {
@@ -361,6 +392,8 @@ Configure automatic fallback if primary provider fails:
   }
 }
 ```
+
+Provider fallback covers outages and errors. A model *refusal* is handled separately, inside the primary provider, by `ai.refusalFallbackModel` (see [Refusals](#refusals)) — a declined request is not sent to the fallback provider.
 
 ---
 

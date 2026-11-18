@@ -183,9 +183,15 @@ async function initializeServices(): Promise<{
   let fallbackProvider: AIProvider | undefined;
 
   if (config.ai.fallbackProvider) {
+    // ai.refusalFallbackModel is a model ID in the PRIMARY provider's format,
+    // so the fallback provider keeps its own built-in default instead
     const fallbackConfig = {
       ...config,
-      ai: { ...config.ai, provider: config.ai.fallbackProvider },
+      ai: {
+        ...config.ai,
+        provider: config.ai.fallbackProvider,
+        refusalFallbackModel: undefined,
+      },
     };
     fallbackProvider = createAIProvider(fallbackConfig, emailParser, cachedProfile);
   }
@@ -310,6 +316,8 @@ function createAIProvider(
         modelId: config.ai.bedrock.modelId,
         maxTokens: config.ai.bedrock.maxTokens,
         timeout: config.ai.bedrock.timeout,
+        effort: config.ai.effort,
+        refusalFallbackModel: config.ai.refusalFallbackModel,
       },
       extractHeaders,
       profile
@@ -326,6 +334,8 @@ function createAIProvider(
       model: config.ai.anthropic.model,
       maxTokens: config.ai.anthropic.maxTokens,
       timeout: config.ai.anthropic.timeout,
+      effort: config.ai.effort,
+      refusalFallbackModel: config.ai.refusalFallbackModel,
     },
     extractHeaders,
     profile
@@ -501,6 +511,7 @@ async function processEmailEvent(
       estimatedCostUsd,
       processingTimeMs: analysis.processingTimeMs ?? 0,
       isPhishing: analysis.isPhishing,
+      thinkingTokens: analysis.tokenUsage.thinkingTokens,
     });
   }
 

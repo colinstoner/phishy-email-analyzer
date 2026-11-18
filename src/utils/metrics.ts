@@ -17,6 +17,8 @@ export interface AIUsageMetric {
   estimatedCostUsd: number;
   processingTimeMs: number;
   isPhishing: boolean;
+  /** Share of outputTokens spent on thinking, when the API reported it */
+  thinkingTokens?: number;
 }
 
 const NAMESPACE = 'Phishy';
@@ -58,6 +60,9 @@ export function emitAIUsageMetric(metric: AIUsageMetric): void {
     EstimatedCostUSD: metric.estimatedCostUsd,
     ProcessingTimeMs: metric.processingTimeMs,
     PhishingDetected: metric.isPhishing ? 1 : 0,
+    // A property, not a metric: thinking is already inside OutputTokens, and a
+    // separate metric would invite double counting. Query it with Logs Insights.
+    ...(metric.thinkingTokens !== undefined ? { ThinkingTokens: metric.thinkingTokens } : {}),
   };
 
   // EMF must be a raw JSON line on stdout — bypass the structured logger,
@@ -91,6 +96,42 @@ export function emitAnalysisFailureMetric(provider: string, model: string): void
     Provider: provider,
     Model: model,
     AnalysisFailureCount: 1,
+  };
+
+  process.stdout.write(`${JSON.stringify(emf)}\n`);
+}
+
+/**
+ * Emit a model refusal: the model's safety classifiers (or the model itself)
+ * declined the request with `stop_reason: "refusal"`. Emitted once per refused
+ * call, against the model that refused, so a refusal that the fallback model
+ * then answers still counts. Category is a property rather than a dimension —
+ * it is an open-ended, informational value and can be null.
+ */
+export function emitAnalysisRefusalMetric(
+  provider: string,
+  model: string,
+  category: string | null
+): void {
+  if (process.env.PHISHY_DISABLE_METRICS === 'true') {
+    return;
+  }
+
+  const emf = {
+    _aws: {
+      Timestamp: Date.now(),
+      CloudWatchMetrics: [
+        {
+          Namespace: NAMESPACE,
+          Dimensions: [['Provider', 'Model'], ['Provider']],
+          Metrics: [{ Name: 'AnalysisRefusalCount', Unit: 'Count' }],
+        },
+      ],
+    },
+    Provider: provider,
+    Model: model,
+    AnalysisRefusalCount: 1,
+    RefusalCategory: category ?? 'unspecified',
   };
 
   process.stdout.write(`${JSON.stringify(emf)}\n`);

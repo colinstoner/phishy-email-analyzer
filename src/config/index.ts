@@ -32,6 +32,8 @@ const ENV_MAPPINGS: Record<string, string> = {
   PHISHY_AI_PROVIDER: 'ai.provider',
   PHISHY_BEDROCK_REGION: 'ai.bedrock.region',
   PHISHY_BEDROCK_MODEL: 'ai.bedrock.modelId',
+  PHISHY_AI_EFFORT: 'ai.effort',
+  PHISHY_AI_REFUSAL_FALLBACK_MODEL: 'ai.refusalFallbackModel',
 
   // Email
   SAFE_DOMAINS: 'email.safeDomains',
@@ -145,8 +147,8 @@ function getDefaultConfig(): PartialPhishyConfig {
       // This allows bedrock provider to work without requiring an Anthropic key
       bedrock: {
         region: 'us-east-1',
-        modelId: 'global.anthropic.claude-opus-4-8',
-        maxTokens: 4096,
+        modelId: 'global.anthropic.claude-opus-5-5',
+        maxTokens: 16000,
         timeout: 60000,
       },
     },

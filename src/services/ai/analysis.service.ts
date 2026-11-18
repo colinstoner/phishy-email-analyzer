@@ -42,7 +42,12 @@ export class AnalysisService {
     });
 
     // Agentic path: a bounded tool loop over Phishy's own threat intel.
-    // Any failure falls through to the standard single-shot analysis below.
+    // Any failure — a refusal or a truncated turn included — abandons the loop
+    // and falls through to the standard single-shot analysis below. That path
+    // builds a fresh request, so nothing from the abandoned conversation (its
+    // thinking blocks in particular) is replayed, and it owns the
+    // refusal-fallback retry: a refusal it cannot recover comes back as an
+    // analysisFailed result, never as a verdict.
     if (this.agenticAnalyzer && AgenticAnalyzer.supports(this.primaryProvider)) {
       try {
         return await this.agenticAnalyzer.analyze(this.primaryProvider, emailData, this.profile);
