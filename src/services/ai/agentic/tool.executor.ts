@@ -15,6 +15,7 @@ import {
   IntelligenceDatabaseService,
   computeCampaignSignature,
 } from '../../intelligence/database.service';
+import { classifyIndicator, indicatorRole } from '../../intelligence/indicator.policy';
 import { ToolDefinition } from '../conversation.types';
 
 const logger = createLogger('agentic-tools');
@@ -198,10 +199,16 @@ export class AgenticToolExecutor {
     }
 
     const matches = await this.db.lookupIndicators(type, values);
+    const now = new Date();
     return {
       checked: values.length,
+      // `strength` is the same strong/weak rule risk fusion applies: weak
+      // means seen before but not confirmed as attacker-controlled (shared
+      // infrastructure, no provenance, or expired) — context, not evidence.
       known: matches.map(m => ({
         value: m.indicatorValue,
+        strength: classifyIndicator(m, now).strength,
+        role: indicatorRole(m) ?? 'unknown',
         confidence: m.confidenceScore,
         severity: m.severity,
         timesSeen: m.timesSeen,

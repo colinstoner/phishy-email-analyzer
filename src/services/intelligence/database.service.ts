@@ -6,8 +6,9 @@
 import { Pool, PoolConfig } from 'pg';
 import { createLogger } from '../../utils/logger';
 import { AnalysisResult, IndicatorType } from '../../types';
-import { createHash } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import rdsCaBundle from './rds-global-bundle.pem';
+import { AUDIT_DEACTIVATION_MARKER, REPORT_KEY_HISTORY } from './indicator.policy';
 
 const logger = createLogger('intelligence-db');
 
@@ -577,12 +578,29 @@ export class IntelligenceDatabaseService {
   }
 
   /**
-   * Store or update a threat indicator
+   * Store or update a threat indicator.
+   *
+   * `times_seen` counts DISTINCT reported emails: `reportKey` identifies the
+   * reported email (the handler passes the campaign signature, so a repeat
+   * report of the same email, a reply in its thread and a campaign copy share
+   * one key). A re-sighting with a key already in `metadata.reportKeys` only
+   * refreshes `last_seen_at`. Without a key, every call counts.
+   *
+   * A row written before report keys existed is reset to 1 on its first keyed
+   * write (its old count, inflated by repeat reports, is kept in
+   * `metadata.legacyTimesSeen`). Provenance and role from the new write fill
+   * in what an older row lacks; a recorded sender/payload role is never
+   * downgraded. No schema change: all of it lives in the metadata JSONB.
    */
-  async upsertIndicator(indicator: ThreatIndicatorRecord): Promise<string> {
+  async upsertIndicator(
+    indicator: ThreatIndicatorRecord,
+    options: { reportKey?: string } = {}
+  ): Promise<string> {
     await this.initialize();
 
     const hash = this.hashIndicator(indicator.indicatorType, indicator.indicatorValue);
+    const reportKey = options.reportKey ?? `unkeyed:${randomUUID()}`;
+    const metadata = { ...(indicator.metadata ?? {}), reportKeys: [reportKey] };
 
     const result = await this.pool.query(
       `INSERT INTO threat_indicators
@@ -591,7 +609,12 @@ export class IntelligenceDatabaseService {
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        ON CONFLICT (indicator_type, indicator_hash)
        DO UPDATE SET
-         times_seen = threat_indicators.times_seen + 1,
+         times_seen = CASE
+           WHEN threat_indicators.metadata->'reportKeys' IS NULL THEN 1
+           WHEN threat_indicators.metadata->'reportKeys' @> jsonb_build_array($12::text)
+             THEN threat_indicators.times_seen
+           ELSE threat_indicators.times_seen + 1
+         END,
          last_seen_at = NOW(),
          confidence_score = GREATEST(threat_indicators.confidence_score, EXCLUDED.confidence_score),
          severity = CASE
@@ -600,7 +623,38 @@ export class IntelligenceDatabaseService {
            WHEN EXCLUDED.severity = 'high' OR threat_indicators.severity = 'high' THEN 'high'
            WHEN EXCLUDED.severity = 'medium' OR threat_indicators.severity = 'medium' THEN 'medium'
            ELSE 'low'
-         END
+         END,
+         metadata = COALESCE(threat_indicators.metadata, '{}'::jsonb) || jsonb_strip_nulls(jsonb_build_object(
+           'provenance', COALESCE(threat_indicators.metadata->'provenance', EXCLUDED.metadata->'provenance'),
+           'sourceVerdict', COALESCE(threat_indicators.metadata->'sourceVerdict', EXCLUDED.metadata->'sourceVerdict'),
+           'securityConfirmed', COALESCE(threat_indicators.metadata->'securityConfirmed', EXCLUDED.metadata->'securityConfirmed'),
+           'role', CASE
+             WHEN threat_indicators.metadata->>'role' IN ('sender', 'payload') THEN threat_indicators.metadata->'role'
+             ELSE COALESCE(EXCLUDED.metadata->'role', threat_indicators.metadata->'role')
+           END,
+           'roleSource', CASE
+             WHEN threat_indicators.metadata->>'role' IN ('sender', 'payload') THEN threat_indicators.metadata->'roleSource'
+             ELSE COALESCE(EXCLUDED.metadata->'roleSource', threat_indicators.metadata->'roleSource')
+           END,
+           'legacyTimesSeen', CASE
+             WHEN threat_indicators.metadata->'reportKeys' IS NULL THEN to_jsonb(threat_indicators.times_seen)
+             ELSE threat_indicators.metadata->'legacyTimesSeen'
+           END,
+           'reportKeys', (
+             SELECT jsonb_agg(recent.k ORDER BY recent.i)
+             FROM (
+               SELECT k, i FROM jsonb_array_elements(
+                 CASE
+                   WHEN COALESCE(threat_indicators.metadata->'reportKeys', '[]'::jsonb) @> jsonb_build_array($12::text)
+                     THEN COALESCE(threat_indicators.metadata->'reportKeys', '[]'::jsonb)
+                   ELSE COALESCE(threat_indicators.metadata->'reportKeys', '[]'::jsonb) || jsonb_build_array($12::text)
+                 END
+               ) WITH ORDINALITY AS t(k, i)
+               ORDER BY i DESC
+               LIMIT $13
+             ) recent
+           )
+         ))
        RETURNING id`,
       [
         indicator.indicatorType,
@@ -613,11 +667,61 @@ export class IntelligenceDatabaseService {
         indicator.lastSeenAt,
         indicator.isActive,
         indicator.expiresAt ?? null,
-        indicator.metadata ? JSON.stringify(indicator.metadata) : null,
+        JSON.stringify(metadata),
+        reportKey,
+        REPORT_KEY_HISTORY,
       ]
     );
 
     return result.rows[0].id as string;
+  }
+
+  /**
+   * Read one page of indicators, in id order, for the audit CLI. Does not
+   * create tables (an audit must not change the schema).
+   */
+  async scanIndicators(afterId: string | null, limit: number): Promise<ThreatIndicatorRecord[]> {
+    const safeLimit = Math.min(Math.max(1, Math.floor(limit)), 5000);
+    const result = await this.pool.query(
+      `SELECT * FROM threat_indicators
+       WHERE ($1::uuid IS NULL OR id > $1::uuid)
+       ORDER BY id
+       LIMIT $2`,
+      [afterId, safeLimit]
+    );
+    return result.rows.map(row => this.mapRowToIndicator(row));
+  }
+
+  /**
+   * Deactivate indicators by id (`is_active = FALSE`), marking each with the
+   * audit rule that matched so the change can be reversed. Never deletes.
+   */
+  async deactivateIndicators(ids: string[], rule: string): Promise<number> {
+    if (ids.length === 0) return 0;
+    const result = await this.pool.query(
+      `UPDATE threat_indicators
+       SET is_active = FALSE,
+           metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+             'deactivatedBy', $2::text,
+             'deactivatedRule', $3::text,
+             'deactivatedAt', NOW()
+           )
+       WHERE id = ANY($1::uuid[]) AND is_active = TRUE`,
+      [ids, AUDIT_DEACTIVATION_MARKER, rule]
+    );
+    return result.rowCount ?? 0;
+  }
+
+  /** Reactivate every indicator the audit CLI deactivated */
+  async restoreAuditDeactivations(): Promise<number> {
+    const result = await this.pool.query(
+      `UPDATE threat_indicators
+       SET is_active = TRUE,
+           metadata = metadata - 'deactivatedBy' - 'deactivatedRule' - 'deactivatedAt'
+       WHERE is_active = FALSE AND metadata->>'deactivatedBy' = $1`,
+      [AUDIT_DEACTIVATION_MARKER]
+    );
+    return result.rowCount ?? 0;
   }
 
   /**
@@ -1041,11 +1145,15 @@ export class IntelligenceDatabaseService {
       verdict === 'confirmed_phishing'
         ? `UPDATE threat_indicators
            SET confidence_score = LEAST(1.0, confidence_score + 0.2),
-               last_seen_at = NOW()
+               last_seen_at = NOW(),
+               metadata = (COALESCE(metadata, '{}'::jsonb) - 'securityCleared')
+                 || '{"securityConfirmed": true}'::jsonb
            WHERE ${sourceFilter}`
         : `UPDATE threat_indicators
            SET confidence_score = GREATEST(0.0, confidence_score - 0.3),
-               is_active = (confidence_score - 0.3) > 0.1
+               is_active = (confidence_score - 0.3) > 0.1,
+               metadata = COALESCE(metadata, '{}'::jsonb)
+                 || '{"securityConfirmed": false, "securityCleared": true}'::jsonb
            WHERE ${sourceFilter}`;
 
     let result;

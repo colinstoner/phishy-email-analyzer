@@ -78,6 +78,42 @@ describe('AgenticToolExecutor', () => {
       expect(db.lookupIndicators).toHaveBeenCalledWith('domain', ['bad-domain.test', 'clean.test']);
     });
 
+    it('labels each known indicator strong or weak, with its role', async () => {
+      const db = makeDb();
+      const seen = {
+        confidenceScore: 0.9,
+        severity: 'high',
+        timesSeen: 7,
+        isActive: true,
+        firstSeenAt: new Date('2026-06-01T00:00:00Z'),
+        lastSeenAt: new Date('2026-06-10T00:00:00Z'),
+      };
+      db.lookupIndicators.mockResolvedValue([
+        {
+          ...seen,
+          indicatorType: 'domain',
+          indicatorValue: 'landing.example.net',
+          metadata: { provenance: 'model_malicious', sourceVerdict: 'phishing', role: 'payload' },
+        },
+        {
+          ...seen,
+          indicatorType: 'domain',
+          indicatorValue: 'mailer.example.org',
+          metadata: { extractionContext: 'redirect_intermediary' },
+        },
+      ] as never);
+      const executor = new AgenticToolExecutor({ db: db as never });
+
+      const result = await executor.execute('lookup_indicators', {
+        indicator_type: 'domain',
+        values: ['landing.example.net', 'mailer.example.org'],
+      });
+
+      const parsed = JSON.parse(result.content);
+      expect(parsed.known[0]).toMatchObject({ strength: 'strong', role: 'payload' });
+      expect(parsed.known[1]).toMatchObject({ strength: 'weak', role: 'infrastructure' });
+    });
+
     it('rejects unsupported indicator types as a tool error, not a throw', async () => {
       const executor = new AgenticToolExecutor({ db: makeDb() as never });
       const result = await executor.execute('lookup_indicators', {

@@ -198,5 +198,141 @@ describe('IntelligenceDatabaseService campaign verdict cache', () => {
       expect(fallbackSql).not.toContain('campaign_signature');
       expect(fallbackSql).toContain("metadata->>'sourceAnalysisId' = $1");
     });
+
+    it('marks confirmed indicators so they count as strong matches', async () => {
+      mockPool.query.mockResolvedValueOnce({ rowCount: 1 });
+      await db.applyFeedbackToIndicators('analysis-1', 'confirmed_phishing');
+      const [sql] = mockPool.query.mock.calls[0];
+      expect(sql).toContain('"securityConfirmed": true');
+      expect(sql).toContain("- 'securityCleared'");
+    });
+
+    it('marks cleared indicators so they can never count as strong', async () => {
+      mockPool.query.mockResolvedValueOnce({ rowCount: 1 });
+      await db.applyFeedbackToIndicators('analysis-1', 'false_positive');
+      const [sql] = mockPool.query.mock.calls[0];
+      expect(sql).toContain('"securityCleared": true');
+    });
+  });
+});
+
+describe('IntelligenceDatabaseService indicators', () => {
+  let db: IntelligenceDatabaseService;
+
+  const INDICATOR = {
+    indicatorType: 'domain' as const,
+    indicatorValue: 'landing.example.net',
+    indicatorHash: 'ignored',
+    confidenceScore: 0.8,
+    severity: 'high' as const,
+    timesSeen: 1,
+    firstSeenAt: new Date('2026-11-01T00:00:00Z'),
+    lastSeenAt: new Date('2026-11-01T00:00:00Z'),
+    isActive: true,
+    metadata: { role: 'payload', provenance: 'model_malicious', sourceVerdict: 'phishing' },
+  };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockClient.query.mockResolvedValue({});
+    db = new IntelligenceDatabaseService('postgresql://test');
+  });
+
+  describe('upsertIndicator', () => {
+    it('counts distinct report keys only, with parameterized values', async () => {
+      mockPool.query.mockResolvedValueOnce({ rows: [{ id: 'ind-1' }] });
+
+      const id = await db.upsertIndicator(INDICATOR, { reportKey: 'campaign-key-1' });
+
+      expect(id).toBe('ind-1');
+      const [sql, params] = mockPool.query.mock.calls[0];
+      // A key already recorded leaves times_seen unchanged
+      expect(sql).toContain(
+        "WHEN threat_indicators.metadata->'reportKeys' @> jsonb_build_array($12::text)"
+      );
+      expect(sql).toContain('THEN threat_indicators.times_seen');
+      // A legacy row (no report keys) restarts at 1, keeping its old count
+      expect(sql).toContain("WHEN threat_indicators.metadata->'reportKeys' IS NULL THEN 1");
+      expect(sql).toContain("'legacyTimesSeen'");
+      // A recorded sender/payload role is never downgraded
+      expect(sql).toContain("threat_indicators.metadata->>'role' IN ('sender', 'payload')");
+      expect(sql).not.toContain('landing.example.net');
+      expect(params[1]).toBe('landing.example.net');
+      expect(JSON.parse(params[10] as string)).toEqual({
+        ...INDICATOR.metadata,
+        reportKeys: ['campaign-key-1'],
+      });
+      expect(params[11]).toBe('campaign-key-1');
+      expect(params[12]).toBe(50);
+    });
+
+    it('treats every unkeyed call as a distinct report', async () => {
+      mockPool.query
+        .mockResolvedValueOnce({ rows: [{ id: 'ind-1' }] })
+        .mockResolvedValueOnce({ rows: [{ id: 'ind-1' }] });
+
+      await db.upsertIndicator(INDICATOR);
+      await db.upsertIndicator(INDICATOR);
+
+      const first = mockPool.query.mock.calls[0][1][11] as string;
+      const second = mockPool.query.mock.calls[1][1][11] as string;
+      expect(first).toMatch(/^unkeyed:/);
+      expect(first).not.toBe(second);
+    });
+  });
+
+  describe('audit operations', () => {
+    it('scans a page in id order without creating tables', async () => {
+      mockPool.query.mockResolvedValueOnce({
+        rows: [
+          {
+            id: '00000000-0000-4000-8000-000000000001',
+            indicator_type: 'domain',
+            indicator_value: 'landing.example.net',
+            indicator_hash: 'h',
+            confidence_score: '0.8000',
+            severity: 'high',
+            times_seen: 3,
+            is_active: true,
+            metadata: null,
+          },
+        ],
+      });
+
+      const rows = await db.scanIndicators(null, 100);
+
+      expect(rows).toHaveLength(1);
+      expect(rows[0].confidenceScore).toBe(0.8);
+      expect(mockPool.connect).not.toHaveBeenCalled();
+      const [sql, params] = mockPool.query.mock.calls[0];
+      expect(sql).toContain('ORDER BY id');
+      expect(params).toEqual([null, 100]);
+    });
+
+    it('deactivates by id with a reversible marker, never deleting', async () => {
+      mockPool.query.mockResolvedValueOnce({ rowCount: 2 });
+
+      const count = await db.deactivateIndicators(['a', 'b'], 'expired');
+
+      expect(count).toBe(2);
+      const [sql, params] = mockPool.query.mock.calls[0];
+      expect(sql).toContain('SET is_active = FALSE');
+      expect(sql).not.toMatch(/DELETE/i);
+      expect(params).toEqual([['a', 'b'], 'indicator-audit', 'expired']);
+    });
+
+    it('does nothing for an empty id list', async () => {
+      expect(await db.deactivateIndicators([], 'expired')).toBe(0);
+      expect(mockPool.query).not.toHaveBeenCalled();
+    });
+
+    it('restores only rows the audit deactivated', async () => {
+      mockPool.query.mockResolvedValueOnce({ rowCount: 4 });
+
+      expect(await db.restoreAuditDeactivations()).toBe(4);
+      const [sql, params] = mockPool.query.mock.calls[0];
+      expect(sql).toContain('SET is_active = TRUE');
+      expect(params).toEqual(['indicator-audit']);
+    });
   });
 });

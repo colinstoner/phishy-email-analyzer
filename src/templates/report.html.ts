@@ -58,6 +58,10 @@ export interface ReportOptions {
     riskScore: number;
     riskLevel: string;
     reasons: string[];
+    /** Confidence label for the outcome (the model's own certainty when it decided) */
+    confidence?: string;
+    /** What decided the outcome; drives the confidence line's wording */
+    confidenceBasis?: 'model' | 'security_team' | 'threat_intel' | 'unassessed';
   };
   /**
    * Who reads this particular email, when it is not the usual combined one
@@ -82,6 +86,27 @@ export interface ReportOptions {
   silentReport?: {
     reporter: string;
   };
+}
+
+/**
+ * The confidence line under the risk score. The model's certainty in its
+ * verdict when the model decided; when a security-team ruling or a known
+ * threat decided, say that instead of a number. Nothing when unassessed (the
+ * banner already says the email was not checked) or not provided.
+ */
+function confidenceText(risk: NonNullable<ReportOptions['risk']>): string | undefined {
+  switch (risk.confidenceBasis) {
+    case 'security_team':
+      return "Decided by your security team's review";
+    case 'threat_intel':
+      return 'Based on a known threat from earlier reports';
+    case 'model':
+      return risk.confidence && risk.confidence !== 'Unknown' && risk.confidence !== 'N/A'
+        ? normalizeConfidence(risk.confidence)
+        : undefined;
+    default:
+      return undefined;
+  }
 }
 
 /** Lead line for a report sent to the security team about a silent button report */
@@ -459,6 +484,10 @@ function buildAnalysisSection(analysis: AnalysisResult, options?: ReportOptions)
       html += `<p class="risk-score">Risk score: <strong>not assessed</strong></p>`;
     } else {
       html += `<p class="risk-score">Risk score: <strong>${options.risk.riskScore}/100</strong> (${escapeHtml(options.risk.riskLevel)})</p>`;
+      const confidence = confidenceText(options.risk);
+      if (confidence) {
+        html += `<p class="risk-score">Confidence: <strong>${escapeHtml(confidence)}</strong></p>`;
+      }
     }
     html += `</div>`;
     if (display?.plain) {
@@ -572,6 +601,10 @@ export function buildPlainTextReport(
       lines.push('Risk score: not assessed');
     } else {
       lines.push(`Risk score: ${options.risk.riskScore}/100 (${options.risk.riskLevel})`);
+      const confidence = confidenceText(options.risk);
+      if (confidence) {
+        lines.push(`Confidence: ${confidence}`);
+      }
     }
     if (display?.plain) {
       lines.push(`What this means: ${display.plain}`);

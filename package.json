@@ -11,6 +11,7 @@
   "scripts": {
     "try": "npm run build && node dist/cli/try.js",
     "graph:probe": "npm run --silent build && node dist/cli/graph-probe.js",
+    "indicators:audit": "npm run --silent build && node dist/cli/indicator-audit.js",
     "build": "tsc",
     "build:watch": "tsc --watch",
     "clean": "rm -rf dist",
