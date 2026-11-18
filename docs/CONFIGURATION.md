@@ -139,6 +139,73 @@ Requires the intelligence database and `migrations/002_analysis_feedback.sql`.
 |----------|---------|-------------|
 | `PHISHY_EMAIL_COMMANDS_ENABLED` | `false` | Process security-team replies as commands |
 
+### Microsoft Graph (Optional)
+
+Phishy can authenticate to Microsoft Graph on your own Microsoft 365 tenant. This is a **foundation**: enabling it does not change how emails are analyzed — no feature calls Graph yet. It exists so that later features (retrieving a reporter's original message, checking who else received an email) have a safe, already-reviewed way to reach the tenant. Leave it off unless you are preparing for those. See [ARCHITECTURE.md](ARCHITECTURE.md#microsoft-graph-optional-foundation) for the trust rules.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PHISHY_GRAPH_ENABLED` | `false` | Enable Microsoft Graph access |
+| `PHISHY_GRAPH_TENANT_ID` | - | Directory (tenant) ID (GUID), or a verified domain of the tenant. Required when enabled |
+| `PHISHY_GRAPH_READ_CLIENT_ID` | - | Application (client) ID (GUID) of the read-only app registration. Required when enabled |
+| `PHISHY_GRAPH_READ_CERTIFICATE` | - | Secrets Manager ARN (recommended) or inline PEM holding the app's private key and certificate. Required when enabled |
+
+File configuration uses the same names: `graph.enabled`, `graph.tenantId`, `graph.read.clientId`, `graph.read.certificate`. With `enabled` set, a missing or malformed value fails configuration at startup; with it unset, the other values are ignored.
+
+Authentication is **certificate-only** — there is no client-secret option. Phishy signs a five-minute JWT assertion with the private key and exchanges it for an access token, which is cached in memory and refreshed before it expires. The certificate thumbprint is derived from the certificate itself; you do not configure it.
+
+#### The certificate
+
+Create a key pair and a self-signed certificate (an internal CA works too). The key must be RSA and must not be passphrase-protected:
+
+```bash
+openssl req -x509 -newkey rsa:2048 -sha256 -days 365 -nodes \
+  -keyout phishy-graph-read.key -out phishy-graph-read.crt \
+  -subj "/CN=phishy-graph-read"
+```
+
+Upload **only** `phishy-graph-read.crt` (the public certificate) to Entra. Store the private key and certificate together in Secrets Manager, in either form:
+
+```bash
+# 1. PEM bundle: private key followed by certificate
+cat phishy-graph-read.key phishy-graph-read.crt > bundle.pem
+aws secretsmanager create-secret --name phishy/graph-read --secret-string file://bundle.pem
+
+# 2. JSON: {"privateKey": "-----BEGIN PRIVATE KEY-----\n...", "certificate": "-----BEGIN CERTIFICATE-----\n..."}
+```
+
+Then set `PHISHY_GRAPH_READ_CERTIFICATE` to the secret's ARN and delete the local key file. The Lambda execution role needs `secretsmanager:GetSecretValue` on that secret. The secret is read on the first Graph call, not at startup, and never logged.
+
+Inline PEM (the bundle itself as the setting's value, with newlines or literal `\n`) is accepted for local development. Do not use it in a deployed environment: Lambda environment variables are visible to anyone who can read the function's configuration.
+
+Phishy refuses an expired certificate and logs a warning when one is within 30 days of expiry. To rotate, upload the new certificate to the app registration, update the secret, then remove the old certificate from Entra.
+
+#### Entra app registration
+
+1. **Register a single-tenant app.** Microsoft Entra admin center → *App registrations* → *New registration*. Choose *Accounts in this organizational directory only*. No redirect URI. Note the **Application (client) ID** and **Directory (tenant) ID**.
+2. **Upload the certificate.** *Certificates & secrets* → *Certificates* → *Upload certificate* → select the `.crt` file. Do **not** create a client secret.
+3. **Grant application permissions, with admin consent.** *API permissions* → *Add a permission* → *Microsoft Graph* → *Application permissions*. Add only what the features you enable require (each feature documents its own; the foundation needs none), then *Grant admin consent*. Use read-only permissions on this registration — anything that writes to the tenant belongs to a separate app registration with its own certificate.
+4. **Scope mailbox permissions in Exchange Online, not Entra.** A mailbox permission such as `Mail.Read` granted in Entra applies to **every mailbox in the tenant**. To limit Phishy to the mailboxes it should see, grant the mailbox permission through Exchange Online [RBAC for Applications](https://learn.microsoft.com/en-us/exchange/permissions-exo/application-rbac) instead:
+
+   ```powershell
+   # IDs come from Entra > Enterprise applications (not App registrations)
+   New-ServicePrincipal -AppId <application-id> -ObjectId <enterprise-app-object-id> -DisplayName "Phishy Graph (read)"
+   New-ManagementScope -Name "Phishy reporters" -RecipientRestrictionFilter "<filter selecting the mailboxes>"
+   New-ManagementRoleAssignment -App <application-id> -Role "Application Mail.Read" -CustomResourceScope "Phishy reporters"
+   Test-ServicePrincipalAuthorization -Identity <application-id> -Resource <a-mailbox>
+   ```
+
+   > **An unscoped grant in Entra defeats the scoping.** Effective access is the *union* of the Entra grant and the Exchange RBAC assignment. If `Mail.Read` is also consented tenant-wide in Entra, the app can read every mailbox regardless of the management scope. Grant mailbox permissions in one place only — Exchange RBAC — and remove the same permission from the app's Entra API permissions. `Test-ServicePrincipalAuthorization` does not show Entra grants, so check both. Changes can take 30 minutes to 2 hours to take effect.
+
+#### Network
+
+The Lambda needs outbound HTTPS (TCP 443) to:
+
+- `login.microsoftonline.com` — token requests
+- `graph.microsoft.com` — Graph API
+
+If the function runs in a VPC, that means a NAT gateway (or equivalent egress) and security-group/egress-filter rules allowing those hosts; there is no VPC endpoint for them. Phishy only ever contacts these two hosts for Graph: the client's base URL is fixed, it refuses redirects, and it will not follow a paging link to any other origin.
+
 ### AWS Secrets Manager Integration
 
 Instead of storing database credentials in environment variables, you can use AWS Secrets Manager:
@@ -154,6 +221,8 @@ PHISHY_DB_CONNECTION=arn:aws:secretsmanager:us-west-2:123456789:secret:phishy/db
 ```
 
 The Lambda execution role needs `secretsmanager:GetSecretValue` permission for the secret ARN.
+
+The Microsoft Graph certificate (`PHISHY_GRAPH_READ_CERTIFICATE`) follows the same convention — a Secrets Manager ARN or the value itself — see [Microsoft Graph](#microsoft-graph-optional).
 
 ### Logging
 

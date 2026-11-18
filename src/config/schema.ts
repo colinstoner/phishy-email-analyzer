@@ -129,6 +129,74 @@ const CampaignCacheConfigSchema = z.object({
 });
 
 /**
+ * Microsoft Graph configuration schema
+ * Optional, app-only access to the organization's own Microsoft 365 tenant.
+ * One tenant; each kind of access has its own app registration, authenticated
+ * with a certificate (never a client secret). Only the `read` registration
+ * exists today — a `write` registration, when added, is a sibling key with
+ * its own clientId and certificate so the two can never share a token.
+ *
+ * Formats are enforced only when enabled, so stray or empty values cannot
+ * break a deployment that has Graph switched off.
+ */
+const GRAPH_GUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+const GRAPH_TENANT_DOMAIN = /^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$/;
+
+const GraphCredentialConfigSchema = z.object({
+  /** Application (client) ID of the app registration */
+  clientId: z.string().optional(),
+  /** Secrets Manager ARN, or inline PEM (private key + certificate) */
+  certificate: z.string().optional(),
+});
+
+const GraphConfigSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    /** Directory (tenant) ID, or a verified domain of the tenant */
+    tenantId: z.string().optional(),
+    /** App registration holding read-only application permissions */
+    read: GraphCredentialConfigSchema.optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (!data.enabled) {
+      return;
+    }
+    if (!data.tenantId) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['tenantId'],
+        message: 'graph.tenantId is required when graph.enabled is true',
+      });
+    } else if (!GRAPH_GUID.test(data.tenantId) && !GRAPH_TENANT_DOMAIN.test(data.tenantId)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['tenantId'],
+        message: 'graph.tenantId must be a directory (tenant) GUID or a domain name',
+      });
+    }
+    if (!data.read?.clientId) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['read', 'clientId'],
+        message: 'graph.read.clientId is required when graph.enabled is true',
+      });
+    } else if (!GRAPH_GUID.test(data.read.clientId)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['read', 'clientId'],
+        message: 'graph.read.clientId must be an application (client) GUID',
+      });
+    }
+    if (!data.read?.certificate?.trim()) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['read', 'certificate'],
+        message: 'graph.read.certificate is required when graph.enabled is true',
+      });
+    }
+  });
+
+/**
  * Complete Phishy configuration schema
  */
 export const PhishyConfigSchema = z.object({
@@ -142,6 +210,7 @@ export const PhishyConfigSchema = z.object({
   campaignCache: CampaignCacheConfigSchema.optional(),
   commands: CommandsConfigSchema.optional(),
   agentic: AgenticConfigSchema.optional(),
+  graph: GraphConfigSchema.optional(),
   logLevel: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   version: z.string().optional(),
 });
@@ -161,6 +230,8 @@ export type CampaignAlertConfig = z.infer<typeof CampaignAlertConfigSchema>;
 export type CampaignCacheConfig = z.infer<typeof CampaignCacheConfigSchema>;
 export type CommandsConfig = z.infer<typeof CommandsConfigSchema>;
 export type AgenticConfig = z.infer<typeof AgenticConfigSchema>;
+export type GraphConfig = z.infer<typeof GraphConfigSchema>;
+export type GraphCredentialConfig = z.infer<typeof GraphCredentialConfigSchema>;
 
 /**
  * Partial configuration for merging
