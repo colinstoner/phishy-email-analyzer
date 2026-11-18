@@ -40,9 +40,14 @@ import {
   SenderRelationshipClass,
 } from '../../types';
 import { createLogger } from '../../utils/logger';
-import { emitSenderHistoryMetric, SenderHistoryOutcome } from '../../utils/metrics';
+import {
+  emitSenderHistoryMetric,
+  SenderHistoryMetric,
+  SenderHistoryOutcome,
+} from '../../utils/metrics';
 import { domainMatches } from '../../utils/validation';
 import { GraphClient } from './graph.client';
+import { IP_SHAPE, MAX_REPORTED_BURST_IPS } from './graph.limits';
 import { createGraphReadClient } from './graph.credential';
 import { GraphError } from './graph.errors';
 import { BoundedResult } from './operations.common';
@@ -136,10 +141,7 @@ export const MAX_CLAIMED_AGE_MS = 7 * DAY_MS;
 /** Margin inside the service's 90-day horizon */
 const TRACE_AGE_MARGIN_MS = HOUR_MS;
 
-/** Most burst sending IPs carried for the security team's copy of the report */
-export const MAX_REPORTED_BURST_IPS = 20;
-/** IPv4 or IPv6 text and nothing else: the value comes from mail flow */
-const IP_SHAPE = /^(?=.*[.:])[0-9A-Fa-f:.]{2,45}$/;
+export { MAX_REPORTED_BURST_IPS };
 
 const MAX_HEADER_LENGTH = 1000;
 const MAX_ADDRESS_LENGTH = 254;
@@ -197,6 +199,19 @@ export function claimedSenderAddress(headerValue: unknown): string | undefined {
     return undefined;
   }
   return address;
+}
+
+/** True unless the address is on one of the organization's own domains or is a safe sender */
+export function isExternalSender(
+  address: string,
+  safeDomains: string[],
+  safeSenders: string[]
+): boolean {
+  const domain = address.slice(address.indexOf('@') + 1);
+  return (
+    !safeDomains.some(safe => domainMatches(domain, safe)) &&
+    !safeSenders.some(safe => safe.toLowerCase() === address)
+  );
 }
 
 /**
@@ -551,6 +566,22 @@ function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
+/** The two claimed values one lookup reads. Both are hostile text. */
+export interface SenderLookupInput {
+  /** The forwarded block's `From:` value */
+  claimedFrom: unknown;
+  /** The forwarded block's date, when it has one */
+  claimedDate: unknown;
+  /** A tighter deadline than the configured one, when the caller has less time */
+  budgetMs?: number;
+}
+
+/** One lookup's facts, if any, and the metric line that describes it (not yet emitted) */
+export interface SenderLookupResult {
+  facts?: SenderHistoryFacts;
+  metric: SenderHistoryMetric;
+}
+
 export class SenderHistoryService {
   private readonly cache = new Map<string, CacheEntry>();
   /** Start times of recent trace requests, for the per-instance allowance */
@@ -573,38 +604,54 @@ export class SenderHistoryService {
    * reason there are no facts is reported as a metric and `undefined`.
    */
   async lookupForEmail(emailData: ExtractedEmailData): Promise<SenderHistoryFacts | undefined> {
+    const { facts, metric } = await this.lookupSender(() => ({
+      claimedFrom: emailData.forwardedHeaders?.['Original-From'],
+      claimedDate:
+        emailData.forwardedHeaders?.['Original-Date'] ??
+        emailData.forwardedHeaders?.['Original-Sent'],
+    }));
+    emitSenderHistoryMetric(metric);
+    return facts;
+  }
+
+  /**
+   * The lookup itself, without emitting its metric: the caller does that
+   * (the Graph broker hands the metric back to the main function, which
+   * emits it once). Never throws.
+   */
+  async lookupSender(read: () => SenderLookupInput): Promise<SenderLookupResult> {
     try {
-      return await this.lookup(emailData);
+      return await this.lookup(read());
     } catch (error) {
       // Nothing below is expected to throw; this keeps a defect here from
       // ever costing the reporter their analysis
       logger.warn('Sender history skipped: unexpected failure', {
         error: error instanceof Error ? error.name : 'unknown',
       });
-      emitSenderHistoryMetric({ outcome: 'error', durationMs: 0 });
-      return undefined;
+      return { metric: { outcome: 'error', durationMs: 0 } };
     }
   }
 
-  private async lookup(emailData: ExtractedEmailData): Promise<SenderHistoryFacts | undefined> {
+  private async lookup(input: SenderLookupInput): Promise<SenderLookupResult> {
     const startedAt = this.now();
     const stats: LookupStats = { succeeded: 0, forbiddenRetries: 0 };
+    const budgetMs = Math.min(this.settings.budgetMs, input.budgetMs ?? Infinity);
     const finish = (
       outcome: SenderHistoryOutcome,
       facts?: SenderHistoryFacts
-    ): SenderHistoryFacts | undefined => {
-      emitSenderHistoryMetric({
+    ): SenderLookupResult => ({
+      facts,
+      metric: {
         outcome,
         durationMs: Math.max(0, this.now() - startedAt),
         classification: facts?.classification,
         truncated: facts?.truncated,
         forbiddenRetries: stats.forbiddenRetries,
         filterMismatch: stats.filterMismatch,
-      });
-      return facts;
-    };
+      },
+    });
 
-    const address = claimedSenderAddress(emailData.forwardedHeaders?.['Original-From']);
+    const address = claimedSenderAddress(input.claimedFrom);
     if (!address || !this.isExternal(address)) {
       return finish('skipped');
     }
@@ -624,11 +671,7 @@ export class SenderHistoryService {
       TRACE_MAX_AGE_MS - TRACE_AGE_MARGIN_MS
     );
     const startMs = nowMs - lookbackMs;
-    const emailMs = resolveEmailTime(
-      emailData.forwardedHeaders?.['Original-Date'] ??
-        emailData.forwardedHeaders?.['Original-Sent'],
-      nowMs
-    );
+    const emailMs = resolveEmailTime(input.claimedDate, nowMs);
     const burstStartMs = Math.max(startMs, emailMs - this.settings.burstWindowHours * HOUR_MS);
     const windows = splitTraceWindows(startMs, nowMs);
 
@@ -645,13 +688,14 @@ export class SenderHistoryService {
       timer = setTimeout(() => {
         controller.abort();
         reject(new BudgetExceededError());
-      }, this.settings.budgetMs);
+      }, budgetMs);
     });
 
     try {
       const collected = this.collect(address, windows, {
         burstStartMs,
         nowMs,
+        budgetMs,
         signal: controller.signal,
         stats,
       });
@@ -684,18 +728,14 @@ export class SenderHistoryService {
       return finish('ok', facts);
     } catch (error) {
       controller.abort();
-      return finish(this.classifyFailure(error, stats));
+      return finish(this.classifyFailure(error, stats, budgetMs));
     } finally {
       clearTimeout(timer);
     }
   }
 
   private isExternal(address: string): boolean {
-    const domain = address.slice(address.indexOf('@') + 1);
-    return (
-      !this.settings.safeDomains.some(safe => domainMatches(domain, safe)) &&
-      !this.settings.safeSenders.some(safe => safe.toLowerCase() === address)
-    );
+    return isExternalSender(address, this.settings.safeDomains, this.settings.safeSenders);
   }
 
   /** Count the lookup against this instance's allowance, or refuse it */
@@ -727,12 +767,18 @@ export class SenderHistoryService {
   private async collect(
     address: string,
     windows: TraceWindow[],
-    context: { burstStartMs: number; nowMs: number; signal: AbortSignal; stats: LookupStats }
+    context: {
+      burstStartMs: number;
+      nowMs: number;
+      budgetMs: number;
+      signal: AbortSignal;
+      stats: LookupStats;
+    }
   ): Promise<Pick<SenderHistoryInput, 'inbound' | 'outbound'>> {
     const options: TraceOptions = {
       maxItems: TRACE_ROWS_PER_WINDOW,
       maxPages: TRACE_PAGES_PER_WINDOW,
-      timeoutMs: this.settings.budgetMs,
+      timeoutMs: context.budgetMs,
       signal: context.signal,
       now: new Date(context.nowMs),
     };
@@ -813,11 +859,13 @@ export class SenderHistoryService {
   }
 
   /** Map a failure to a metric outcome and log it without any request data */
-  private classifyFailure(error: unknown, stats: LookupStats): SenderHistoryOutcome {
+  private classifyFailure(
+    error: unknown,
+    stats: LookupStats,
+    budgetMs: number
+  ): SenderHistoryOutcome {
     if (error instanceof BudgetExceededError) {
-      logger.warn('Sender history skipped: time budget exceeded', {
-        budgetMs: this.settings.budgetMs,
-      });
+      logger.warn('Sender history skipped: time budget exceeded', { budgetMs });
       return 'timeout';
     }
     if (error instanceof GraphError) {

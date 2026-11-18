@@ -192,14 +192,16 @@ To find out which Graph calls work in your tenant — with which permissions and
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PHISHY_GRAPH_ENABLED` | `false` | Enable Microsoft Graph access |
-| `PHISHY_GRAPH_TENANT_ID` | - | Directory (tenant) ID (GUID), or a verified domain of the tenant. Required when enabled |
-| `PHISHY_GRAPH_READ_CLIENT_ID` | - | Application (client) ID (GUID) of the read-only app registration. Required when enabled |
-| `PHISHY_GRAPH_READ_CERTIFICATE` | - | Secrets Manager ARN (recommended) or inline PEM holding the app's private key and certificate. Required when enabled |
+| `PHISHY_GRAPH_MODE` | `direct` | `direct`: this function calls Graph itself. `broker`: it invokes the Graph broker function instead and holds no Graph credential. See [Graph broker](#graph-broker-optional) |
+| `PHISHY_GRAPH_BROKER_FUNCTION` | - | Name or ARN of the Graph broker function. Required when the mode is `broker` |
+| `PHISHY_GRAPH_TENANT_ID` | - | Directory (tenant) ID (GUID), or a verified domain of the tenant. Required when enabled (in `broker` mode: on the broker function, not the main function) |
+| `PHISHY_GRAPH_READ_CLIENT_ID` | - | Application (client) ID (GUID) of the read-only app registration. Required when enabled (in `broker` mode: on the broker function only) |
+| `PHISHY_GRAPH_READ_CERTIFICATE` | - | Secrets Manager ARN (recommended) or inline PEM holding the app's private key and certificate. Required when enabled (in `broker` mode: on the broker function only) |
 | `PHISHY_GRAPH_ORIGINAL_FETCH_ENABLED` | `false` | Before analysis, read the original message's real headers from the reporter's own mailbox. Has effect only when `PHISHY_GRAPH_ENABLED` is also `true`. See [Original-message lookup](#original-message-lookup) |
 
 Blast radius has its own variables, listed under [Blast radius](#blast-radius-optional).
 
-File configuration uses the same names: `graph.enabled`, `graph.tenantId`, `graph.read.clientId`, `graph.read.certificate`, `graph.originalFetch.enabled`. With `graph.enabled` set, a missing or malformed value fails configuration at startup; with it unset, the other values are ignored.
+File configuration uses the same names: `graph.enabled`, `graph.mode`, `graph.brokerFunctionName`, `graph.tenantId`, `graph.read.clientId`, `graph.read.certificate`, `graph.originalFetch.enabled`. With `graph.enabled` set, a missing or malformed value fails configuration at startup; with it unset, the other values are ignored.
 
 Authentication is **certificate-only** — there is no client-secret option. Phishy signs a five-minute JWT assertion with the private key and exchanges it for an access token, which is cached in memory and refreshed before it expires. The certificate thumbprint is derived from the certificate itself; you do not configure it.
 
@@ -223,7 +225,7 @@ aws secretsmanager create-secret --name phishy/graph-read --secret-string file:/
 # 2. JSON: {"privateKey": "-----BEGIN PRIVATE KEY-----\n...", "certificate": "-----BEGIN CERTIFICATE-----\n..."}
 ```
 
-Then set `PHISHY_GRAPH_READ_CERTIFICATE` to the secret's ARN and delete the local key file. The Lambda execution role needs `secretsmanager:GetSecretValue` on that secret. The secret is read on the first Graph call, not at startup, and never logged.
+Then set `PHISHY_GRAPH_READ_CERTIFICATE` to the secret's ARN and delete the local key file. The execution role of the function that calls Graph (the main function in `direct` mode, the broker in `broker` mode) needs `secretsmanager:GetSecretValue` on that secret. The secret is read on the first Graph call, not at startup, and never logged.
 
 Inline PEM (the bundle itself as the setting's value, with newlines or literal `\n`) is accepted for local development. Do not use it in a deployed environment: Lambda environment variables are visible to anyone who can read the function's configuration.
 
@@ -248,12 +250,60 @@ Phishy refuses an expired certificate and logs a warning when one is within 30 d
 
 #### Network
 
-The Lambda needs outbound HTTPS (TCP 443) to:
+The function that calls Graph needs outbound HTTPS (TCP 443) to:
 
 - `login.microsoftonline.com` — token requests
 - `graph.microsoft.com` — Graph API
 
-If the function runs in a VPC, that means a NAT gateway (or equivalent egress) and security-group/egress-filter rules allowing those hosts; there is no VPC endpoint for them. Phishy only ever contacts these two hosts for Graph: the client's base URL is fixed, it refuses redirects, and it will not follow a paging link to any other origin.
+There is no VPC endpoint for those hosts. If the main function runs in a VPC without internet access, there are two ways to give Graph a route, and the second is the recommended one:
+
+1. `direct` mode with a NAT gateway (or equivalent egress) and security-group/egress-filter rules allowing those hosts. This gives the function that parses hostile email a route to the internet.
+2. `broker` mode: the main function stays without an internet route and invokes the [Graph broker](#graph-broker-optional), a second function outside the VPC.
+
+Phishy only ever contacts these two hosts for Graph: the client's base URL is fixed, it refuses redirects, and it will not follow a paging link to any other origin.
+
+#### Graph broker (Optional)
+
+With `PHISHY_GRAPH_MODE=broker` the main function makes no Graph request. It invokes a second Lambda function, the Graph broker, which holds the read certificate and runs the lookups. The main function then needs no tenant ID, client ID or certificate (any it is given are dropped when configuration is loaded, and inline certificate material logs a warning), no route to Microsoft, and no access to the certificate secret. The design and its trust rules are in [ARCHITECTURE.md](ARCHITECTURE.md#graph-broker).
+
+**Main function**
+
+| Variable | Value |
+|----------|-------|
+| `PHISHY_GRAPH_ENABLED` | `true` |
+| `PHISHY_GRAPH_MODE` | `broker` |
+| `PHISHY_GRAPH_BROKER_FUNCTION` | the broker's function name or ARN |
+| the feature flags and their settings | as in `direct` mode. They decide whether the main function asks at all, and its `PHISHY_GRAPH_SENDER_HISTORY_BUDGET_MS` / `PHISHY_GRAPH_BLAST_RADIUS_TIME_BUDGET_MS` are how long it waits |
+
+Its execution role needs `lambda:InvokeFunction` on the broker function, and only on it. In a VPC without internet access it also needs a way to reach the Lambda API: an interface VPC endpoint for `com.amazonaws.<region>.lambda`.
+
+**Broker function**
+
+Handler `graph-broker.handler` when bundled from `src/graph-broker.ts` (or `dist/handlers/graph.broker.handler.handler` from the `tsc` build). Deploy it **outside** the VPC, with no trigger: no function URL, API Gateway route or event source. It is invoked only by the main function.
+
+| Variable | Value |
+|----------|-------|
+| `PHISHY_GRAPH_ENABLED` | `true` |
+| `PHISHY_GRAPH_TENANT_ID`, `PHISHY_GRAPH_READ_CLIENT_ID`, `PHISHY_GRAPH_READ_CERTIFICATE` | the read app registration, as above |
+| the feature flags and their settings | the broker refuses an operation whose feature is off in its **own** configuration, so set each flag on both functions. The broker's lookback, mailbox cap and budgets are the ones that apply to the Graph work; a caller's budget can only shorten them |
+| `LOG_LEVEL` | optional |
+
+The broker reads nothing else: it has no AI, email, notification, storage or database settings, and it ignores `PHISHY_GRAPH_MODE`. (`PHISHY_CONFIG_S3` works as it does for the main function if you keep `graph.*` in a file, and then its role needs to read that object.) Its execution role needs CloudWatch Logs and `secretsmanager:GetSecretValue` on the certificate secret, nothing more.
+
+Sizing:
+
+- **Timeout**: at least the blast-radius time budget plus 20 seconds (the lookup keeps 20 s of the function's remaining time in reserve). 180 seconds covers every allowed budget.
+- **Memory**: 512 MB is ample.
+- **Concurrency**: consider a small reserved concurrency (for example 5). Sender history keeps a per-instance allowance of 60 message-trace requests per 5 minutes against a tenant-wide limit of 100, so the number of broker instances is what bounds Phishy's share of that quota. An invocation that Lambda throttles for this reason fails open like any other broker failure.
+
+**Behaviour.** Nothing changes in what the features do or report. A broker that times out, is throttled, crashes, refuses or returns something malformed or oversized is treated exactly as a Graph failure is: the original-message lookup's `Outcome=error`, sender history's `Outcome=timeout` or `error`, or a blast-radius note to the security team; the analysis and the reports proceed. Each lookup also emits:
+
+| Metric | Dimensions | Meaning |
+|--------|-----------|---------|
+| `GraphBrokerCalls` | `Operation` = `original_message_lookup` / `sender_history_lookup` / `blast_radius_lookup`; `Outcome` = `ok` / `refused` / `timeout` / `throttled` / `invoke_error` / `function_error` / `oversized` / `malformed` / `invalid_request` | One per invocation of the broker. Anything but `ok` is worth an alarm: `invoke_error` usually means a missing `lambda:InvokeFunction` permission or no route to the Lambda API; `refused` means the broker's own configuration is wrong or a feature flag is off there (the main function's log line `Graph broker call did not produce a result` carries the broker's reason word) |
+| `GraphBrokerCallDurationMs` | same | Round-trip time of the invocation |
+
+The features' own metrics (`OriginalFetchCount`, `SenderHistoryLookups`, `BlastRadius*`) are emitted by the main function in both modes, so existing dashboards and alarms keep working. Cached answers (`cache_hit`, `BlastRadiusCacheHits`) now come from the broker's instances, which are shared by every main-function instance.
 
 #### Blast radius (Optional)
 

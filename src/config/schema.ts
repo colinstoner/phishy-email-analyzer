@@ -219,57 +219,127 @@ const GraphSenderHistoryConfigSchema = z.object({
   fanoutMultiplier: z.number().min(1).max(100).default(3),
 });
 
-const GraphConfigSchema = z
-  .object({
-    enabled: z.boolean().default(false),
-    /** Directory (tenant) ID, or a verified domain of the tenant */
-    tenantId: z.string().optional(),
-    /** App registration holding read-only application permissions */
-    read: GraphCredentialConfigSchema.optional(),
-    /** Fetch the original message's headers from the reporter's mailbox */
-    originalFetch: GraphOriginalFetchConfigSchema.optional(),
-    /** Who-else-received-it lookup for malicious verdicts */
-    blastRadius: GraphBlastRadiusConfigSchema.optional(),
-    senderHistory: GraphSenderHistoryConfigSchema.optional(),
-  })
-  .superRefine((data, ctx) => {
-    if (!data.enabled) {
-      return;
+/**
+ * Lambda function name, alias-qualified name or ARN: the only way the main
+ * function addresses the Graph broker. Checked so a stray value cannot turn
+ * the invocation into anything else.
+ */
+const LAMBDA_FUNCTION_REFERENCE = /^[A-Za-z0-9:_-]{1,170}$/;
+
+const GraphConfigFields = z.object({
+  enabled: z.boolean().default(false),
+  /**
+   * Where Graph requests are made. `direct` (the default when unset): by this function, which then
+   * holds the read credential and needs a route to Microsoft. `broker`: by a
+   * second function (the Graph broker) that this one invokes; this function
+   * then holds no Graph credential and never contacts Microsoft.
+   */
+  mode: z.enum(['direct', 'broker']).optional(),
+  /** Name or ARN of the Graph broker function (required when mode is `broker`) */
+  brokerFunctionName: z.string().optional(),
+  /** Directory (tenant) ID, or a verified domain of the tenant */
+  tenantId: z.string().optional(),
+  /** App registration holding read-only application permissions */
+  read: GraphCredentialConfigSchema.optional(),
+  /** Fetch the original message's headers from the reporter's mailbox */
+  originalFetch: GraphOriginalFetchConfigSchema.optional(),
+  /** Who-else-received-it lookup for malicious verdicts */
+  blastRadius: GraphBlastRadiusConfigSchema.optional(),
+  senderHistory: GraphSenderHistoryConfigSchema.optional(),
+});
+
+type GraphConfigFieldValues = z.infer<typeof GraphConfigFields>;
+type RefinementContext = z.core.$RefinementCtx<GraphConfigFieldValues>;
+
+/** Whoever talks to Microsoft needs the tenant, the client ID and the certificate */
+function requireGraphCredential(data: GraphConfigFieldValues, ctx: RefinementContext): void {
+  if (!data.tenantId) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['tenantId'],
+      message: 'graph.tenantId is required when graph.enabled is true',
+    });
+  } else if (!GRAPH_GUID.test(data.tenantId) && !GRAPH_TENANT_DOMAIN.test(data.tenantId)) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['tenantId'],
+      message: 'graph.tenantId must be a directory (tenant) GUID or a domain name',
+    });
+  }
+  if (!data.read?.clientId) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['read', 'clientId'],
+      message: 'graph.read.clientId is required when graph.enabled is true',
+    });
+  } else if (!GRAPH_GUID.test(data.read.clientId)) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['read', 'clientId'],
+      message: 'graph.read.clientId must be an application (client) GUID',
+    });
+  }
+  if (!data.read?.certificate?.trim()) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['read', 'certificate'],
+      message: 'graph.read.certificate is required when graph.enabled is true',
+    });
+  }
+}
+
+/**
+ * The main function's view of `graph.*`. In `direct` mode it needs the
+ * credential. In `broker` mode it needs only the broker's name, and any
+ * tenant ID, client ID or certificate found in its configuration is dropped
+ * here, so nothing downstream of configuration loading can hold or use it.
+ */
+const GraphConfigSchema = GraphConfigFields.superRefine((data, ctx) => {
+  if (!data.enabled) {
+    return;
+  }
+  if (data.mode === 'broker') {
+    if (!data.brokerFunctionName) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['brokerFunctionName'],
+        message: 'graph.brokerFunctionName is required when graph.mode is broker',
+      });
+    } else if (!LAMBDA_FUNCTION_REFERENCE.test(data.brokerFunctionName)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['brokerFunctionName'],
+        message: 'graph.brokerFunctionName must be a Lambda function name or ARN',
+      });
     }
-    if (!data.tenantId) {
-      ctx.addIssue({
-        code: 'custom',
-        path: ['tenantId'],
-        message: 'graph.tenantId is required when graph.enabled is true',
-      });
-    } else if (!GRAPH_GUID.test(data.tenantId) && !GRAPH_TENANT_DOMAIN.test(data.tenantId)) {
-      ctx.addIssue({
-        code: 'custom',
-        path: ['tenantId'],
-        message: 'graph.tenantId must be a directory (tenant) GUID or a domain name',
-      });
+    return;
+  }
+  requireGraphCredential(data, ctx);
+}).transform((data): GraphConfigFieldValues => {
+  if (data.mode !== 'broker') {
+    return data;
+  }
+  const withoutCredential = { ...data };
+  delete withoutCredential.tenantId;
+  delete withoutCredential.read;
+  return withoutCredential;
+});
+
+/**
+ * The Graph broker's own configuration: `graph.*` and the log level, nothing
+ * else. The broker is the function that talks to Microsoft, so it always
+ * needs the credential; `graph.mode` and `graph.brokerFunctionName` describe
+ * the main function and are ignored here. It needs none of the email, AI,
+ * database or notification settings and is not asked for them.
+ */
+export const GraphBrokerConfigSchema = z.object({
+  graph: GraphConfigFields.superRefine((data, ctx) => {
+    if (data.enabled) {
+      requireGraphCredential(data, ctx);
     }
-    if (!data.read?.clientId) {
-      ctx.addIssue({
-        code: 'custom',
-        path: ['read', 'clientId'],
-        message: 'graph.read.clientId is required when graph.enabled is true',
-      });
-    } else if (!GRAPH_GUID.test(data.read.clientId)) {
-      ctx.addIssue({
-        code: 'custom',
-        path: ['read', 'clientId'],
-        message: 'graph.read.clientId must be an application (client) GUID',
-      });
-    }
-    if (!data.read?.certificate?.trim()) {
-      ctx.addIssue({
-        code: 'custom',
-        path: ['read', 'certificate'],
-        message: 'graph.read.certificate is required when graph.enabled is true',
-      });
-    }
-  });
+  }),
+  logLevel: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
+});
 
 /**
  * Complete Phishy configuration schema
@@ -307,6 +377,7 @@ export type CampaignCacheConfig = z.infer<typeof CampaignCacheConfigSchema>;
 export type CommandsConfig = z.infer<typeof CommandsConfigSchema>;
 export type AgenticConfig = z.infer<typeof AgenticConfigSchema>;
 export type GraphConfig = z.infer<typeof GraphConfigSchema>;
+export type GraphBrokerConfig = z.infer<typeof GraphBrokerConfigSchema>;
 export type GraphCredentialConfig = z.infer<typeof GraphCredentialConfigSchema>;
 export type GraphBlastRadiusConfig = z.infer<typeof GraphBlastRadiusConfigSchema>;
 export type ReportButtonConfig = z.infer<typeof ReportButtonConfigSchema>;

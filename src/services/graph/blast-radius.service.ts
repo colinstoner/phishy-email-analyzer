@@ -32,9 +32,16 @@ import { createHash } from 'crypto';
 import { GraphConfig } from '../../config/schema';
 import { ExtractedEmailData } from '../../types';
 import { createLogger } from '../../utils/logger';
-import { emitBlastRadiusMetric } from '../../utils/metrics';
+import { BlastRadiusMetric, emitBlastRadiusMetric } from '../../utils/metrics';
 import { DirectoryUser, listUsers } from './directory.operations';
 import { GraphClient } from './graph.client';
+import {
+  DELIVERY_STATUS_PATTERN,
+  MAX_ADDRESS_LENGTH,
+  MAX_LISTED_RECIPIENTS,
+  MAX_SUBJECT_LENGTH,
+  MESSAGE_ID_PATTERN,
+} from './graph.limits';
 import { createGraphReadClient } from './graph.credential';
 import { GraphAuthError, GraphError } from './graph.errors';
 import {
@@ -61,8 +68,6 @@ export const BLAST_RADIUS_DEFAULT_MAX_MAILBOXES = 2000;
 
 /** Time kept back for sending the reports after the lookup */
 const SEND_RESERVE_MS = 20_000;
-/** A lookup with less time than this is not started */
-const MIN_BUDGET_MS = 2000;
 /** Mailboxes read at once. One request per mailbox at a time in the sweep. */
 const DEFAULT_CONCURRENCY = 12;
 /** Window either side of the original's claimed date (forwarded dates carry no reliable zone) */
@@ -71,13 +76,10 @@ const WINDOW_AROUND_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
 /** Oldest original date believed (message trace reaches back 90 days) */
 const MAX_AGE_MS = 88 * 24 * 60 * 60 * 1000;
-const MAX_SUBJECT_LENGTH = 255;
-const MAX_ADDRESS_LENGTH = 254;
 const MAX_COPIES_PER_MAILBOX = 5;
 /** Distinct Message-IDs (from message trace) looked up in one recipient's mailbox */
 const MAX_MESSAGE_IDS_PER_MAILBOX = 3;
 const MAX_DIRECTORY_USERS = 20_000;
-const MAX_LISTED_RECIPIENTS = 100;
 /** 401/403 answers with no success before the mailbox route is declared refused */
 const MAX_AUTH_FAILURES = 5;
 const USER_CACHE_TTL_MS = 10 * 60 * 1000;
@@ -91,8 +93,6 @@ const RESULT_CACHE_MAX = 20;
 const CLIENT_OPTIONS = { timeoutMs: 5000, maxAttempts: 2, maxRetryAfterMs: 10_000 };
 
 const ADDRESS_PATTERN = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/;
-const MESSAGE_ID_PATTERN = /^<?[^<>\s@]{1,200}@[^<>\s@]{1,255}>?$/;
-const DELIVERY_STATUS_PATTERN = /^[A-Za-z][A-Za-z ]{0,39}$/;
 const FORWARD_PREFIX_PATTERN = /^(?:\s*(?:fw|fwd|re)\s*:\s*)+/i;
 
 export type BlastRadiusRoute = 'trace' | 'mailbox';
@@ -252,7 +252,9 @@ export function describeLastVerb(code: number | undefined): {
   return { response: 'unknown', lastVerbCode: code };
 }
 
-type FailureReason = 'no_key' | 'no_time' | 'timeout' | 'denied' | 'throttled' | 'error';
+export type BlastRadiusFailureReason =
+  'no_key' | 'no_time' | 'timeout' | 'denied' | 'throttled' | 'error' | 'broker';
+type FailureReason = BlastRadiusFailureReason;
 
 const FAILURE_NOTES: Record<FailureReason, string> = {
   no_key: 'the original message could not be identified from the forwarded email',
@@ -261,7 +263,52 @@ const FAILURE_NOTES: Record<FailureReason, string> = {
   denied: 'Microsoft Graph refused the requests (check the app permissions)',
   throttled: 'Microsoft Graph throttled the requests',
   error: 'the Microsoft Graph requests failed',
+  broker: 'the Graph broker function did not return a usable answer',
 };
+
+/** The report for a lookup that produced nothing: a status and one code-written line */
+export function unavailableBlastRadius(
+  reason: BlastRadiusFailureReason,
+  at: number
+): BlastRadiusReport {
+  return {
+    status: 'unavailable',
+    note: `Blast radius lookup could not be completed: ${FAILURE_NOTES[reason]}.`,
+    lookedUpAt: new Date(at).toISOString(),
+  };
+}
+
+/** The time a lookup may take: its configured budget, cut to what the caller has left */
+export function blastRadiusBudgetMs(
+  timeBudgetMs: number,
+  options: Pick<BlastRadiusLookupOptions, 'remainingMs' | 'budgetMs'>
+): number {
+  return Math.min(
+    timeBudgetMs,
+    options.remainingMs === undefined ? Infinity : options.remainingMs - SEND_RESERVE_MS,
+    options.budgetMs ?? Infinity
+  );
+}
+
+/** A lookup with less time than this is not started */
+export const BLAST_RADIUS_MIN_BUDGET_MS = 2000;
+
+/** The metric line for one lookup, from its report */
+export function blastRadiusMetric(
+  report: BlastRadiusReport,
+  extra: { errors: number; durationMs: number; cached: boolean }
+): BlastRadiusMetric {
+  return {
+    route: report.route ?? ('none' as const),
+    outcome: report.status,
+    recipientsFound: report.totals?.recipients ?? 0,
+    mailboxesChecked: report.coverage?.mailboxesChecked ?? 0,
+    mailboxesEligible: report.coverage?.mailboxesEligible ?? 0,
+    errors: extra.errors,
+    durationMs: extra.durationMs,
+    cached: extra.cached,
+  };
+}
 
 interface MailboxEntry {
   user: DirectoryUser;
@@ -349,6 +396,14 @@ export interface BlastRadiusLookupOptions {
   remainingMs?: number;
   /** The reporter's address, marked in the recipient list */
   reporterAddress?: string;
+  /** A tighter limit than the configured budget, when the caller will wait less */
+  budgetMs?: number;
+}
+
+/** One lookup's report and the metric line that describes it (not yet emitted) */
+export interface BlastRadiusLookupResult {
+  report: BlastRadiusReport;
+  metric: BlastRadiusMetric;
 }
 
 export class BlastRadiusService {
@@ -377,17 +432,42 @@ export class BlastRadiusService {
     emailData: ExtractedEmailData,
     options: BlastRadiusLookupOptions = {}
   ): Promise<BlastRadiusReport> {
+    const { report, metric } = await this.execute(
+      startedAt => deriveBlastRadiusKey(emailData, new Date(startedAt)),
+      options
+    );
+    emitBlastRadiusMetric(metric);
+    logger.info('Blast radius lookup finished', { ...metric, matchedBy: report.matchedBy });
+
+    return options.reporterAddress
+      ? { ...report, reporterAddress: options.reporterAddress.toLowerCase() }
+      : report;
+  }
+
+  /**
+   * The same lookup for a key the caller has already derived, without
+   * emitting its metric: the Graph broker runs this and hands both back to
+   * the main function. Every string in the key is hostile. Never throws.
+   */
+  async lookupByKey(
+    key: BlastRadiusKey,
+    options: Pick<BlastRadiusLookupOptions, 'remainingMs' | 'budgetMs'> = {}
+  ): Promise<BlastRadiusLookupResult> {
+    return this.execute(() => key, options);
+  }
+
+  private async execute(
+    deriveKey: (startedAt: number) => BlastRadiusKey | undefined,
+    options: Pick<BlastRadiusLookupOptions, 'remainingMs' | 'budgetMs'>
+  ): Promise<BlastRadiusLookupResult> {
     const startedAt = this.now();
     let report: BlastRadiusReport;
     let errors = 0;
     let cached = false;
 
     try {
-      const key = deriveBlastRadiusKey(emailData, new Date(startedAt));
-      const budgetMs = Math.min(
-        this.timeBudgetMs,
-        options.remainingMs === undefined ? Infinity : options.remainingMs - SEND_RESERVE_MS
-      );
+      const key = deriveKey(startedAt);
+      const budgetMs = blastRadiusBudgetMs(this.timeBudgetMs, options);
       const cacheKey = key ? this.cacheKey(key) : undefined;
       const hit = cacheKey ? this.results.get(cacheKey) : undefined;
 
@@ -396,7 +476,7 @@ export class BlastRadiusService {
       } else if (hit && startedAt - hit.at < RESULT_CACHE_TTL_MS) {
         report = hit.report;
         cached = true;
-      } else if (budgetMs < MIN_BUDGET_MS) {
+      } else if (budgetMs < BLAST_RADIUS_MIN_BUDGET_MS) {
         report = this.unavailable('no_time', startedAt);
       } else {
         const progress = this.newProgress(startedAt + budgetMs);
@@ -416,23 +496,10 @@ export class BlastRadiusService {
       errors += 1;
     }
 
-    const coverage = report.coverage;
-    const summary = {
-      route: report.route ?? ('none' as const),
-      outcome: report.status,
-      recipientsFound: report.totals?.recipients ?? 0,
-      mailboxesChecked: coverage?.mailboxesChecked ?? 0,
-      mailboxesEligible: coverage?.mailboxesEligible ?? 0,
-      errors,
-      durationMs: this.now() - startedAt,
-      cached,
+    return {
+      report,
+      metric: blastRadiusMetric(report, { errors, durationMs: this.now() - startedAt, cached }),
     };
-    emitBlastRadiusMetric(summary);
-    logger.info('Blast radius lookup finished', { ...summary, matchedBy: report.matchedBy });
-
-    return options.reporterAddress
-      ? { ...report, reporterAddress: options.reporterAddress.toLowerCase() }
-      : report;
   }
 
   private newProgress(deadline: number): Progress {
@@ -842,11 +909,7 @@ export class BlastRadiusService {
   }
 
   private unavailable(reason: FailureReason, at: number): BlastRadiusReport {
-    return {
-      status: 'unavailable',
-      note: `Blast radius lookup could not be completed: ${FAILURE_NOTES[reason]}.`,
-      lookedUpAt: new Date(at).toISOString(),
-    };
+    return unavailableBlastRadius(reason, at);
   }
 
   private failureReason(progress: Progress): FailureReason {
