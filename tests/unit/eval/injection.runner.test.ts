@@ -513,7 +513,8 @@ describe('runCli', () => {
     expect(text).toContain(
       'Removed by the pipeline before the model (never billed): hid-html-comment, pad-elided-injection'
     );
-    expect(text).toMatch(new RegExp(`${MODEL.replace(/\./g, '\\.')} / agentic: \\d+ calls`));
+    expect(text).toContain(`${MODEL} / agentic: `);
+    expect(text).toMatch(/ \/ agentic: \d+ calls/);
     expect(text).toContain('no call was made');
     expect(t.err).toEqual([]);
     expect(t.files.size).toBe(0);
