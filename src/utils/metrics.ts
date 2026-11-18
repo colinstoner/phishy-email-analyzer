@@ -191,3 +191,30 @@ export function emitBlastRadiusMetric(metric: BlastRadiusMetric): void {
 
   process.stdout.write(`${JSON.stringify(emf)}\n`);
 }
+
+/**
+ * Emit a failure to send the security team's separate copy of a malicious
+ * report (sent after the reporter's copy when blast radius is enabled). The
+ * reporter was warned but the security team was not told: alarm on this.
+ */
+export function emitSecurityCopyFailureMetric(): void {
+  if (process.env.PHISHY_DISABLE_METRICS === 'true') {
+    return;
+  }
+
+  const emf = {
+    _aws: {
+      Timestamp: Date.now(),
+      CloudWatchMetrics: [
+        {
+          Namespace: NAMESPACE,
+          Dimensions: [[]],
+          Metrics: [{ Name: 'SecurityCopySendFailures', Unit: 'Count' }],
+        },
+      ],
+    },
+    SecurityCopySendFailures: 1,
+  };
+
+  process.stdout.write(`${JSON.stringify(emf)}\n`);
+}

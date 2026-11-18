@@ -652,10 +652,19 @@ function blastRadiusRow(recipient: BlastRadiusRecipient, reporter?: string): str
           ? 'Unknown'
           : `Unknown (last-verb code ${recipient.lastVerbCode})`;
     }
+  } else if (recipient.mailbox === 'not_delivered') {
+    location = 'Not delivered';
   } else {
     location = recipient.mailbox === 'not_found' ? 'Not in mailbox' : 'Mailbox not checked';
   }
   return [address, recipient.deliveryStatus ?? '-', location, read, response];
+}
+
+/** Recipients counted in the totals but left out of the (capped) listing */
+function blastRadiusUnlisted(report: BlastRadiusReport): number {
+  const listed = report.recipients?.length ?? 0;
+  const total = (report.totals?.recipients ?? listed) + (report.totals?.notDelivered ?? 0);
+  return total - listed;
 }
 
 /**
@@ -673,6 +682,9 @@ function blastRadiusLines(report: BlastRadiusReport): string[] {
       ? `Message trace shows ${totals.recipients} recipient(s) in the organization.`
       : `Found in ${totals.recipients} mailbox(es).`
   );
+  if (totals.notDelivered) {
+    lines.push(`Delivery failed for ${totals.notDelivered} more recipient(s).`);
+  }
   lines.push(
     `Marked read by ${totals.read}; replied to by ${totals.replied}; forwarded by ${totals.forwarded}.`
   );
@@ -731,7 +743,7 @@ function buildBlastRadiusHtml(report: BlastRadiusReport): string {
       table += `<tr>${cells.map(text => `<td style="${cell}">${escapeHtml(text)}</td>`).join('')}</tr>`;
     }
     table += '</table>';
-    const unlisted = (report.totals?.recipients ?? recipients.length) - recipients.length;
+    const unlisted = blastRadiusUnlisted(report);
     if (unlisted > 0) {
       table += `<p class="no-items">${unlisted} more recipient(s) not listed.</p>`;
     }
@@ -765,7 +777,7 @@ function buildBlastRadiusText(report: BlastRadiusReport): string[] {
     for (const recipient of recipients) {
       lines.push(`  ${blastRadiusRow(recipient, report.reporterAddress).join(' | ')}`);
     }
-    const unlisted = (report.totals?.recipients ?? recipients.length) - recipients.length;
+    const unlisted = blastRadiusUnlisted(report);
     if (unlisted > 0) {
       lines.push(`  ${unlisted} more recipient(s) not listed.`);
     }

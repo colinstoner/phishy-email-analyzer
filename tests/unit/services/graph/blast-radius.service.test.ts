@@ -103,11 +103,15 @@ function tenant(config: Tenant): FakeResponder[] {
         return undefined;
       }
       const [, name, rest] = match;
+      // A Message-ID filter returns only the messages with that ID
+      const wantedId = request.query.$filter?.match(/^internetMessageId eq '(.+)'$/)?.[1];
+      const matching = (messages: Record<string, unknown>[] = []): Record<string, unknown>[] =>
+        wantedId ? messages.filter(item => item.internetMessageId === wantedId) : messages;
       if (rest === 'messages') {
-        return collection(config.mailboxes?.[name] ?? []);
+        return collection(matching(config.mailboxes?.[name]));
       }
       if (rest === 'mailFolders/recoverableitemsdeletions/messages') {
-        return collection(config.recoverable?.[name] ?? []);
+        return collection(matching(config.recoverable?.[name]));
       }
       const folder = rest.match(/^mailFolders\/(inbox|junkemail|deleteditems)$/);
       if (folder) {
@@ -252,7 +256,13 @@ describe('BlastRadiusService', () => {
     expect(report.route).toBe('trace');
     expect(report.matchedBy).toBe('senderSubject');
     expect(report.reporterAddress).toBe('alice@example.com');
-    expect(report.totals).toEqual({ recipients: 3, read: 1, replied: 0, forwarded: 1 });
+    expect(report.totals).toEqual({
+      recipients: 3,
+      read: 1,
+      replied: 0,
+      forwarded: 1,
+      notDelivered: 0,
+    });
     expect(report.recipients).toEqual([
       expect.objectContaining({
         address: 'alice@example.com',
@@ -269,7 +279,6 @@ describe('BlastRadiusService', () => {
         folder: 'junk',
         isRead: false,
         response: 'none',
-        copies: 2,
       }),
       { address: 'all-staff@example.com', mailbox: 'not_checked', deliveryStatus: undefined },
     ]);
@@ -281,6 +290,223 @@ describe('BlastRadiusService', () => {
     expect(requests.some(request => request.path.includes('id-carol'))).toBe(false);
     expect(requests.every(request => request.method === 'GET')).toBe(true);
     expect(JSON.stringify(report)).not.toContain('BODY-MUST-NOT-SURFACE');
+  });
+
+  it('reads mailboxes by the Message-IDs trace recorded, however the trace was keyed', async () => {
+    const { service: blast, requests } = service(
+      tenant({
+        trace: [
+          // Two distinct messages in the campaign; trace gives one ID bare
+          {
+            recipientAddress: 'alice@example.com',
+            status: 'delivered',
+            messageId: '<m1@mail.example.org>',
+          },
+          {
+            recipientAddress: 'bob@example.com',
+            status: 'delivered',
+            messageId: 'm2@mail.example.org',
+          },
+          {
+            recipientAddress: 'carol@example.com',
+            status: 'delivered',
+            messageId: '<m1@mail.example.org>',
+          },
+          {
+            recipientAddress: 'carol@example.com',
+            status: 'delivered',
+            messageId: '<m2@mail.example.org>',
+          },
+          { recipientAddress: 'carol@example.com', status: 'delivered', messageId: "x' or 1 eq 1" },
+        ],
+        mailboxes: {
+          alice: [message('alice')],
+          bob: [message('bob', { internetMessageId: '<m2@mail.example.org>', isRead: true })],
+          carol: [
+            message('carol-1'),
+            message('carol-2', { internetMessageId: '<m2@mail.example.org>' }),
+          ],
+        },
+        verbs: { 'msg-bob': '103' },
+      })
+    );
+
+    // The key is sender + subject: only the trace query may use it
+    const report = await blast.lookup(email());
+
+    const searches = requests.filter(request => /\/messages$/.test(request.path));
+    expect(searches.length).toBeGreaterThan(0);
+    for (const search of searches) {
+      expect(search.query.$filter).toMatch(/^internetMessageId eq '<m[12]@mail\.example\.org>'$/);
+      expect(search.query.$orderby).toBeUndefined();
+    }
+    const filtersFor = (name: string): string[] =>
+      requests
+        .filter(request => request.path === `/users/id-${name}/messages`)
+        .map(request => request.query.$filter);
+    expect(filtersFor('alice')).toEqual(["internetMessageId eq '<m1@mail.example.org>'"]);
+    expect(filtersFor('bob')).toEqual(["internetMessageId eq '<m2@mail.example.org>'"]);
+    expect(filtersFor('carol')).toEqual([
+      "internetMessageId eq '<m1@mail.example.org>'",
+      "internetMessageId eq '<m2@mail.example.org>'",
+    ]);
+
+    expect(report.status).toBe('complete');
+    expect(report.matchedBy).toBe('senderSubject');
+    expect(report.totals).toMatchObject({ recipients: 3, read: 1, replied: 1 });
+    expect(report.recipients?.[0]).toMatchObject({
+      address: 'bob@example.com',
+      folder: 'inbox',
+      response: 'replied',
+    });
+    expect(report.recipients?.find(row => row.address === 'carol@example.com')).toMatchObject({
+      mailbox: 'found',
+      copies: 2,
+    });
+    expect(report.coverage).toMatchObject({ mailboxesChecked: 3, mailboxesEligible: 3 });
+  });
+
+  it('caps the Message-IDs looked up per mailbox and says so', async () => {
+    const ids = [1, 2, 3, 4, 5].map(n => `<many-${n}@mail.example.org>`);
+    const { service: blast, requests } = service(
+      tenant({
+        trace: ids.map(messageId => ({
+          recipientAddress: 'alice@example.com',
+          status: 'Delivered',
+          messageId,
+        })),
+      })
+    );
+    const report = await blast.lookup(email());
+    expect(requests.filter(request => request.path === '/users/id-alice/messages')).toHaveLength(3);
+    expect(report.caveats).toContain(
+      '1 recipient(s) received more than 3 matching messages; only 3 were looked up in each of their mailboxes.'
+    );
+  });
+
+  it('never presents expanded or failed trace rows as a delivered mailbox copy', async () => {
+    const { service: blast, requests } = service(
+      tenant({
+        trace: [
+          {
+            recipientAddress: 'all-staff@example.com',
+            status: 'expanded',
+            messageId: '<m1@mail.example.org>',
+          },
+          {
+            recipientAddress: 'alice@example.com',
+            status: 'delivered',
+            messageId: '<m1@mail.example.org>',
+          },
+          {
+            recipientAddress: 'bob@example.com',
+            status: 'Failed',
+            messageId: '<m1@mail.example.org>',
+          },
+          // A failed attempt followed by a delivery is a delivery
+          {
+            recipientAddress: 'carol@example.com',
+            status: 'failed',
+            messageId: '<m1@mail.example.org>',
+          },
+          {
+            recipientAddress: 'carol@example.com',
+            status: 'delivered',
+            messageId: '<m1@mail.example.org>',
+          },
+        ],
+        // Even if a copy were somehow there, a failed delivery is not searched
+        mailboxes: { alice: [message('alice')], bob: [message('bob')], carol: [message('carol')] },
+      })
+    );
+
+    const report = await blast.lookup(email());
+
+    expect(report.totals).toMatchObject({ recipients: 2, notDelivered: 1 });
+    expect(report.recipients?.map(row => [row.address, row.mailbox, row.deliveryStatus])).toEqual([
+      ['alice@example.com', 'found', 'delivered'],
+      ['carol@example.com', 'found', 'delivered'],
+      ['bob@example.com', 'not_delivered', 'Failed'],
+    ]);
+    expect(JSON.stringify(report.recipients)).not.toContain('all-staff');
+    expect(report.caveats?.join(' ')).toContain(
+      '1 distribution-list address(es) that message trace shows as expanded are not listed'
+    );
+    expect(requests.some(request => request.path.includes('id-bob'))).toBe(false);
+    // Neither kind counts against mailbox coverage
+    expect(report.coverage).toMatchObject({ mailboxesChecked: 2, mailboxesEligible: 2 });
+    expect(report.status).toBe('complete');
+  });
+
+  it('falls back on an intermittent trace 403 and uses trace again once it answers', async () => {
+    let traceCalls = 0;
+    const rows = [
+      {
+        recipientAddress: 'alice@example.com',
+        status: 'delivered',
+        messageId: '<m1@mail.example.org>',
+      },
+    ];
+    const { service: blast } = service([
+      request => {
+        if (request.path !== TRACE_PATH) {
+          return undefined;
+        }
+        traceCalls += 1;
+        return traceCalls === 1 ? graphErrorResponse(403, 'Forbidden') : collection(rows);
+      },
+      ...tenant({ mailboxes: { alice: [message('alice')] } }),
+    ]);
+
+    const refused = await blast.lookup(email());
+    expect(refused.route).toBe('mailbox');
+    expect(refused.status).not.toBe('unavailable');
+    expect(refused.totals?.recipients).toBe(1);
+    expect(refused.caveats).toContain(
+      'Message trace was not available, so mailboxes were searched directly.'
+    );
+
+    // A different message, so the first result is not reused
+    const answered = await blast.lookup(
+      email({ forwardedHeaders: { 'Original-From': SENDER, 'Original-Subject': 'Another one' } })
+    );
+    expect(answered.route).toBe('trace');
+    expect(answered.caveats?.join(' ')).not.toContain('Message trace was not available');
+  });
+
+  it('has full detail for every mailbox it reached when time runs out', async () => {
+    // The clock passes the deadline as soon as the first mailbox has matched
+    let late = false;
+    const { service: blast, graph } = service(
+      tenant({
+        trace: 403,
+        mailboxes: {
+          alice: [message('alice', { isRead: true })],
+          bob: [message('bob')],
+          carol: [message('carol')],
+        },
+        verbs: { 'msg-alice': '102', 'msg-bob': '104' },
+      }),
+      { now: () => NOW.getTime() + (late ? 60_000 : 0) }
+    );
+    const original = graph.fetchMock.getMockImplementation()!;
+    graph.fetchMock.mockImplementation((input, init) => {
+      if (/\/messages\?/.test(String(input))) {
+        late = true;
+      }
+      return original(input, init);
+    });
+
+    const report = await blast.lookup(email());
+
+    expect(report.status).toBe('partial');
+    expect(report.coverage?.mailboxesChecked).toBeLessThan(3);
+    expect(report.recipients?.length).toBeGreaterThan(0);
+    for (const row of report.recipients ?? []) {
+      expect(row.folder).toBe('inbox');
+      expect(['replied', 'forwarded']).toContain(row.response);
+    }
+    expect(report.coverage?.detailUnavailable).toBe(0);
   });
 
   it('sends hostile strings only as escaped filter literals', async () => {
@@ -326,6 +552,7 @@ describe('BlastRadiusService', () => {
       eligibleIsLowerBound: false,
       recoverableChecked: 2,
       recoverableCandidates: 2,
+      detailUnavailable: 0,
     });
     expect(report.totals).toEqual({ recipients: 2, read: 2, replied: 1, forwarded: 0 });
     expect(report.recipients).toEqual([
@@ -504,7 +731,38 @@ describe('BlastRadiusService', () => {
     ]);
     const report = await blast.lookup(email());
     expect(report.recipients?.[0]).toMatchObject({ folder: 'unknown', response: 'unknown' });
-    expect(report.caveats?.join(' ')).toContain('request(s) failed');
+    // The failure is counted and disclosed, not silently shown as "unknown"
+    expect(report.status).toBe('partial');
+    expect(report.coverage?.detailUnavailable).toBe(1);
+    expect(report.caveats).toContain(
+      'Folder or replied/forwarded detail could not be read for 1 recipient(s); it is shown as Unknown.'
+    );
+    expect(report.caveats?.join(' ')).toContain('4 Microsoft Graph request(s) failed');
+  });
+
+  it('counts a mailbox whose detail was never read when the budget ends first', async () => {
+    jest.useFakeTimers();
+    try {
+      const { service: blast, graph } = service(
+        tenant({ trace: 403, mailboxes: { alice: [message('alice')] } }),
+        { timeBudgetMs: 5000, now: () => Date.now() }
+      );
+      const original = graph.fetchMock.getMockImplementation()!;
+      graph.fetchMock.mockImplementation((input, init) =>
+        /mailFolders\/|messages\/msg-/.test(String(input))
+          ? new Promise<Response>(() => undefined)
+          : original(input, init)
+      );
+      const pending = blast.lookup(email());
+      await jest.advanceTimersByTimeAsync(5001);
+      const report = await pending;
+      expect(report.status).toBe('partial');
+      expect(report.recipients?.[0]).toMatchObject({ folder: 'unknown', response: 'unknown' });
+      expect(report.coverage?.detailUnavailable).toBe(1);
+      expect(report.caveats?.join(' ')).toContain('detail could not be read for 1 recipient(s)');
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('does not start without an identifiable message or without time', async () => {

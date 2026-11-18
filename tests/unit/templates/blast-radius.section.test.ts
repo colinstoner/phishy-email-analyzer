@@ -75,6 +75,7 @@ const blastRadius: BlastRadiusReport = {
     eligibleIsLowerBound: false,
     recoverableChecked: 0,
     recoverableCandidates: 39,
+    detailUnavailable: 0,
   },
   caveats: ['The lookup stopped at its time budget.'],
   lookedUpAt: '2026-11-17T12:00:00.000Z',
@@ -175,6 +176,32 @@ describe('blast radius section', () => {
     expect(text).toContain('b@example.com | - | Unknown | Read | None recorded');
     expect(text).toContain('c@example.com | - | Purged (Recoverable Items) | Unknown | Unknown');
     expect(text).toContain('d@example.com | Quarantined | Not in mailbox | - | -');
+  });
+
+  it('shows a failed delivery as not delivered, outside the recipient count', () => {
+    const [html, text] = render({
+      ...baseOptions,
+      blastRadius: {
+        ...blastRadius,
+        route: 'trace',
+        totals: { recipients: 1, read: 0, replied: 0, forwarded: 0, notDelivered: 1 },
+        recipients: [
+          {
+            address: 'a@example.com',
+            mailbox: 'found',
+            folder: 'inbox',
+            deliveryStatus: 'delivered',
+          },
+          { address: 'b@example.com', mailbox: 'not_delivered', deliveryStatus: 'failed' },
+        ],
+      },
+    });
+    for (const output of [html, text]) {
+      expect(output).toContain('Message trace shows 1 recipient(s) in the organization.');
+      expect(output).toContain('Delivery failed for 1 more recipient(s).');
+      expect(output).not.toContain('more recipient(s) not listed');
+    }
+    expect(text).toContain('b@example.com | failed | Not delivered | - | -');
   });
 
   it('renders a failed lookup as a single line', () => {

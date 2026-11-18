@@ -12,10 +12,13 @@
  * Two routes:
  * 1. Message trace — recipients and delivery status without reading a
  *    mailbox. Then, for the recipients that are readable user mailboxes, the
- *    message's folder, read flag and last verb.
+ *    message's folder, read flag and last verb, read by the Message-ID the
+ *    trace row recorded for that recipient (never by sender + subject).
+ *    Expanded (distribution list) and failed rows are not mailbox copies.
  * 2. Per-mailbox search — when trace is unavailable (commonly HTTP 403) or
- *    returns nothing: the same lookup in each licensed, enabled user mailbox,
- *    up to a mailbox cap.
+ *    returns nothing: each licensed, enabled user mailbox, up to a mailbox
+ *    cap, by Message-ID when the key has one and by sender + window
+ *    (+ subject) only when it does not.
  *
  * The whole lookup runs under a hard time budget. Whatever was established
  * when the budget ends is reported with its coverage stated; partial
@@ -71,6 +74,8 @@ const MAX_AGE_MS = 88 * 24 * 60 * 60 * 1000;
 const MAX_SUBJECT_LENGTH = 255;
 const MAX_ADDRESS_LENGTH = 254;
 const MAX_COPIES_PER_MAILBOX = 5;
+/** Distinct Message-IDs (from message trace) looked up in one recipient's mailbox */
+const MAX_MESSAGE_IDS_PER_MAILBOX = 3;
 const MAX_DIRECTORY_USERS = 20_000;
 const MAX_LISTED_RECIPIENTS = 100;
 /** 401/403 answers with no success before the mailbox route is declared refused */
@@ -79,8 +84,11 @@ const USER_CACHE_TTL_MS = 10 * 60 * 1000;
 const RESULT_CACHE_TTL_MS = 10 * 60 * 1000;
 const RESULT_CACHE_MAX = 20;
 
-/** Tighter than the client defaults: one slow mailbox must not eat the budget */
-const CLIENT_OPTIONS = { timeoutMs: 8000, maxAttempts: 2, maxRetryAfterMs: 10_000 };
+/**
+ * Tighter than the client defaults: one slow mailbox must not eat the budget.
+ * A request that times out twice costs a worker about 10 s.
+ */
+const CLIENT_OPTIONS = { timeoutMs: 5000, maxAttempts: 2, maxRetryAfterMs: 10_000 };
 
 const ADDRESS_PATTERN = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/;
 const MESSAGE_ID_PATTERN = /^<?[^<>\s@]{1,200}@[^<>\s@]{1,255}>?$/;
@@ -96,8 +104,12 @@ export interface BlastRadiusRecipient {
   address: string;
   /** Delivery status from message trace (trace route only) */
   deliveryStatus?: string;
-  /** Whether the recipient's mailbox was read, and whether the message was there */
-  mailbox: 'found' | 'not_found' | 'not_checked';
+  /**
+   * Whether the recipient's mailbox was read, and whether the message was
+   * there. `not_delivered`: message trace says delivery failed, so there is
+   * no mailbox copy to look for.
+   */
+  mailbox: 'found' | 'not_found' | 'not_checked' | 'not_delivered';
   folder?: BlastRadiusFolder;
   isRead?: boolean;
   response?: BlastRadiusResponse;
@@ -118,6 +130,8 @@ export interface BlastRadiusCoverage {
   recoverableChecked: number;
   /** Mailboxes with no match (candidates for the Recoverable Items search) */
   recoverableCandidates: number;
+  /** Mailboxes holding the message whose folder or reply/forward state could not be read */
+  detailUnavailable: number;
 }
 
 /**
@@ -137,8 +151,16 @@ export interface BlastRadiusReport {
     receivedFrom: string;
     receivedTo: string;
   };
-  totals?: { recipients: number; read: number; replied: number; forwarded: number };
-  /** Most significant first; at most 100 — `totals.recipients` is the full count */
+  totals?: {
+    /** Recipients the message was (or may have been) delivered to */
+    recipients: number;
+    read: number;
+    replied: number;
+    forwarded: number;
+    /** Recipients message trace reports as failed deliveries (trace route) */
+    notDelivered?: number;
+  };
+  /** Most significant first; at most 100 — the totals are the full counts */
   recipients?: BlastRadiusRecipient[];
   coverage?: BlastRadiusCoverage;
   caveats?: string[];
@@ -248,17 +270,44 @@ interface MailboxEntry {
   checked: boolean;
   /** Recoverable Items was searched too */
   recoverableChecked: boolean;
+  /**
+   * Message-IDs message trace recorded for this recipient (with angle
+   * brackets). When present the mailbox is read by these, not by the key.
+   */
+  messageIds: string[];
   hit?: MessageSummary;
   copies: number;
   folder?: BlastRadiusFolder;
   response?: BlastRadiusResponse;
   lastVerbCode?: number;
+  /** A folder or last-verb request for the hit failed */
+  detailFailed: boolean;
+}
+
+/**
+ * What a trace row says happened. `expanded` is a distribution list being
+ * expanded to its members (who have rows of their own); `failed` was not
+ * delivered. Neither is a mailbox copy.
+ */
+type TraceDelivery = 'delivered' | 'failed' | 'expanded';
+const DELIVERY_RANK: Record<TraceDelivery, number> = { delivered: 2, failed: 1, expanded: 0 };
+
+function classifyDelivery(status: string | undefined): TraceDelivery {
+  const normalized = status?.trim().toLowerCase();
+  if (normalized === 'failed') {
+    return 'failed';
+  }
+  return normalized === 'expanded' ? 'expanded' : 'delivered';
 }
 
 interface TraceRecipient {
   address: string;
+  /** Best outcome across the recipient's rows */
+  delivery: TraceDelivery;
+  /** Status text of the row that gave `delivery` */
   status?: string;
-  rows: number;
+  /** Distinct Message-IDs on the rows that were not failed or expanded */
+  messageIds: Set<string>;
 }
 
 /** Everything a run has established so far; readable at any moment */
@@ -267,6 +316,10 @@ interface Progress {
   traceOutcome: 'pending' | 'rows' | 'empty' | 'failed';
   traceRecipients: TraceRecipient[];
   traceTruncated: boolean;
+  /** Distribution-list expansion rows left out of the recipient list */
+  traceExpanded: number;
+  /** Recipients with more Message-IDs than are looked up per mailbox */
+  messageIdsCapped: number;
   entries: MailboxEntry[];
   eligible: number;
   eligibleIsLowerBound: boolean;
@@ -387,6 +440,8 @@ export class BlastRadiusService {
       traceOutcome: 'pending',
       traceRecipients: [],
       traceTruncated: false,
+      traceExpanded: 0,
+      messageIdsCapped: 0,
       entries: [],
       eligible: 0,
       eligibleIsLowerBound: false,
@@ -448,15 +503,12 @@ export class BlastRadiusService {
       return;
     }
 
-    // 1. Is the message in the mailbox (any folder /messages covers)?
+    // 1. Is the message in the mailbox (any folder /messages covers), and if
+    //    so which folder and was it answered? Detail is read as soon as a
+    //    mailbox matches, so a lookup that runs out of time has full detail
+    //    for every mailbox it reached instead of none for any.
     await this.pool(progress.entries, progress, entry => this.searchMailbox(key, entry, progress));
-    // 2. For each mailbox holding it: which folder, and was it answered?
-    await this.pool(
-      progress.entries.filter(entry => entry.hit),
-      progress,
-      entry => this.describeHit(entry, progress)
-    );
-    // 3. /messages does not cover Recoverable Items: look there for the rest
+    // 2. /messages does not cover Recoverable Items: look there for the rest
     await this.pool(
       progress.entries.filter(entry => entry.checked && !entry.hit),
       progress,
@@ -528,21 +580,35 @@ export class BlastRadiusService {
     users: BoundedResult<DirectoryUser> | undefined,
     progress: Progress
   ): void {
-    const recipients = new Map<string, TraceRecipient>();
+    const all = new Map<string, TraceRecipient>();
     for (const row of traces.items) {
       const address = firstAddress(row.recipientAddress);
       if (!address) {
         continue;
       }
-      const known = recipients.get(address);
-      if (known) {
-        known.rows += 1;
-      } else {
-        const status =
-          row.status && DELIVERY_STATUS_PATTERN.test(row.status) ? row.status : undefined;
-        recipients.set(address, { address, status, rows: 1 });
+      const delivery = classifyDelivery(row.status);
+      const status =
+        row.status && DELIVERY_STATUS_PATTERN.test(row.status) ? row.status : undefined;
+      let recipient = all.get(address);
+      if (!recipient) {
+        recipient = { address, delivery, status, messageIds: new Set() };
+        all.set(address, recipient);
+      } else if (DELIVERY_RANK[delivery] > DELIVERY_RANK[recipient.delivery]) {
+        recipient.delivery = delivery;
+        recipient.status = status;
+      }
+      // The trace row names the exact message this recipient got: mailboxes
+      // are then read by Message-ID however the trace itself was keyed
+      const messageId = row.messageId?.trim();
+      if (delivery === 'delivered' && messageId && MESSAGE_ID_PATTERN.test(messageId)) {
+        recipient.messageIds.add(addAngleBrackets(messageId));
       }
     }
+
+    // Expansion rows are a list address, not a mailbox: its members have
+    // rows of their own. Failed rows are listed but have no mailbox copy.
+    const recipients = [...all.values()].filter(recipient => recipient.delivery !== 'expanded');
+    const delivered = recipients.filter(recipient => recipient.delivery === 'delivered');
 
     const byAddress = new Map<string, DirectoryUser>();
     for (const user of users?.items ?? []) {
@@ -555,18 +621,23 @@ export class BlastRadiusService {
 
     const seen = new Set<string>();
     const entries: MailboxEntry[] = [];
-    for (const recipient of recipients.values()) {
+    for (const recipient of delivered) {
       const user = byAddress.get(recipient.address);
       if (user && !seen.has(user.id)) {
         seen.add(user.id);
-        entries.push(newEntry(user, recipient.address));
+        const ids = [...recipient.messageIds];
+        if (ids.length > MAX_MESSAGE_IDS_PER_MAILBOX) {
+          progress.messageIdsCapped += 1;
+        }
+        entries.push(newEntry(user, recipient.address, ids.slice(0, MAX_MESSAGE_IDS_PER_MAILBOX)));
       }
     }
 
     progress.route = 'trace';
-    progress.traceRecipients = [...recipients.values()];
+    progress.traceRecipients = recipients;
     progress.traceTruncated = traces.truncated;
-    progress.eligible = recipients.size;
+    progress.traceExpanded = all.size - recipients.length;
+    progress.eligible = delivered.length;
     progress.capped = entries.length > this.maxMailboxes;
     progress.entries = entries.slice(0, this.maxMailboxes);
   }
@@ -604,28 +675,48 @@ export class BlastRadiusService {
     await Promise.all(Array.from({ length: Math.min(this.concurrency, items.length) }, worker));
   }
 
-  private find(
+  /**
+   * The matching messages in one mailbox. By Message-ID whenever one is
+   * known — from message trace for this recipient, or from the key — which
+   * is an exact, cheap lookup. Sender + window (+ subject) is the last
+   * resort, used only when no Message-ID is known at all.
+   */
+  private async find(
     key: BlastRadiusKey,
-    mailbox: string,
+    entry: MailboxEntry,
     folder?: WellKnownMailFolder
-  ): Promise<BoundedResult<MessageSummary>> {
-    if (key.internetMessageId) {
-      return findMessagesByInternetMessageId(this.client, {
+  ): Promise<MessageSummary[]> {
+    const mailbox = entry.user.id;
+    const messageIds =
+      entry.messageIds.length > 0
+        ? entry.messageIds
+        : key.internetMessageId
+          ? [key.internetMessageId]
+          : [];
+    if (messageIds.length === 0) {
+      const found = await findMessagesBySender(this.client, {
         mailbox,
         folder,
-        internetMessageId: key.internetMessageId,
+        senderAddress: key.senderAddress ?? '',
+        receivedFrom: key.receivedFrom,
+        receivedTo: key.receivedTo,
+        subject: key.subject,
         maxItems: MAX_COPIES_PER_MAILBOX,
       });
+      return found.items;
     }
-    return findMessagesBySender(this.client, {
-      mailbox,
-      folder,
-      senderAddress: key.senderAddress ?? '',
-      receivedFrom: key.receivedFrom,
-      receivedTo: key.receivedTo,
-      subject: key.subject,
-      maxItems: MAX_COPIES_PER_MAILBOX,
-    });
+    // One at a time: the mailbox is never asked for more than one search at once
+    const messages: MessageSummary[] = [];
+    for (const internetMessageId of messageIds) {
+      const found = await findMessagesByInternetMessageId(this.client, {
+        mailbox,
+        folder,
+        internetMessageId,
+        maxItems: MAX_COPIES_PER_MAILBOX,
+      });
+      messages.push(...found.items);
+    }
+    return messages;
   }
 
   private async searchMailbox(
@@ -634,15 +725,19 @@ export class BlastRadiusService {
     progress: Progress
   ): Promise<void> {
     try {
-      const found = await this.find(key, entry.user.id);
+      const found = await this.find(key, entry);
       entry.checked = true;
       progress.successes += 1;
-      if (found.items.length > 0) {
-        entry.hit = found.items[0];
-        entry.copies = found.items.length;
+      if (found.length > 0) {
+        entry.hit = found[0];
+        entry.copies = found.length;
       }
     } catch (error) {
       this.noteFailure(progress, error);
+      return;
+    }
+    if (entry.hit) {
+      await this.describeHit(entry, progress);
     }
   }
 
@@ -652,6 +747,7 @@ export class BlastRadiusService {
       try {
         return (await getMailFolder(this.client, { mailbox, folder })).id;
       } catch (error) {
+        entry.detailFailed = true;
         this.noteFailure(progress, error);
         return undefined;
       }
@@ -693,8 +789,10 @@ export class BlastRadiusService {
       entry.response = described.response;
       entry.lastVerbCode = described.lastVerbCode;
     } catch (error) {
-      // Needs Mail.Read; without it the answer is simply not known
+      // Needs Mail.Read; without it the answer is not known, and the report
+      // says how many recipients that applies to
       entry.response = 'unknown';
+      entry.detailFailed = true;
       this.noteFailure(progress, error);
     }
   }
@@ -705,16 +803,19 @@ export class BlastRadiusService {
     progress: Progress
   ): Promise<void> {
     try {
-      const found = await this.find(key, entry.user.id, 'recoverableitemsdeletions');
+      const found = await this.find(key, entry, 'recoverableitemsdeletions');
       entry.recoverableChecked = true;
-      if (found.items.length > 0) {
-        entry.hit = found.items[0];
-        entry.copies = found.items.length;
+      if (found.length > 0) {
+        entry.hit = found[0];
+        entry.copies = found.length;
         entry.folder = 'recoverable';
-        await this.readLastVerb(entry, progress);
       }
     } catch (error) {
       this.noteFailure(progress, error);
+      return;
+    }
+    if (entry.hit) {
+      await this.readLastVerb(entry, progress);
     }
   }
 
@@ -785,19 +886,24 @@ export class BlastRadiusService {
     if (progress.route === 'trace') {
       const byAddress = new Map(entries.map(entry => [entry.address, entry]));
       recipients = progress.traceRecipients.map(traced => {
+        if (traced.delivery === 'failed') {
+          // Not delivered: listed, but never as a mailbox copy
+          return {
+            address: traced.address,
+            mailbox: 'not_delivered',
+            deliveryStatus: traced.status,
+          };
+        }
         const entry = byAddress.get(traced.address);
         const base: BlastRadiusRecipient = entry
           ? toRecipient(entry)
           : { address: traced.address, mailbox: 'not_checked' };
-        return {
-          ...base,
-          deliveryStatus: traced.status,
-          copies: base.copies ?? (traced.rows > 1 ? traced.rows : undefined),
-        };
+        return { ...base, deliveryStatus: traced.status };
       });
     } else {
       recipients = entries.filter(entry => entry.hit).map(toRecipient);
     }
+    const reached = recipients.filter(recipient => recipient.mailbox !== 'not_delivered');
 
     const recoverableCandidates = checked.filter(
       entry => !entry.hit || entry.folder === 'recoverable'
@@ -808,11 +914,18 @@ export class BlastRadiusService {
       eligibleIsLowerBound: progress.eligibleIsLowerBound,
       recoverableChecked: recoverableCandidates.filter(entry => entry.recoverableChecked).length,
       recoverableCandidates: recoverableCandidates.length,
+      // A request failed, or the lookup ended before the detail was read
+      detailUnavailable: entries.filter(
+        entry =>
+          entry.hit &&
+          (entry.detailFailed || entry.folder === undefined || entry.response === undefined)
+      ).length,
     };
 
     const partial =
       coverage.mailboxesChecked < coverage.mailboxesEligible ||
       coverage.recoverableChecked < coverage.recoverableCandidates ||
+      coverage.detailUnavailable > 0 ||
       coverage.eligibleIsLowerBound ||
       progress.traceTruncated ||
       progress.timedOut ||
@@ -835,10 +948,11 @@ export class BlastRadiusService {
         receivedTo: key.receivedTo.toISOString(),
       },
       totals: {
-        recipients: recipients.length,
-        read: recipients.filter(recipient => recipient.isRead === true).length,
-        replied: recipients.filter(recipient => recipient.response === 'replied').length,
-        forwarded: recipients.filter(recipient => recipient.response === 'forwarded').length,
+        recipients: reached.length,
+        read: reached.filter(recipient => recipient.isRead === true).length,
+        replied: reached.filter(recipient => recipient.response === 'replied').length,
+        forwarded: reached.filter(recipient => recipient.response === 'forwarded').length,
+        notDelivered: progress.route === 'trace' ? recipients.length - reached.length : undefined,
       },
       recipients: [...recipients]
         .sort((a, b) => significance(a) - significance(b))
@@ -858,8 +972,18 @@ export class BlastRadiusService {
     const caveats: string[] = [];
     if (progress.route === 'trace') {
       caveats.push(
-        'Recipients come from Exchange message trace (delivery records). Mailbox details are shown only for recipients that are user mailboxes; groups, shared mailboxes and aliases show delivery status only.'
+        'Recipients come from Exchange message trace (delivery records); each mailbox was read by the Message-ID trace recorded for that recipient. Mailbox details are shown only for recipients that are user mailboxes; shared mailboxes and aliases show delivery status only.'
       );
+      if (progress.traceExpanded > 0) {
+        caveats.push(
+          `${progress.traceExpanded} distribution-list address(es) that message trace shows as expanded are not listed: their members are listed individually.`
+        );
+      }
+      if (progress.messageIdsCapped > 0) {
+        caveats.push(
+          `${progress.messageIdsCapped} recipient(s) received more than ${MAX_MESSAGE_IDS_PER_MAILBOX} matching messages; only ${MAX_MESSAGE_IDS_PER_MAILBOX} were looked up in each of their mailboxes.`
+        );
+      }
       if (progress.traceTruncated) {
         caveats.push(
           'Message trace returned more rows than the limit: the recipient list is incomplete.'
@@ -893,6 +1017,11 @@ export class BlastRadiusService {
     if (coverage.recoverableChecked < coverage.recoverableCandidates) {
       caveats.push(
         `Recoverable Items (mail a user deleted and purged) was searched in ${coverage.recoverableChecked} of ${coverage.recoverableCandidates} mailboxes without a match elsewhere.`
+      );
+    }
+    if (coverage.detailUnavailable > 0) {
+      caveats.push(
+        `Folder or replied/forwarded detail could not be read for ${coverage.detailUnavailable} recipient(s); it is shown as Unknown.`
       );
     }
     if (matchedBy === 'messageId') {
@@ -929,8 +1058,16 @@ export class BlastRadiusService {
   }
 }
 
-function newEntry(user: DirectoryUser, address: string): MailboxEntry {
-  return { user, address, checked: false, recoverableChecked: false, copies: 0 };
+function newEntry(user: DirectoryUser, address: string, messageIds: string[] = []): MailboxEntry {
+  return {
+    user,
+    address,
+    messageIds,
+    checked: false,
+    recoverableChecked: false,
+    copies: 0,
+    detailFailed: false,
+  };
 }
 
 /** Sort order for the listing: the recipients needing attention first */
@@ -944,7 +1081,10 @@ function significance(recipient: BlastRadiusRecipient): number {
   if (recipient.isRead === true) {
     return 2;
   }
-  return recipient.mailbox === 'found' ? 3 : 4;
+  if (recipient.mailbox === 'found') {
+    return 3;
+  }
+  return recipient.mailbox === 'not_delivered' ? 5 : 4;
 }
 
 /**
