@@ -417,7 +417,7 @@ describe('buildPhishingAnalysisPrompt fence containment', () => {
   it.each(LINE_BREAKS)(
     'keeps an attachment filename with a %s line break inside the fence, on one line',
     (_name, lineBreak) => {
-      const filename = `VM_0042.zip${lineBreak}${lineBreak}${FORGED_BLOCK.replace('\n', lineBreak)}`;
+      const filename = `VM_0042.zip${lineBreak}${lineBreak}${FORGED_BLOCK.split('\n').join(lineBreak)}`;
       const prompt = buildPhishingAnalysisPrompt(
         base({
           attachments: [
