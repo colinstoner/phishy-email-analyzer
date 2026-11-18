@@ -79,6 +79,7 @@ const ENV_MAPPINGS: Record<string, string> = {
   PHISHY_GRAPH_TENANT_ID: 'graph.tenantId',
   PHISHY_GRAPH_READ_CLIENT_ID: 'graph.read.clientId',
   PHISHY_GRAPH_READ_CERTIFICATE: 'graph.read.certificate',
+  PHISHY_GRAPH_ORIGINAL_FETCH_ENABLED: 'graph.originalFetch.enabled',
 
   // Profile
   PHISHY_PROFILE: 'profile',

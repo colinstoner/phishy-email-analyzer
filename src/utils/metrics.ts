@@ -197,3 +197,41 @@ export function emitUserReportMetric(reportedAs: string): void {
 
   process.stdout.write(`${JSON.stringify(emf)}\n`);
 }
+
+/** How one original-message lookup ended */
+export type OriginalFetchOutcome = 'found' | 'not_found' | 'ambiguous' | 'error' | 'skipped';
+
+/**
+ * Emit the outcome of one original-message lookup (the optional Graph
+ * feature that reads a forwarded email's real headers from the reporter's
+ * mailbox). `OriginalFetchCount` is dimensioned by Outcome, so a rising
+ * `error` share is alarmable; `OriginalFetchDurationMs` is the time the
+ * lookup added to the pipeline. `skipped` means no Graph request was made
+ * (nothing usable to search with, or the reporter could not be confirmed).
+ */
+export function emitOriginalFetchMetric(outcome: OriginalFetchOutcome, durationMs: number): void {
+  if (process.env.PHISHY_DISABLE_METRICS === 'true') {
+    return;
+  }
+
+  const emf = {
+    _aws: {
+      Timestamp: Date.now(),
+      CloudWatchMetrics: [
+        {
+          Namespace: NAMESPACE,
+          Dimensions: [['Outcome']],
+          Metrics: [
+            { Name: 'OriginalFetchCount', Unit: 'Count' },
+            { Name: 'OriginalFetchDurationMs', Unit: 'Milliseconds' },
+          ],
+        },
+      ],
+    },
+    Outcome: outcome,
+    OriginalFetchCount: 1,
+    OriginalFetchDurationMs: durationMs,
+  };
+
+  process.stdout.write(`${JSON.stringify(emf)}\n`);
+}

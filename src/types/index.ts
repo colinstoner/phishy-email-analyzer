@@ -92,6 +92,37 @@ export interface ExtractedEmailData {
   contentFlags?: string[];
   /** Present when this is an Outlook Report-button submission (handled silently) */
   userReport?: UserReport;
+  /**
+   * Internet headers of the original message, read by Phishy from the
+   * reporter's own mailbox (optional Graph feature). Absent whenever the
+   * lookup is off, failed, or did not find exactly one match.
+   */
+  retrievedOriginal?: RetrievedOriginal;
+}
+
+/** One Internet header of a retrieved original. Name and value are hostile data. */
+export interface RetrievedHeader {
+  name: string;
+  value: string;
+}
+
+/**
+ * The original of a forwarded message as Phishy itself found it in the
+ * reporter's mailbox. What is verified is the retrieval (Phishy read this
+ * from the stored copy; nothing here was pasted by the forwarder) and the
+ * two fields the mailbox system stamps: `location` and `receivedAt`. The
+ * header contents are written by the sender and by every server the message
+ * passed through, so they stay hostile data.
+ */
+export interface RetrievedOriginal {
+  /** `recoverable_items`: the reporter deleted the message after forwarding it */
+  location: 'mailbox' | 'recoverable_items';
+  /** When the mailbox received the message (ISO 8601), stamped by the mail system */
+  receivedAt?: string;
+  /** Headers in stored order, top of the message first */
+  headers: RetrievedHeader[];
+  /** True when the stored copy had more headers than were read */
+  headersTruncated: boolean;
 }
 
 /**

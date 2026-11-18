@@ -44,6 +44,13 @@ import {
 } from '../services/intelligence';
 import { extractIOCs, IOCSourceContext } from '../services/intelligence/ioc.extractor';
 import { ThreatIndicatorRecord } from '../services/intelligence/database.service';
+import {
+  GraphClient,
+  ORIGINAL_FETCH_CLIENT_OPTIONS,
+  ORIGINAL_FETCH_TOKEN_OPTIONS,
+  createGraphReadClient,
+  enrichWithOriginalMessage,
+} from '../services/graph';
 
 const logger = createLogger('lambda-handler');
 
@@ -72,6 +79,8 @@ let cachedServices: {
   campaignService?: CampaignAlertService;
   intelligenceDb?: IntelligenceDatabaseService;
   commandService?: EmailCommandService;
+  /** Read-only Graph client for the original-message lookup, when that feature is on */
+  originalFetchClient?: GraphClient;
 } | null = null;
 
 /**
@@ -270,6 +279,22 @@ async function initializeServices(): Promise<{
     });
   }
 
+  // Original-message lookup: read a forwarded email's real headers from the
+  // reporter's own mailbox before analysis. Code-driven and read-only; the
+  // client is built here but contacts nothing until the first lookup.
+  let originalFetchClient: GraphClient | undefined;
+  if (config.graph?.originalFetch?.enabled) {
+    if (config.graph.enabled) {
+      originalFetchClient = createGraphReadClient(config.graph, {
+        clientOptions: ORIGINAL_FETCH_CLIENT_OPTIONS,
+        tokenOptions: ORIGINAL_FETCH_TOKEN_OPTIONS,
+      });
+      logger.info('Original-message lookup enabled');
+    } else {
+      logger.warn('graph.originalFetch.enabled has no effect while graph.enabled is false');
+    }
+  }
+
   cachedServices = {
     s3Service,
     emailParser,
@@ -278,6 +303,7 @@ async function initializeServices(): Promise<{
     intelligenceDb,
     campaignService,
     commandService,
+    originalFetchClient,
   };
 
   logger.info('Services initialized', {
@@ -475,8 +501,23 @@ async function processEmailEvent(
     }
   }
 
-  // Analyze with AI (cache miss or cache disabled)
-  analysis ??= await services.analysisService.analyzeEmail(emailData);
+  // Analyze with AI (cache miss or cache disabled). When the original-message
+  // lookup is on, first try to add the original's real headers to the email
+  // facts; it never throws and any outcome but a unique match changes nothing.
+  // Safelist users are outside the organization, so there is no mailbox to read.
+  // A Report-button submission already carries the original with its headers.
+  if (!analysis) {
+    if (services.originalFetchClient && !isSafelistUser && !userReport) {
+      await enrichWithOriginalMessage(
+        services.originalFetchClient,
+        services.emailParser,
+        msg,
+        emailData,
+        config.email.safeDomains
+      );
+    }
+    analysis = await services.analysisService.analyzeEmail(emailData);
+  }
 
   // The model never produced a verdict (provider unreachable after retries).
   // The reporter still gets an honest "analysis unavailable" report below, but

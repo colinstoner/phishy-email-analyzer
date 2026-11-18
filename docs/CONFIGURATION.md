@@ -185,7 +185,7 @@ With the flag off (the default), a button report that reaches Phishy is treated 
 
 ### Microsoft Graph (Optional)
 
-Phishy can authenticate to Microsoft Graph on your own Microsoft 365 tenant. This is a **foundation**: enabling it does not change how emails are analyzed — no feature calls Graph yet. It exists so that later features (retrieving a reporter's original message, checking who else received an email) have a safe, already-reviewed way to reach the tenant. Leave it off unless you are preparing for those. See [ARCHITECTURE.md](ARCHITECTURE.md#microsoft-graph-optional-foundation) for the trust rules.
+Phishy can authenticate to Microsoft Graph on your own Microsoft 365 tenant. `PHISHY_GRAPH_ENABLED` is a **foundation**: on its own it does not change how emails are analyzed. Each feature that uses Graph has its own flag — today that is the [original-message lookup](#original-message-lookup) — so that features (and later ones, such as checking who else received an email) share one safe, already-reviewed way to reach the tenant. Leave it off unless you are enabling one of them. See [ARCHITECTURE.md](ARCHITECTURE.md#microsoft-graph-optional-foundation) for the trust rules.
 
 To find out which Graph calls work in your tenant — with which permissions and licences — before any feature depends on them, run the read-only probe: [GRAPH_PROBE.md](GRAPH_PROBE.md). It runs locally (`npm run graph:probe`), takes the same tenant ID, client ID and certificate, and does not need `PHISHY_GRAPH_ENABLED`.
 
@@ -195,8 +195,9 @@ To find out which Graph calls work in your tenant — with which permissions and
 | `PHISHY_GRAPH_TENANT_ID` | - | Directory (tenant) ID (GUID), or a verified domain of the tenant. Required when enabled |
 | `PHISHY_GRAPH_READ_CLIENT_ID` | - | Application (client) ID (GUID) of the read-only app registration. Required when enabled |
 | `PHISHY_GRAPH_READ_CERTIFICATE` | - | Secrets Manager ARN (recommended) or inline PEM holding the app's private key and certificate. Required when enabled |
+| `PHISHY_GRAPH_ORIGINAL_FETCH_ENABLED` | `false` | Before analysis, read the original message's real headers from the reporter's own mailbox. Has effect only when `PHISHY_GRAPH_ENABLED` is also `true`. See [Original-message lookup](#original-message-lookup) |
 
-File configuration uses the same names: `graph.enabled`, `graph.tenantId`, `graph.read.clientId`, `graph.read.certificate`. With `enabled` set, a missing or malformed value fails configuration at startup; with it unset, the other values are ignored.
+File configuration uses the same names: `graph.enabled`, `graph.tenantId`, `graph.read.clientId`, `graph.read.certificate`, `graph.originalFetch.enabled`. With `graph.enabled` set, a missing or malformed value fails configuration at startup; with it unset, the other values are ignored.
 
 Authentication is **certificate-only** — there is no client-secret option. Phishy signs a five-minute JWT assertion with the private key and exchanges it for an access token, which is cached in memory and refreshed before it expires. The certificate thumbprint is derived from the certificate itself; you do not configure it.
 
@@ -251,6 +252,27 @@ The Lambda needs outbound HTTPS (TCP 443) to:
 - `graph.microsoft.com` — Graph API
 
 If the function runs in a VPC, that means a NAT gateway (or equivalent egress) and security-group/egress-filter rules allowing those hosts; there is no VPC endpoint for them. Phishy only ever contacts these two hosts for Graph: the client's base URL is fixed, it refuses redirects, and it will not follow a paging link to any other origin.
+
+#### Original-message lookup
+
+When an employee forwards a suspicious email, the forward carries none of the original's headers — only the From, Sent and Subject lines the mail client pasted in. With `PHISHY_GRAPH_ORIGINAL_FETCH_ENABLED=true` (and Graph enabled), Phishy looks the original up in **the reporter's own mailbox** and gives the analysis its real headers: `Authentication-Results`, the `Received` chain, `Return-Path`, `Reply-To`, `Message-ID`.
+
+- **Permission:** `Mail.Read` (application) on the mailboxes of the people who report to Phishy, on the read-only app registration. Grant it through Exchange RBAC for Applications as described above, scoped to those mailboxes, not tenant-wide in Entra. No other permission is used, and nothing is ever written.
+- **What is read:** message metadata to find the message, then that one message's Internet headers. Never a body or an attachment, and never a mailbox other than the reporter's.
+- **When it runs:** only for reports that arrive through SES with an SPF or DKIM `PASS` and whose `From` address is the safe-domain reporter; not for safelist senders, not when a campaign verdict is reused.
+- **Matching:** the claimed sender, sent time and subject must match **exactly one** message, counting the mailbox and its Recoverable Items (so a message the reporter deleted after forwarding is still found). No match, or more than one, and the analysis proceeds exactly as it does without this feature. So does any Graph error or timeout: the lookup has an 8-second overall budget and never fails a report.
+- **Network:** the hosts listed under [Network](#network) must be reachable from the function.
+
+To confirm beforehand that these calls work in your tenant, run the [probe](GRAPH_PROBE.md) (`Sender + time-window filter`, `/messages covers Recoverable Items`, `Internet headers via $select`).
+
+Each lookup emits one CloudWatch EMF line in the `Phishy` namespace:
+
+| Metric | Dimension | Meaning |
+|--------|-----------|---------|
+| `OriginalFetchCount` | `Outcome` = `found` / `not_found` / `ambiguous` / `error` / `skipped` | One per lookup. `skipped`: no request was made (no usable claimed sender or sent time, or the reporter could not be confirmed). A sustained `error` share means a permission, certificate or network problem — the log line `Original-message lookup failed` carries Graph's status, error code and request id |
+| `OriginalFetchDurationMs` | `Outcome` | Time the lookup added to the report |
+
+How the retrieved headers are labelled for the model, and why they are not treated as verified facts, is in [ARCHITECTURE.md](ARCHITECTURE.md#original-message-lookup).
 
 ### AWS Secrets Manager Integration
 
