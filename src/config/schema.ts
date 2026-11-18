@@ -213,10 +213,6 @@ const GraphSenderHistoryConfigSchema = z.object({
   burstWindowHours: z.number().int().min(1).max(72).default(24),
   /** Overall deadline for one lookup; on expiry analysis proceeds without it */
   budgetMs: z.number().int().min(1000).max(30000).default(8000),
-  /** Also compute history for the sender's whole domain (never for free-mail domains) */
-  includeDomain: z.boolean().default(true),
-  /** Extra free-mail domains, added to the built-in list */
-  freeMailDomains: z.array(z.string()).default([]),
   /** Fewest distinct burst recipients that can count as anomalous fan-out */
   fanoutMinRecipients: z.number().int().min(2).max(1000).default(10),
   /** Burst recipients must be at least this many times the history recipients */

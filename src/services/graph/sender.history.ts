@@ -19,6 +19,8 @@
  *   leaves this file. The burst's sending IPs do (capped, shape-checked),
  *   for one consumer only: a report copy addressed to the security team
  *   alone. They never reach the prompt, the reporter or an info-level log.
+ * - Rows are trusted only when they match the address that was asked for:
+ *   the trace operations verify that, and a mismatch discards the lookup.
  * - Work is bounded: a fixed number of trace windows, a page cap per window,
  *   one overall deadline. A count cut short by a cap is reported as
  *   "at least N", never as exact (invariant 5).
@@ -50,9 +52,9 @@ import {
   TRACE_MAX_WINDOW_MS,
   TraceOptions,
   TraceWindow,
+  assertTraceRowsMatch,
   listMessageTracesByRecipient,
   listMessageTracesBySender,
-  listMessageTracesBySenderDomain,
 } from './trace.operations';
 
 const logger = createLogger('sender-history');
@@ -82,6 +84,13 @@ export const FANOUT_MIN_NEW_RECIPIENT_SHARE = 0.5;
 export const TRACE_ROWS_PER_WINDOW = 2000;
 /** Requests per trace window per query (the service pages at 1000 rows) */
 export const TRACE_PAGES_PER_WINDOW = 2;
+/**
+ * Query types per window: mail from the address, and mail to it. Both filter
+ * with `eq`, the only address predicate message trace applies; there is no
+ * domain-level query because the service silently ignores `endswith` and
+ * `contains` on addresses.
+ */
+const QUERY_TYPES = 2;
 /** Trace requests in flight at once */
 const MAX_CONCURRENT_REQUESTS = 6;
 /**
@@ -130,31 +139,6 @@ const ADDRESS_SHAPE =
   /^[a-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
 const BARE_ADDRESS = /[^\s<>()[\]"',;:]+@[^\s<>()[\]"',;:]+/g;
 
-/**
- * Mailbox providers anyone can sign up with: a domain-level history for
- * these says nothing about the sender. Extend with
- * `graph.senderHistory.freeMailDomains`.
- */
-export const FREE_MAIL_DOMAINS: readonly string[] = [
-  'gmail.com',
-  'googlemail.com',
-  'outlook.com',
-  'hotmail.com',
-  'live.com',
-  'msn.com',
-  'yahoo.com',
-  'ymail.com',
-  'aol.com',
-  'icloud.com',
-  'me.com',
-  'proton.me',
-  'protonmail.com',
-  'gmx.com',
-  'mail.com',
-  'zoho.com',
-  'yandex.com',
-];
-
 export interface SenderHistorySettings {
   /** Days of mail-flow records to examine (14-90) */
   lookbackDays: number;
@@ -162,10 +146,6 @@ export interface SenderHistorySettings {
   burstWindowHours: number;
   /** Overall deadline for one lookup */
   budgetMs: number;
-  /** Also compute history for the sender's whole domain (never for free-mail domains) */
-  includeDomain: boolean;
-  /** Extra free-mail domains, on top of `FREE_MAIL_DOMAINS` */
-  freeMailDomains: string[];
   fanoutMinRecipients: number;
   fanoutMultiplier: number;
   /** The organization's own domains: an address on one is not external */
@@ -249,8 +229,6 @@ export interface TraceRows {
 export interface SenderHistoryInput {
   inbound: TraceRows;
   outbound: TraceRows;
-  /** Absent when domain-level history was not queried */
-  domain?: TraceRows;
   startMs: number;
   burstStartMs: number;
   nowMs: number;
@@ -400,16 +378,6 @@ export function computeSenderHistoryFacts(input: SenderHistoryInput): SenderHist
   );
   const burstIps = reportableIps.slice(0, MAX_REPORTED_BURST_IPS);
 
-  let domain: SenderHistoryFacts['domain'];
-  if (input.domain) {
-    const domainHistory = tally(input.domain.rows, startMs, burstStartMs, nowMs).history;
-    domain = {
-      messages: bounded(domainHistory.messages.size, input.domain.historyTruncated),
-      recipients: bounded(domainHistory.recipients.size, input.domain.historyTruncated),
-      firstSeen: utcDate(domainHistory.firstMs),
-    };
-  }
-
   const classification = classifySenderRelationship({
     historyMessages: inbound.history.messages.size,
     historyRecipients: inbound.history.recipients.size,
@@ -448,12 +416,7 @@ export function computeSenderHistoryFacts(input: SenderHistoryInput): SenderHist
         ? { burstIpsOmitted: inbound.burst.ips.size - burstIps.length }
         : {}),
     },
-    domain,
-    truncated:
-      historyTruncated ||
-      burstTruncated ||
-      input.outbound.historyTruncated ||
-      (input.domain?.historyTruncated ?? false),
+    truncated: historyTruncated || burstTruncated || input.outbound.historyTruncated,
   };
 }
 
@@ -496,6 +459,8 @@ interface LookupStats {
   succeeded: number;
   /** Retries made after a 403 */
   forbiddenRetries: number;
+  /** A query returned rows its address filter did not select */
+  filterMismatch?: boolean;
 }
 
 function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
@@ -516,7 +481,6 @@ function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
 
 export class SenderHistoryService {
   private readonly cache = new Map<string, CacheEntry>();
-  private readonly freeMail: Set<string>;
   /** Start times of recent trace requests, for the per-instance allowance */
   private requestLog: number[] = [];
   private forbiddenUntil = 0;
@@ -530,9 +494,6 @@ export class SenderHistoryService {
   ) {
     this.now = deps.now ?? Date.now;
     this.sleep = deps.sleep ?? abortableSleep;
-    this.freeMail = new Set(
-      [...FREE_MAIL_DOMAINS, ...settings.freeMailDomains].map(domain => domain.toLowerCase())
-    );
   }
 
   /**
@@ -566,6 +527,7 @@ export class SenderHistoryService {
         classification: facts?.classification,
         truncated: facts?.truncated,
         forbiddenRetries: stats.forbiddenRetries,
+        filterMismatch: stats.filterMismatch,
       });
       return facts;
     };
@@ -598,11 +560,7 @@ export class SenderHistoryService {
     const burstStartMs = Math.max(startMs, emailMs - this.settings.burstWindowHours * HOUR_MS);
     const windows = splitTraceWindows(startMs, nowMs);
 
-    const domain = address.slice(address.indexOf('@') + 1);
-    const withDomain = this.settings.includeDomain && !this.freeMail.has(domain);
-    const queryTypes = withDomain ? 3 : 2;
-
-    if (!this.reserveRequests(windows.length * queryTypes, startedAt)) {
+    if (!this.reserveRequests(windows.length * QUERY_TYPES, startedAt)) {
       logger.warn('Sender history skipped: this instance has used its message trace allowance', {
         allowancePer5Min: REQUEST_ALLOWANCE_PER_5_MIN,
       });
@@ -619,7 +577,7 @@ export class SenderHistoryService {
     });
 
     try {
-      const collected = this.collect(address, withDomain ? domain : undefined, windows, {
+      const collected = this.collect(address, windows, {
         burstStartMs,
         nowMs,
         signal: controller.signal,
@@ -647,7 +605,6 @@ export class SenderHistoryService {
         burstRecipients: facts.burst.recipients.count,
         truncated: facts.truncated,
         windows: windows.length,
-        queryTypes,
         forbiddenRetries: stats.forbiddenRetries,
       });
       logger.debug('Sender history subject', { senderHash: key.slice(0, 12) });
@@ -696,10 +653,9 @@ export class SenderHistoryService {
 
   private async collect(
     address: string,
-    domain: string | undefined,
     windows: TraceWindow[],
     context: { burstStartMs: number; nowMs: number; signal: AbortSignal; stats: LookupStats }
-  ): Promise<Pick<SenderHistoryInput, 'inbound' | 'outbound' | 'domain'>> {
+  ): Promise<Pick<SenderHistoryInput, 'inbound' | 'outbound'>> {
     const options: TraceOptions = {
       maxItems: TRACE_ROWS_PER_WINDOW,
       maxPages: TRACE_PAGES_PER_WINDOW,
@@ -710,12 +666,20 @@ export class SenderHistoryService {
     const empty = (): TraceRows => ({ rows: [], historyTruncated: false, burstTruncated: false });
     const inbound = empty();
     const outbound = empty();
-    const domainRows = domain === undefined ? undefined : empty();
 
     const into =
-      (target: TraceRows, window: TraceWindow, run: () => Promise<BoundedResult<MessageTrace>>) =>
+      (
+        target: TraceRows,
+        window: TraceWindow,
+        field: 'senderAddress' | 'recipientAddress',
+        run: () => Promise<BoundedResult<MessageTrace>>
+      ) =>
       async (): Promise<void> => {
         const result = await this.retryingForbidden(run, context.signal, context.stats);
+        // Counts are only facts about this sender if every row is about this
+        // sender. The operation already rejects rows naming another address;
+        // here a row with no address at all is rejected too.
+        assertTraceRowsMatch(this.client, result.items, field, address);
         context.stats.succeeded++;
         target.rows.push(...result.items);
         // A second page was requested when more than one page of rows came back
@@ -731,10 +695,10 @@ export class SenderHistoryService {
     const tasks: Array<() => Promise<void>> = [];
     for (const window of windows) {
       tasks.push(
-        into(inbound, window, () =>
+        into(inbound, window, 'senderAddress', () =>
           listMessageTracesBySender(this.client, { ...options, ...window, senderAddress: address })
         ),
-        into(outbound, window, () =>
+        into(outbound, window, 'recipientAddress', () =>
           listMessageTracesByRecipient(this.client, {
             ...options,
             ...window,
@@ -742,21 +706,10 @@ export class SenderHistoryService {
           })
         )
       );
-      if (domainRows && domain !== undefined) {
-        tasks.push(
-          into(domainRows, window, () =>
-            listMessageTracesBySenderDomain(this.client, {
-              ...options,
-              ...window,
-              senderDomain: domain,
-            })
-          )
-        );
-      }
     }
 
     await runLimited(tasks, MAX_CONCURRENT_REQUESTS);
-    return { inbound, outbound, domain: domainRows };
+    return { inbound, outbound };
   }
 
   /**
@@ -795,6 +748,16 @@ export class SenderHistoryService {
       return 'timeout';
     }
     if (error instanceof GraphError) {
+      if (error.kind === 'filter_not_applied') {
+        // The rows are not about this sender at all. Nothing is computed
+        // from them: counts from unfiltered mail flow must never be facts.
+        stats.filterMismatch = true;
+        logger.warn(
+          'Sender history discarded: message trace returned rows that do not match the address ' +
+            'filter that was sent (the service accepted the filter without applying it)'
+        );
+        return 'error';
+      }
       if (error.status === 403 && stats.succeeded > 0) {
         // Other requests in this lookup worked: the service is flapping, not
         // refusing. No cooldown, so the next report tries again.
@@ -854,8 +817,6 @@ export function createSenderHistoryService(
     lookbackDays: settings.lookbackDays,
     burstWindowHours: settings.burstWindowHours,
     budgetMs: settings.budgetMs,
-    includeDomain: settings.includeDomain,
-    freeMailDomains: settings.freeMailDomains,
     fanoutMinRecipients: settings.fanoutMinRecipients,
     fanoutMultiplier: settings.fanoutMultiplier,
     safeDomains: config.email.safeDomains,

@@ -47,7 +47,6 @@ function facts(
         { ip: '203.0.113.9', seenInHistory: false },
       ],
     },
-    domain: { messages: exact(30), recipients: exact(6), firstSeen: '2026-10-19' },
     truncated: false,
     ...overrides,
   };
@@ -132,7 +131,6 @@ describe('formatSenderHistoryLines', () => {
         twoWay: { messages: exact(0), internalSenders: exact(0) },
         burst: { messages: exact(0), recipients: exact(0), newRecipients: exact(0) },
         sendingIps: { burst: 0, seenInHistory: 0, historyComplete: true },
-        domain: undefined,
       })
     )
       .map(line => line.join(': '))
@@ -141,7 +139,7 @@ describe('formatSenderHistoryLines', () => {
     expect(text).toContain('none: no mail from the organization to this address');
     expect(text).toContain('no mail from this address');
     expect(text).toContain('none recorded');
-    expect(text).not.toContain("sender's domain");
+    expect(text).not.toMatch(/domain/i);
   });
 
   it('uses the singular for one', () => {
@@ -552,8 +550,6 @@ describe('graph.senderHistory configuration', () => {
     'PHISHY_GRAPH_SENDER_HISTORY_LOOKBACK_DAYS',
     'PHISHY_GRAPH_SENDER_HISTORY_BURST_WINDOW_HOURS',
     'PHISHY_GRAPH_SENDER_HISTORY_BUDGET_MS',
-    'PHISHY_GRAPH_SENDER_HISTORY_INCLUDE_DOMAIN',
-    'PHISHY_GRAPH_SENDER_HISTORY_FREE_MAIL_DOMAINS',
     'PHISHY_GRAPH_SENDER_HISTORY_FANOUT_MIN_RECIPIENTS',
     'PHISHY_GRAPH_SENDER_HISTORY_FANOUT_MULTIPLIER',
     'ANTHROPIC_API_KEY',
@@ -589,11 +585,21 @@ describe('graph.senderHistory configuration', () => {
       lookbackDays: 30,
       burstWindowHours: 24,
       budgetMs: 8000,
-      includeDomain: true,
-      freeMailDomains: [],
       fanoutMinRecipients: 10,
       fanoutMultiplier: 3,
     });
+  });
+
+  it('ignores the removed domain-history keys instead of failing a deployment that still sets them', () => {
+    const stale = safeValidateConfig({
+      ...base,
+      graph: {
+        senderHistory: { enabled: true, includeDomain: true, freeMailDomains: ['a.example.org'] },
+      },
+    });
+    expect(stale.success).toBe(true);
+    expect(stale.data?.graph?.senderHistory).not.toHaveProperty('includeDomain');
+    expect(stale.data?.graph?.senderHistory).not.toHaveProperty('freeMailDomains');
   });
 
   it('rejects values outside the bounds the trace API and the Lambda allow', () => {
@@ -616,8 +622,6 @@ describe('graph.senderHistory configuration', () => {
     process.env.PHISHY_GRAPH_SENDER_HISTORY_LOOKBACK_DAYS = '60';
     process.env.PHISHY_GRAPH_SENDER_HISTORY_BURST_WINDOW_HOURS = '48';
     process.env.PHISHY_GRAPH_SENDER_HISTORY_BUDGET_MS = '5000';
-    process.env.PHISHY_GRAPH_SENDER_HISTORY_INCLUDE_DOMAIN = 'false';
-    process.env.PHISHY_GRAPH_SENDER_HISTORY_FREE_MAIL_DOMAINS = 'freemail.example.org, webmail.example.net';
     process.env.PHISHY_GRAPH_SENDER_HISTORY_FANOUT_MIN_RECIPIENTS = '20';
     process.env.PHISHY_GRAPH_SENDER_HISTORY_FANOUT_MULTIPLIER = '5';
 
@@ -630,8 +634,6 @@ describe('graph.senderHistory configuration', () => {
       lookbackDays: 60,
       burstWindowHours: 48,
       budgetMs: 5000,
-      includeDomain: false,
-      freeMailDomains: ['freemail.example.org', 'webmail.example.net'],
       fanoutMinRecipients: 20,
       fanoutMultiplier: 5,
     });

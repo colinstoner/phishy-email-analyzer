@@ -89,8 +89,6 @@ const ENV_MAPPINGS: Record<string, string> = {
   PHISHY_GRAPH_SENDER_HISTORY_LOOKBACK_DAYS: 'graph.senderHistory.lookbackDays',
   PHISHY_GRAPH_SENDER_HISTORY_BURST_WINDOW_HOURS: 'graph.senderHistory.burstWindowHours',
   PHISHY_GRAPH_SENDER_HISTORY_BUDGET_MS: 'graph.senderHistory.budgetMs',
-  PHISHY_GRAPH_SENDER_HISTORY_INCLUDE_DOMAIN: 'graph.senderHistory.includeDomain',
-  PHISHY_GRAPH_SENDER_HISTORY_FREE_MAIL_DOMAINS: 'graph.senderHistory.freeMailDomains',
   PHISHY_GRAPH_SENDER_HISTORY_FANOUT_MIN_RECIPIENTS: 'graph.senderHistory.fanoutMinRecipients',
   PHISHY_GRAPH_SENDER_HISTORY_FANOUT_MULTIPLIER: 'graph.senderHistory.fanoutMultiplier',
 

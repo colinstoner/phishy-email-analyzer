@@ -18,15 +18,17 @@ import {
   SenderHistorySettings,
   TRACE_MAX_WINDOW_MS,
   TraceRows,
+  assertTraceRowsMatch,
   claimedSenderAddress,
   classifySenderRelationship,
   computeSenderHistoryFacts,
   createSenderHistoryService,
   listMessageTracesByRecipient,
-  listMessageTracesBySenderDomain,
+  listMessageTracesBySender,
   resolveEmailTime,
   splitTraceWindows,
 } from '../../../../src/services/graph';
+import * as graphModule from '../../../../src/services/graph';
 import { ExtractedEmailData } from '../../../../src/types';
 import * as metrics from '../../../../src/utils/metrics';
 import {
@@ -47,8 +49,6 @@ const SETTINGS: SenderHistorySettings = {
   lookbackDays: 30,
   burstWindowHours: 24,
   budgetMs: 8000,
-  includeDomain: true,
-  freeMailDomains: [],
   fanoutMinRecipients: 10,
   fanoutMultiplier: 3,
   safeDomains: ['example.com'],
@@ -199,7 +199,7 @@ describe('computeSenderHistoryFacts', () => {
     expect(facts.history.messages).toEqual({ count: 0, atLeast: false });
     expect(facts.burst.newRecipients).toEqual({ count: 0, atLeast: false });
     expect(facts.history.firstSeen).toBeUndefined();
-    expect(facts.domain).toBeUndefined();
+    expect(facts).not.toHaveProperty('domain');
     expect(facts.truncated).toBe(false);
     expect(facts.burstWindowHours).toBe(24);
   });
@@ -376,13 +376,11 @@ describe('computeSenderHistoryFacts', () => {
       ...BASE,
       inbound: rows([...history, ...blast(40)], { historyTruncated: true }),
       outbound: rows([], { historyTruncated: true }),
-      domain: rows(history, { historyTruncated: true }),
     });
     expect(facts.truncated).toBe(true);
     expect(facts.history.messages).toEqual({ count: 5, atLeast: true });
     expect(facts.history.recipients.atLeast).toBe(true);
     expect(facts.twoWay.messages.atLeast).toBe(true);
-    expect(facts.domain?.messages).toEqual({ count: 5, atLeast: true });
     expect(facts.burst.newRecipients).toBeNull();
     expect(facts.sendingIps.historyComplete).toBe(false);
     // Fan-out cannot be judged, so the class stays at what is known
@@ -400,23 +398,6 @@ describe('computeSenderHistoryFacts', () => {
     expect(facts.history.messages.atLeast).toBe(false);
   });
 
-  it('computes domain-level history from the history period only', () => {
-    const facts = computeSenderHistoryFacts({
-      ...BASE,
-      inbound: rows([]),
-      outbound: rows([]),
-      domain: rows([
-        inboundRow(NOW - 9 * DAY, 'alex@example.com', { senderAddress: 'kim@supplier.example.net' }),
-        inboundRow(NOW - HOUR, 'sam@example.com', { senderAddress: 'kim@supplier.example.net' }),
-      ]),
-    });
-    expect(facts.domain).toEqual({
-      messages: { count: 1, atLeast: false },
-      recipients: { count: 1, atLeast: false },
-      firstSeen: '2026-11-08',
-    });
-    expect(facts.classification).toBe('no_history');
-  });
 });
 
 describe('classifySenderRelationship thresholds', () => {
@@ -471,33 +452,99 @@ describe('new trace operations', () => {
   const range =
     'receivedDateTime ge 2026-11-10T00:00:00Z and receivedDateTime le 2026-11-17T00:00:00Z';
 
-  it('traces by recipient and by sender domain, escaping the value', async () => {
+  it('traces by recipient, escaping the value', async () => {
     const graph = fakeGraph([() => collection([])]);
     await listMessageTracesByRecipient(graph.client, {
       ...window,
       recipientAddress: "o'neil@supplier.example.net",
       maxPages: 2,
     });
-    await listMessageTracesBySenderDomain(graph.client, {
-      ...window,
-      senderDomain: 'supplier.example.net',
-    });
     expect(graph.requests.map(r => r.query.$filter)).toEqual([
       `${range} and recipientAddress eq 'o''neil@supplier.example.net'`,
-      `${range} and endswith(senderAddress, '@supplier.example.net')`,
     ]);
     expect(graph.requests.every(r => r.method === 'GET' && r.path === TRACE_PATH)).toBe(true);
   });
 
-  it('refuses a bad page cap or a domain that is not bare', async () => {
+  it('refuses a bad page cap', async () => {
     const graph = fakeGraph([() => collection([])]);
     await expect(
       listMessageTracesByRecipient(graph.client, { ...window, recipientAddress: SENDER, maxPages: 6 })
     ).rejects.toThrow('maxPages');
-    await expect(
-      listMessageTracesBySenderDomain(graph.client, { ...window, senderDomain: 'a@example.net' })
-    ).rejects.toThrow('bare domain');
     expect(graph.requests).toHaveLength(0);
+  });
+
+  it('has no domain-level trace query: the service ignores endswith/contains on addresses', () => {
+    expect(graphModule).not.toHaveProperty('listMessageTracesBySenderDomain');
+  });
+
+  describe('rows the filter did not select', () => {
+    const at = '2026-11-12T00:00:00Z';
+    const good = { senderAddress: SENDER, recipientAddress: 'a@example.com', receivedDateTime: at };
+    const other = {
+      senderAddress: 'newsletter@bulk.example.org',
+      recipientAddress: 'b@example.com',
+      receivedDateTime: at,
+    };
+
+    it('accepts rows that all carry the requested address, whatever the case', async () => {
+      const graph = fakeGraph([
+        () => collection([good, { ...good, senderAddress: SENDER.toUpperCase() }]),
+      ]);
+      const bySender = await listMessageTracesBySender(graph.client, {
+        ...window,
+        senderAddress: SENDER,
+      });
+      expect(bySender.items).toHaveLength(2);
+
+      const toSender = { ...other, recipientAddress: 'Pat@Supplier.Example.net' };
+      const byRecipient = await listMessageTracesByRecipient(
+        fakeGraph([() => collection([toSender])]).client,
+        { ...window, recipientAddress: SENDER }
+      );
+      expect(byRecipient.items).toHaveLength(1);
+    });
+
+    it('lets a row with no address through the operation, but not through the strict check', async () => {
+      const graph = fakeGraph([() => collection([good, { ...good, senderAddress: null }])]);
+      const result = await listMessageTracesBySender(graph.client, {
+        ...window,
+        senderAddress: SENDER,
+      });
+      expect(result.items).toHaveLength(2);
+      expect(() =>
+        assertTraceRowsMatch(graph.client, result.items, 'senderAddress', SENDER)
+      ).toThrow('1 of 2 rows do not match the senderAddress');
+      expect(() =>
+        assertTraceRowsMatch(graph.client, result.items, 'senderAddress', SENDER, {
+          allowMissing: true,
+        })
+      ).not.toThrow();
+    });
+
+    it('fails a by-sender query on a row from another sender', async () => {
+      const graph = fakeGraph([() => collection([good, other])]);
+      for (const subject of [undefined, 'RFQ']) {
+        const error = await listMessageTracesBySender(graph.client, {
+          ...window,
+          senderAddress: SENDER,
+          subject,
+        }).catch((e: unknown) => e);
+        expect(error).toMatchObject({ name: 'GraphError', kind: 'filter_not_applied' });
+        // What went wrong, never whose mail it was
+        expect((error as Error).message).toContain('1 of 2 rows do not match the senderAddress');
+        expect((error as Error).message).not.toContain('@');
+      }
+    });
+
+    it('fails a by-recipient query on a row to someone else', async () => {
+      const graph = fakeGraph([() => collection([good, other])]);
+      const error = await listMessageTracesByRecipient(graph.client, {
+        ...window,
+        recipientAddress: SENDER,
+      }).catch((e: unknown) => e);
+      expect(error).toMatchObject({ name: 'GraphError', kind: 'filter_not_applied' });
+      expect((error as Error).message).not.toContain('@');
+    });
   });
 
   it('stops at the caller’s deadline without sending anything further', async () => {
@@ -527,11 +574,10 @@ describe('SenderHistoryService', () => {
   const outcomes = (): string[] =>
     metricSpy.mock.calls.map(call => (call[0] as metrics.SenderHistoryMetric).outcome);
 
-  /** Answer by query type: inbound by sender, outbound by recipient, domain-level */
+  /** Answer by query type: inbound by sender, outbound by recipient */
   function traceResponder(data: {
     inbound?: MessageTrace[];
     outbound?: MessageTrace[];
-    domain?: MessageTrace[];
   }): FakeResponder {
     return (request: RecordedRequest) => {
       const filter = request.query.$filter ?? '';
@@ -539,21 +585,18 @@ describe('SenderHistoryService', () => {
       if (filter.includes('senderAddress eq')) {
         return collection(newest ? (data.inbound ?? []) : []);
       }
-      if (filter.includes('recipientAddress eq')) {
-        return collection(newest ? (data.outbound ?? []) : []);
-      }
-      return collection(newest ? (data.domain ?? []) : []);
+      return collection(newest ? (data.outbound ?? []) : []);
     };
   }
 
-  it('makes 9 GET requests for a 30-day lookup with domain history, all code-built', async () => {
+  it('makes 6 GET requests for a 30-day lookup, all code-built and filtered with eq only', async () => {
     const graph = fakeGraph([traceResponder({ inbound: blast(3) })]);
     const service = new SenderHistoryService(graph.client, SETTINGS, { now });
 
     const facts = await service.lookupForEmail(email(`Pat <${SENDER}>`));
 
     expect(facts?.burst.recipients.count).toBe(3);
-    expect(graph.requests).toHaveLength(9);
+    expect(graph.requests).toHaveLength(6);
     expect(graph.requests.every(r => r.method === 'GET' && r.path === TRACE_PATH)).toBe(true);
     expect(graph.requests.every(r => r.query.$top === '2000')).toBe(true);
 
@@ -563,46 +606,111 @@ describe('SenderHistoryService', () => {
       'receivedDateTime ge 2026-10-28T12:00:00Z and receivedDateTime le 2026-11-07T12:00:00Z',
       'receivedDateTime ge 2026-10-18T12:00:00Z and receivedDateTime le 2026-10-28T12:00:00Z',
     ];
-    for (const window of windows) {
-      expect(filters).toContain(`${window} and senderAddress eq '${SENDER}'`);
-      expect(filters).toContain(`${window} and recipientAddress eq '${SENDER}'`);
-      expect(filters).toContain(`${window} and endswith(senderAddress, '@supplier.example.net')`);
-    }
+    expect([...filters].sort()).toEqual(
+      windows
+        .flatMap(window => [
+          `${window} and senderAddress eq '${SENDER}'`,
+          `${window} and recipientAddress eq '${SENDER}'`,
+        ])
+        .sort()
+    );
+    // Predicates message trace accepts but does not apply to addresses
+    expect(filters.join(' ')).not.toMatch(/endswith|contains|startswith/i);
     expect(outcomes()).toEqual(['ok']);
   });
 
-  it('skips domain history for free-mail domains, built in or configured', async () => {
-    const graph = fakeGraph([traceResponder({})]);
-    const service = new SenderHistoryService(
-      graph.client,
-      { ...SETTINGS, freeMailDomains: ['Freemail.Example.org'] },
-      { now }
-    );
-
-    const gmail = await service.lookupForEmail(email('someone@gmail.com'));
-    await service.lookupForEmail(email('someone@freemail.example.org'));
-
-    expect(gmail?.domain).toBeUndefined();
-    expect(graph.requests).toHaveLength(12);
-    expect(graph.requests.some(r => r.query.$filter.includes('endswith'))).toBe(false);
+  it('discards a lookup whose rows carry no address to confirm', async () => {
+    const graph = fakeGraph([
+      traceResponder({ inbound: [inboundRow(NOW - HOUR, 'a@example.com', { senderAddress: undefined })] }),
+    ]);
+    const service = new SenderHistoryService(graph.client, SETTINGS, { now });
+    expect(await service.lookupForEmail(email(SENDER))).toBeUndefined();
+    expect(metricSpy.mock.calls[0][0]).toMatchObject({ outcome: 'error', filterMismatch: true });
   });
 
-  it('skips domain history when it is switched off', async () => {
+  it('makes the same 6 requests for a free-mail sender: there is no domain query to skip', async () => {
     const graph = fakeGraph([traceResponder({})]);
-    const service = new SenderHistoryService(
-      graph.client,
-      { ...SETTINGS, includeDomain: false },
-      { now }
-    );
-    await service.lookupForEmail(email(SENDER));
+    const service = new SenderHistoryService(graph.client, SETTINGS, { now });
+    const facts = await service.lookupForEmail(email('someone@gmail.com'));
+    expect(facts).not.toHaveProperty('domain');
     expect(graph.requests).toHaveLength(6);
+  });
+
+  describe('when message trace does not apply the address filter', () => {
+    /** The whole tenant's mail flow, whatever was asked: what a dropped predicate looks like */
+    const unfiltered = (): Response =>
+      collection(
+        Array.from({ length: 50 }, (_, i) =>
+          inboundRow(NOW - HOUR, `staff${i}@example.com`, {
+            senderAddress: `bulk${i % 7}@newsletter.example.org`,
+          })
+        )
+      );
+
+    it('discards the lookup: no facts, an error outcome, a metric, no cooldown, nothing cached', async () => {
+      const graph = fakeGraph([unfiltered]);
+      const service = new SenderHistoryService(graph.client, SETTINGS, { now });
+
+      expect(await service.lookupForEmail(email(SENDER))).toBeUndefined();
+      expect(metricSpy.mock.calls[0][0]).toMatchObject({ outcome: 'error', filterMismatch: true });
+      const afterFirst = graph.requests.length;
+
+      // Asked again at once: not cached, not in cooldown
+      expect(await service.lookupForEmail(email(SENDER))).toBeUndefined();
+      expect(graph.requests.length).toBeGreaterThan(afterFirst);
+      expect(outcomes()).toEqual(['error', 'error']);
+    });
+
+    it('discards it even when only one of the six queries came back unfiltered', async () => {
+      const honest = traceResponder({ inbound: blast(30) });
+      const graph = fakeGraph([
+        request =>
+          request.query.$filter.includes('recipientAddress eq') &&
+          request.query.$filter.includes('ge 2026-10-18T12:00:00Z')
+            ? unfiltered()
+            : honest(request),
+      ]);
+      const service = new SenderHistoryService(graph.client, SETTINGS, { now });
+
+      expect(await service.lookupForEmail(email(SENDER))).toBeUndefined();
+      expect(metricSpy.mock.calls[0][0]).toMatchObject({ outcome: 'error', filterMismatch: true });
+    });
+
+    it('is not retried, and is reported without any address', async () => {
+      const written: string[] = [];
+      const capture = (...args: unknown[]): void => {
+        written.push(args.map(String).join(' '));
+      };
+      const spies = [
+        jest.spyOn(console, 'log').mockImplementation(capture),
+        jest.spyOn(console, 'warn').mockImplementation(capture),
+        jest.spyOn(console, 'error').mockImplementation(capture),
+      ];
+      const graph = fakeGraph([unfiltered]);
+      const sleep = jest.fn(() => Promise.resolve());
+      await new SenderHistoryService(graph.client, SETTINGS, { now, sleep }).lookupForEmail(
+        email(SENDER)
+      );
+      spies.forEach(spy => spy.mockRestore());
+
+      expect(sleep).not.toHaveBeenCalled();
+      expect(graph.requests.length).toBeLessThanOrEqual(6);
+      expect(metricSpy.mock.calls[0][0]).toMatchObject({ forbiddenRetries: 0 });
+      expect(written.join('\n')).not.toContain('@');
+    });
+
+    it('reports no mismatch on an ordinary lookup', async () => {
+      const graph = fakeGraph([traceResponder({ inbound: blast(2) })]);
+      await new SenderHistoryService(graph.client, SETTINGS, { now }).lookupForEmail(email(SENDER));
+      expect(metricSpy.mock.calls[0][0].filterMismatch).toBeUndefined();
+    });
   });
 
   it('caps the lookback inside the trace horizon', async () => {
     const graph = fakeGraph([traceResponder({})]);
     const service = new SenderHistoryService(
       graph.client,
-      { ...SETTINGS, lookbackDays: 90, includeDomain: false },
+      { ...SETTINGS, lookbackDays: 90 },
       { now }
     );
     const facts = await service.lookupForEmail(email(SENDER));
@@ -666,7 +774,7 @@ describe('SenderHistoryService', () => {
     expect(facts?.burst.recipients.atLeast).toBe(true);
     expect(facts?.burst.newRecipients).toBeNull();
     // Two pages per inbound window, one for every other query
-    expect(graph.requests).toHaveLength(12);
+    expect(graph.requests).toHaveLength(9);
   });
 
   it('does not query for an internal, safelisted, missing or malformed sender', async () => {
@@ -693,11 +801,11 @@ describe('SenderHistoryService', () => {
     const first = await service.lookupForEmail(email(SENDER));
     const second = await service.lookupForEmail(email(`Pat <${SENDER.toUpperCase()}>`));
     expect(second).toBe(first);
-    expect(graph.requests).toHaveLength(9);
+    expect(graph.requests).toHaveLength(6);
 
     clock += CACHE_TTL_MS + 1000;
     await service.lookupForEmail(email(SENDER));
-    expect(graph.requests).toHaveLength(18);
+    expect(graph.requests).toHaveLength(12);
     expect(outcomes()).toEqual(['ok', 'cache_hit', 'ok']);
   });
 
@@ -731,7 +839,7 @@ describe('SenderHistoryService', () => {
       expect(outcomes()).toEqual(['ok']);
       const [retries] = retriesReported();
       expect(retries).toBeGreaterThanOrEqual(2);
-      expect(graph.requests).toHaveLength(9 + retries);
+      expect(graph.requests).toHaveLength(6 + retries);
       expect(delays).toHaveLength(retries);
       expect(delays.every(ms => ms === FORBIDDEN_RETRY_DELAY_MS)).toBe(true);
       expect(graph.requests.every(r => r.method === 'GET' && r.path === TRACE_PATH)).toBe(true);
@@ -748,7 +856,7 @@ describe('SenderHistoryService', () => {
       ]);
       const service = new SenderHistoryService(
         graph.client,
-        { ...SETTINGS, lookbackDays: 14, includeDomain: false },
+        { ...SETTINGS, lookbackDays: 14 },
         { now, sleep }
       );
 
@@ -767,7 +875,7 @@ describe('SenderHistoryService', () => {
       const afterFirst = graph.requests.length;
       // Every request that started was tried once and retried three times
       expect(afterFirst).toBeGreaterThanOrEqual(FORBIDDEN_RETRIES + 1);
-      expect(afterFirst).toBeLessThanOrEqual(9 * (FORBIDDEN_RETRIES + 1));
+      expect(afterFirst).toBeLessThanOrEqual(6 * (FORBIDDEN_RETRIES + 1));
 
       expect(await service.lookupForEmail(email('other@supplier.example.net'))).toBeUndefined();
       expect(graph.requests).toHaveLength(afterFirst);
@@ -831,11 +939,15 @@ describe('SenderHistoryService', () => {
   it('returns nothing when any window fails, rather than partial counts', async () => {
     let calls = 0;
     const graph = fakeGraph([
-      () => (++calls === 4 ? graphErrorResponse(500, 'ServiceUnavailable') : collection(blast(1))),
+      request =>
+        ++calls === 4
+          ? graphErrorResponse(500, 'ServiceUnavailable')
+          : traceResponder({ inbound: blast(1) })(request),
     ]);
     const service = new SenderHistoryService(graph.client, SETTINGS, { now });
     expect(await service.lookupForEmail(email(SENDER))).toBeUndefined();
     expect(outcomes()).toEqual(['error']);
+    expect(metricSpy.mock.calls[0][0].filterMismatch).toBeUndefined();
   });
 
   it('gives up at the time budget and cancels what is in flight', async () => {
@@ -871,12 +983,13 @@ describe('SenderHistoryService', () => {
   it('stops spending trace requests once this instance’s allowance is used', async () => {
     const graph = fakeGraph([traceResponder({})]);
     const service = new SenderHistoryService(graph.client, SETTINGS, { now });
-    for (let i = 0; i < 8; i++) {
+    for (let i = 0; i < 12; i++) {
       await service.lookupForEmail(email(`sender${i}@supplier.example.net`));
     }
-    // 6 lookups x 9 requests fit in the allowance of 60; the 7th and 8th do not
-    expect(graph.requests).toHaveLength(54);
-    expect(outcomes().slice(6)).toEqual(['rate_limited', 'rate_limited']);
+    // 10 distinct senders x 6 requests use the allowance of 60; the 11th and 12th wait
+    expect(graph.requests).toHaveLength(60);
+    expect(outcomes().slice(0, 10)).toEqual(Array(10).fill('ok'));
+    expect(outcomes().slice(10)).toEqual(['rate_limited', 'rate_limited']);
 
     clock += 5 * 60 * 1000 + 1000;
     expect(await service.lookupForEmail(email('later@supplier.example.net'))).toBeDefined();
@@ -935,8 +1048,6 @@ describe('createSenderHistoryService', () => {
     lookbackDays: 30,
     burstWindowHours: 24,
     budgetMs: 8000,
-    includeDomain: true,
-    freeMailDomains: [],
     fanoutMinRecipients: 10,
     fanoutMultiplier: 3,
   };

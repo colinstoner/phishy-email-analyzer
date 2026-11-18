@@ -200,12 +200,6 @@ export interface SenderHistoryFacts {
     /** Burst IPs left out of `burstIps` by the cap (or not shaped like an IP) */
     burstIpsOmitted?: number;
   };
-  /** The same history for every address on the sender's domain; absent for free-mail domains */
-  domain?: {
-    messages: BoundedCount;
-    recipients: BoundedCount;
-    firstSeen?: string;
-  };
   /** True when any count above was cut short by a row cap */
   truncated: boolean;
 }

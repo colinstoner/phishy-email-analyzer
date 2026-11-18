@@ -15,6 +15,7 @@ export type GraphFailureKind =
   | 'unsafe_next_link'
   | 'response_too_large'
   | 'invalid_response'
+  | 'filter_not_applied'
   | 'invalid_request';
 
 export interface GraphErrorDetails {

@@ -47,8 +47,6 @@ jest.mock('../../../src/config', () => ({
         lookbackDays: 30,
         burstWindowHours: 24,
         budgetMs: 8000,
-        includeDomain: true,
-        freeMailDomains: [],
         fanoutMinRecipients: 10,
         fanoutMultiplier: 3,
       },

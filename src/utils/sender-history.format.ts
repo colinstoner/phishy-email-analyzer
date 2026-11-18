@@ -124,13 +124,6 @@ export function formatSenderHistoryLines(
     lines.push(['Burst sending IPs (security team only)', burstIps]);
   }
 
-  if (facts.domain) {
-    lines.push([
-      "All addresses on the sender's domain (history period)",
-      formatInbound(facts.domain.messages, facts.domain.recipients, facts.domain.firstSeen),
-    ]);
-  }
-
   if (facts.truncated) {
     lines.push([
       'Elision',

@@ -351,6 +351,12 @@ export interface SenderHistoryMetric {
   truncated?: boolean;
   /** Retries made because a trace request answered 403 (the service does so intermittently) */
   forbiddenRetries?: number;
+  /**
+   * Message trace returned rows that did not match the address filter that
+   * was sent (it accepted the filter and did not apply it). The lookup was
+   * discarded; nothing computed from those rows was used.
+   */
+  filterMismatch?: boolean;
 }
 
 /**
@@ -375,6 +381,7 @@ export function emitSenderHistoryMetric(metric: SenderHistoryMetric): void {
             { Name: 'SenderHistoryAnomalousFanout', Unit: 'Count' },
             { Name: 'SenderHistoryTruncated', Unit: 'Count' },
             { Name: 'SenderHistoryForbiddenRetries', Unit: 'Count' },
+            { Name: 'SenderHistoryFilterMismatches', Unit: 'Count' },
           ],
         },
       ],
@@ -387,6 +394,7 @@ export function emitSenderHistoryMetric(metric: SenderHistoryMetric): void {
       metric.classification === 'established_with_anomalous_fanout' ? 1 : 0,
     SenderHistoryTruncated: metric.truncated ? 1 : 0,
     SenderHistoryForbiddenRetries: metric.forbiddenRetries ?? 0,
+    SenderHistoryFilterMismatches: metric.filterMismatch ? 1 : 0,
   };
 
   process.stdout.write(`${JSON.stringify(emf)}\n`);
