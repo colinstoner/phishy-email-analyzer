@@ -98,6 +98,13 @@ export interface ExtractedEmailData {
    * lookup is off, failed, or did not find exactly one match.
    */
   retrievedOriginal?: RetrievedOriginal;
+  /**
+   * Sender-relationship facts computed by Phishy from the organization's own
+   * mail-flow records (optional Graph feature). Counts and an enum, plus the
+   * burst's sending IPs for a security-team-only report; never an address.
+   * Absent when the check is off, skipped or failed.
+   */
+  senderHistory?: SenderHistoryFacts;
 }
 
 /** One Internet header of a retrieved original. Name and value are hostile data. */
@@ -123,6 +130,87 @@ export interface RetrievedOriginal {
   headers: RetrievedHeader[];
   /** True when the stored copy had more headers than were read */
   headersTruncated: boolean;
+}
+
+/** A count that may have been cut short by a row cap: `atLeast` means "N or more" */
+export interface BoundedCount {
+  count: number;
+  atLeast: boolean;
+}
+
+/**
+ * How the claimed sender address relates to the organization, decided by code
+ * from message-trace counts. None of these is a statement about safety: an
+ * established sender is exactly what a mailbox takeover borrows.
+ */
+export type SenderRelationshipClass =
+  'no_history' | 'limited_history' | 'established' | 'established_with_anomalous_fanout';
+
+/** One sending IP seen in the burst window, as message trace recorded it */
+export interface SenderBurstIp {
+  ip: string;
+  /** Also recorded for this sender in the history period */
+  seenInHistory: boolean;
+}
+
+/**
+ * What the organization's message trace says about one external sender
+ * address. Counts and an enum; no recipient or sender address is kept. The
+ * one exception to "counts only" is `sendingIps.burstIps`, which exists for
+ * a report addressed to the security team alone.
+ */
+export interface SenderHistoryFacts {
+  classification: SenderRelationshipClass;
+  /** Days of mail-flow records examined, burst window included */
+  lookbackDays: number;
+  /** Length of the burst window (it always ends at lookup time), in hours */
+  burstWindowHours: number;
+  /** Mail from the address before the burst window */
+  history: {
+    messages: BoundedCount;
+    recipients: BoundedCount;
+    /** UTC date (YYYY-MM-DD) of the earliest message found in the lookback */
+    firstSeen?: string;
+  };
+  /** Mail the organization sent TO the address before the burst window */
+  twoWay: {
+    messages: BoundedCount;
+    internalSenders: BoundedCount;
+  };
+  /** Mail from the address inside the burst window */
+  burst: {
+    messages: BoundedCount;
+    recipients: BoundedCount;
+    /** Burst recipients with no mail from the address in the history period; null when history was cut short */
+    newRecipients: BoundedCount | null;
+    /**
+     * The largest group of burst recipients that received the same subject
+     * (the figure fan-out is judged on), and how many of them are new to the
+     * address. Counts only: the subject itself is never kept.
+     */
+    sameSubject: {
+      recipients: BoundedCount;
+      newRecipients: BoundedCount | null;
+    };
+  };
+  sendingIps: {
+    /** Distinct sending IPs in the burst window */
+    burst: number;
+    /** How many of those also appear in the history period */
+    seenInHistory: number;
+    /** False when history was cut short, so `seenInHistory` is a minimum */
+    historyComplete: boolean;
+    /**
+     * The burst's sending IPs themselves, capped. **Security-team-only
+     * report copies only**: never the prompt, the reporter's copy, the
+     * combined report, or a log line at info level.
+     */
+    burstIps?: SenderBurstIp[];
+    /** Burst IPs left out of `burstIps` by the cap (or not shaped like an IP) */
+    burstIpsOmitted?: number;
+  };
+  /** True when any count above was cut short by a row cap */
+  truncated: boolean;
 }
 
 /**

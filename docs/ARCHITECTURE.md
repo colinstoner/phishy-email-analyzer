@@ -107,7 +107,7 @@ The agentic conversation is **append-only**: the system prompt and tool list are
 
 ## Microsoft Graph (optional foundation)
 
-`src/services/graph/` lets Phishy call Microsoft Graph on the organization's own Microsoft 365 tenant. It is off by default. The foundation is authentication, credential loading, an HTTP client and a library of read operations; enabling it alone changes nothing. Two pipeline features are built on it, each behind its own flag: the [original-message lookup](#original-message-lookup) (before analysis) and [blast radius](#blast-radius-optional) (after a malicious verdict).
+`src/services/graph/` lets Phishy call Microsoft Graph on the organization's own Microsoft 365 tenant. It is off by default. The foundation is authentication, credential loading, an HTTP client and a library of read operations; enabling it alone changes nothing. Three pipeline features are built on it, each behind its own flag: the [original-message lookup](#original-message-lookup) and the [sender-relationship check](#sender-relationship-check) (both before analysis), and [blast radius](#blast-radius-optional) (after a malicious verdict).
 
 | Piece | File | Role |
 |---|---|---|
@@ -118,6 +118,7 @@ The agentic conversation is **append-only**: the system prompt and tool list are
 | Read operations | `mail.operations.ts`, `trace.operations.ts`, `directory.operations.ts` | small typed GET-only functions (find a message by Internet message ID or sender + window, search, headers, MIME, last-verb, message trace, users, licence capabilities); every result is capped and reports truncation; cross-mailbox and trace lookups return metadata only |
 | Original-message lookup | `original.fetch.ts` | the pipeline step described [below](#original-message-lookup): reporter-mailbox check, claimed-time parsing, the unique-match rule, time budget |
 | Blast radius | `blast-radius.service.ts` | the post-verdict step described [below](#blast-radius-optional): message trace, per-mailbox fallback, time budget, coverage |
+| Sender-relationship check | `sender.history.ts` | before analysis, message-trace counts about the claimed external sender (see below) |
 | Probe CLI | `src/cli/graph-probe*.ts` | `npm run graph:probe` — an operator's local, read-only check of which of those calls work in their tenant ([GRAPH_PROBE.md](GRAPH_PROBE.md)); not part of the pipeline |
 
 Trust rules (CLAUDE.md invariant 6):
@@ -173,6 +174,34 @@ Labelling the headers `VERIFIED` wholesale would be wrong: a sender can pre-inse
 
 **Failure.** Nothing in the lookup throws. No usable claimed sender or time, an unconfirmed reporter, no match, several matches, any Graph or authentication error, an empty header list, or exceeding the 8-second overall budget all leave the email facts — and so the prompt — exactly as they are without the feature. The Graph client used here has short per-attempt timeouts and at most one retry so three requests fit that budget. Each lookup emits one EMF line: `OriginalFetchCount` dimensioned by `Outcome` (`found`, `not_found`, `ambiguous`, `error`, `skipped`) and `OriginalFetchDurationMs`. Logs carry the outcome, a fixed reason word, counts and Graph's status/code/request id — never an address, subject or header value.
 
+### Sender-relationship check
+
+Off by default (`graph.senderHistory.enabled`). It targets one case the rest of the pipeline cannot see: a known external contact's mailbox is taken over, so the mail authenticates and the sender is familiar, but it suddenly reaches far more people than that sender ever wrote to.
+
+```
+processEmailEvent
+  campaign cache miss
+    └─ SenderHistoryService.lookupForEmail(emailData)        code only, GET only
+         claimed From → validated address → external?        (else: skipped)
+         per-instance cache (sha256 of the address, 5 min)
+         message trace, 10-day windows × {from address, to address}; every row checked against the address
+           in parallel, page-capped, one deadline (default 8 s)
+         computeSenderHistoryFacts → counts + classification
+    └─ emailData.senderHistory ──▶ prompt (VERIFIED block) ──▶ fuseRisk ──▶ report (by audience)
+```
+
+- **A relationship never lowers risk.** Trust is what the attacker borrows. The prompt block says so; `fuseRisk` reads only `established_with_anomalous_fanout`, and only to add a reason and raise the score to a floor (after the allowlist cap, so the cap cannot undo it). No classification can reduce a score or turn a verdict benign, and a test asserts that across every verdict and class. The reporter is never told a sender is "known".
+- **Provenance.** The counts are Phishy's own computation from the organization's records, so they are a VERIFIED block. They are *about* the address the email claims, which is hostile text: that address is not repeated in the block and stays in the CLAIMED section. The block holds numbers, dates and an enum — no recipient address, no IP (the IPs kept for the security team's copy are not rendered into it).
+- **Hostile input.** The claimed address must be a single plain-ASCII address before anything is queried, enters the filter only through `odataFilter`, and is never logged. The email's claimed date only widens the burst window, by a bounded amount.
+- **A narrow anomaly rule.** `established_with_anomalous_fanout` needs two-way contact and one *subject* reaching many people (15 by default), far beyond the sender's usual reach, most of them new to it. Measuring per subject and requiring two-way contact keeps single team-wide emails, bulk senders nobody replies to and transactional systems out; the cost is that a small takeover is not flagged by this rule and rests on content analysis. The subject is a grouping key in memory only.
+- **Rows are verified, not assumed.** Message trace can accept an address predicate and silently not apply it (it does so for `endswith` and `contains`), returning unrelated mail flow with HTTP 200. Only `eq` is used, and the trace operations reject any result in which a row names a different address (`filter_not_applied`); the check additionally rejects rows with no address. A mismatch discards the lookup, so counts about the wrong mail never become facts. There is no domain-level history for this reason.
+- **Bounded and disclosed.** Fixed windows, a row and page cap per window, a concurrency cap, a per-instance request allowance and one deadline. A count cut short by a cap is "at least N" everywhere it appears, and fan-out is not judged against a truncated history.
+- **Fails open to today's behaviour.** Timeout, 403 or any failed window yields no facts (never partial counts), a metric, and an unchanged analysis. Message trace answers 403 intermittently while its service principal propagates, so a 403 is retried per request (bounded, inside the deadline and allowance); the lookup is `forbidden`, with a pause, only when nothing in it succeeded.
+- **Who it runs for.** Forwards and Outlook Report-button phishing submissions alike (both fill the same forwarded-header fields), on a campaign-cache miss, never for safelist users.
+- **What each copy of the report shows.** The detail follows who reads the email (`ReportOptions.audience`). The *reporter's own copy* (sent first when blast radius splits a malicious report in two) shows none of it — at most the one plain sentence on anomalous fan-out, and never that a sender is "known". The *combined email* (reporter with the security team in Cc) puts counts and the classification in the "Original Email for IT Review" part, with no IPs, because the reporter reads it too. An email *addressed to the security team alone* — the separate security copy of a malicious report, or the single email about a silent Report-button report — carries the same block plus the burst's sending IPs, each marked as seen or not seen in the history period (capped at 20, "and N more", shape-checked and escaped). The IPs travel in the facts for that copy only: they are never in the prompt block or an info-level log. No copy shows a recipient address. Nothing is persisted.
+
+Thresholds and request counts are in [CONFIGURATION.md](CONFIGURATION.md#sender-relationship-check-optional).
+
 ## Feature flags
 
 Everything optional is off by default and independently enableable:
@@ -184,9 +213,10 @@ Everything optional is off by default and independently enableable:
 | `PHISHY_CAMPAIGN_CACHE_ENABLED` | verdict reuse | intelligence DB + migration 003 |
 | `PHISHY_EMAIL_COMMANDS_ENABLED` | security-team replies | intelligence DB + migration 002 |
 | `PHISHY_AGENTIC_ENABLED` | tool-loop analysis + AI command parsing | nothing (tools appear as their backends do) |
-| `PHISHY_GRAPH_ENABLED` | Microsoft Graph access (foundation — changes nothing on its own; the two features below have their own flags) | Entra app registration with a certificate; outbound HTTPS to Microsoft |
+| `PHISHY_GRAPH_ENABLED` | Microsoft Graph access (foundation — changes nothing on its own; the three features below have their own flags) | Entra app registration with a certificate; outbound HTTPS to Microsoft |
 | `PHISHY_GRAPH_ORIGINAL_FETCH_ENABLED` | read the original message's real headers from the reporter's mailbox | `PHISHY_GRAPH_ENABLED`; `Mail.Read` on reporters' mailboxes |
 | `PHISHY_GRAPH_BLAST_RADIUS_ENABLED` | who else received a malicious email (security-team copy only) | `PHISHY_GRAPH_ENABLED` + read permissions listed in [CONFIGURATION.md](CONFIGURATION.md#blast-radius-optional) |
+| `PHISHY_GRAPH_SENDER_HISTORY_ENABLED` | sender-relationship check: message-trace counts about the claimed sender, before analysis | `PHISHY_GRAPH_ENABLED`; `ExchangeMessageTrace.Read.All` |
 | `PHISHY_REPORT_BUTTON_ENABLED` | silent handling of Outlook Report-button submissions | Microsoft 365 user-reported settings delivering to Phishy |
 
 See [CONFIGURATION.md](CONFIGURATION.md) for the full reference.

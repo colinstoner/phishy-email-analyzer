@@ -327,3 +327,75 @@ export function emitSecurityCopyFailureMetric(): void {
 
   process.stdout.write(`${JSON.stringify(emf)}\n`);
 }
+
+/**
+ * Why a sender-relationship lookup did or did not produce facts.
+ * `ok` / `cache_hit` produced facts; everything else means the analysis ran
+ * exactly as it would with the feature off.
+ */
+export type SenderHistoryOutcome =
+  | 'ok'
+  | 'cache_hit'
+  | 'skipped' // no single external sender address of an ordinary shape
+  | 'timeout'
+  | 'forbidden' // every message trace request answered 403, retries included
+  | 'cooldown' // a recent 403; the API is being left alone
+  | 'rate_limited' // this instance's own trace allowance is used up
+  | 'error';
+
+export interface SenderHistoryMetric {
+  outcome: SenderHistoryOutcome;
+  durationMs: number;
+  /** Code-computed classification (an enum, never an address) */
+  classification?: string;
+  truncated?: boolean;
+  /** Retries made because a trace request answered 403 (the service does so intermittently) */
+  forbiddenRetries?: number;
+  /**
+   * Message trace returned rows that did not match the address filter that
+   * was sent (it accepted the filter and did not apply it). The lookup was
+   * discarded; nothing computed from those rows was used.
+   */
+  filterMismatch?: boolean;
+}
+
+/**
+ * Emit one sender-relationship lookup, dimensioned by Outcome. Alarm on
+ * `forbidden` / `timeout` / `error` to notice the check silently not running.
+ */
+export function emitSenderHistoryMetric(metric: SenderHistoryMetric): void {
+  if (process.env.PHISHY_DISABLE_METRICS === 'true') {
+    return;
+  }
+
+  const emf = {
+    _aws: {
+      Timestamp: Date.now(),
+      CloudWatchMetrics: [
+        {
+          Namespace: NAMESPACE,
+          Dimensions: [['Outcome']],
+          Metrics: [
+            { Name: 'SenderHistoryLookups', Unit: 'Count' },
+            { Name: 'SenderHistoryDurationMs', Unit: 'Milliseconds' },
+            { Name: 'SenderHistoryAnomalousFanout', Unit: 'Count' },
+            { Name: 'SenderHistoryTruncated', Unit: 'Count' },
+            { Name: 'SenderHistoryForbiddenRetries', Unit: 'Count' },
+            { Name: 'SenderHistoryFilterMismatches', Unit: 'Count' },
+          ],
+        },
+      ],
+    },
+    Outcome: metric.outcome,
+    Classification: metric.classification ?? 'none',
+    SenderHistoryLookups: 1,
+    SenderHistoryDurationMs: metric.durationMs,
+    SenderHistoryAnomalousFanout:
+      metric.classification === 'established_with_anomalous_fanout' ? 1 : 0,
+    SenderHistoryTruncated: metric.truncated ? 1 : 0,
+    SenderHistoryForbiddenRetries: metric.forbiddenRetries ?? 0,
+    SenderHistoryFilterMismatches: metric.filterMismatch ? 1 : 0,
+  };
+
+  process.stdout.write(`${JSON.stringify(emf)}\n`);
+}

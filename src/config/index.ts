@@ -84,6 +84,14 @@ const ENV_MAPPINGS: Record<string, string> = {
   PHISHY_GRAPH_BLAST_RADIUS_TIME_BUDGET_MS: 'graph.blastRadius.timeBudgetMs',
   PHISHY_GRAPH_BLAST_RADIUS_MAX_MAILBOXES: 'graph.blastRadius.maxMailboxes',
 
+  // Graph: sender-relationship check (message trace)
+  PHISHY_GRAPH_SENDER_HISTORY_ENABLED: 'graph.senderHistory.enabled',
+  PHISHY_GRAPH_SENDER_HISTORY_LOOKBACK_DAYS: 'graph.senderHistory.lookbackDays',
+  PHISHY_GRAPH_SENDER_HISTORY_BURST_WINDOW_HOURS: 'graph.senderHistory.burstWindowHours',
+  PHISHY_GRAPH_SENDER_HISTORY_BUDGET_MS: 'graph.senderHistory.budgetMs',
+  PHISHY_GRAPH_SENDER_HISTORY_FANOUT_MIN_RECIPIENTS: 'graph.senderHistory.fanoutMinRecipients',
+  PHISHY_GRAPH_SENDER_HISTORY_FANOUT_MULTIPLIER: 'graph.senderHistory.fanoutMultiplier',
+
   // Profile
   PHISHY_PROFILE: 'profile',
 

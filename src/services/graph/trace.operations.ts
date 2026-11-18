@@ -13,12 +13,20 @@
  * - throttled at 100 requests per 5 minutes per tenant, so page caps here
  *   are small.
  *
+ * Observed, not documented: the service answers HTTP 200 to a predicate it
+ * does not support on an address — `endswith(senderAddress, ...)` or
+ * `contains(senderAddress, ...)` — and silently drops it, returning rows as
+ * if the address filter were absent. Only `eq` is used on addresses here,
+ * and every such result is checked row by row (`assertTraceRowsMatch`):
+ * rows the filter did not select must never be mistaken for an answer.
+ *
  * The tenant must hold Microsoft's message-trace service principal
  * (`MESSAGE_TRACE_SERVICE_APP_ID`) before any call succeeds.
  */
 
 import { z } from 'zod';
 import { GraphClient } from './graph.client';
+import { GraphError } from './graph.errors';
 import { ODataFilter, graphPath, odataFilter, odataSeconds } from './graph.request';
 import { BoundedResult, assertWindow, parseItems, resolveMaxItems } from './operations.common';
 
@@ -85,11 +93,25 @@ export interface TraceWindow {
   receivedTo: Date;
 }
 
-interface TraceOptions {
+export interface TraceOptions {
   /** Most rows to return (default 1000, at most 5000) */
   maxItems?: number;
+  /** Most pages to request (default and ceiling 5): each page is one of the tenant's 100 requests */
+  maxPages?: number;
+  /** Per-attempt timeout, overriding the client's */
+  timeoutMs?: number;
+  /** Caller's deadline: cancels the request in flight and stops retries and paging */
+  signal?: AbortSignal;
   /** Injected for tests; defaults to the current time */
   now?: Date;
+}
+
+function resolveMaxPages(requested: number | undefined): number {
+  const value = requested ?? TRACE_MAX_PAGES;
+  if (!Number.isInteger(value) || value < 1 || value > TRACE_MAX_PAGES) {
+    throw new Error(`maxPages must be an integer between 1 and ${TRACE_MAX_PAGES}`);
+  }
+  return value;
 }
 
 /**
@@ -115,12 +137,62 @@ async function listTraces(
   const result = await client.getPaged(TRACE_PATH, {
     query: { filter, top: maxItems },
     maxItems,
-    maxPages: TRACE_MAX_PAGES,
+    maxPages: resolveMaxPages(options.maxPages),
+    timeoutMs: options.timeoutMs,
+    signal: options.signal,
   });
   return {
     items: parseItems(client, TRACE_PATH, MessageTraceSchema, result.items).map(toTrace),
     truncated: result.truncated,
   };
+}
+
+/**
+ * Confirm that the rows of an `address eq` trace query carry that address
+ * (case-insensitive). The service can accept a filter and not apply it, and
+ * such rows look exactly like an answer: counts computed from them would be
+ * facts about the whole tenant's mail flow.
+ *
+ * A row naming a different address is always a mismatch. A row with no
+ * address cannot be confirmed either way: the trace operations let it pass
+ * (`allowMissing`), a caller that computes facts from the rows should not.
+ * Throws a `filter_not_applied` `GraphError`; the message carries no address.
+ */
+export function assertTraceRowsMatch(
+  client: GraphClient,
+  rows: MessageTrace[],
+  field: 'senderAddress' | 'recipientAddress',
+  expected: string,
+  options: { allowMissing?: boolean } = {}
+): void {
+  const wanted = expected.toLowerCase();
+  const mismatched = rows.filter(row => {
+    const actual = row[field];
+    return actual === undefined ? !options.allowMissing : actual.toLowerCase() !== wanted;
+  }).length;
+  if (mismatched > 0) {
+    throw new GraphError(
+      `Graph ${client.label} GET ${TRACE_PATH.template} failed: ${mismatched} of ${rows.length} rows do not match the ${field} filter that was sent; the filter was not applied`,
+      {
+        kind: 'filter_not_applied',
+        label: client.label,
+        method: 'GET',
+        pathTemplate: TRACE_PATH.template,
+      }
+    );
+  }
+}
+
+async function listTracesForAddress(
+  client: GraphClient,
+  filter: ODataFilter,
+  options: TraceOptions,
+  field: 'senderAddress' | 'recipientAddress',
+  expected: string
+): Promise<BoundedResult<MessageTrace>> {
+  const result = await listTraces(client, filter, options);
+  assertTraceRowsMatch(client, result.items, field, expected, { allowMissing: true });
+  return result;
 }
 
 /**
@@ -174,7 +246,8 @@ export interface TraceBySenderArgs extends TraceOptions, TraceWindow {
 
 /**
  * Who received mail from a sender in a time window, optionally narrowed by
- * subject
+ * subject. Fails with `filter_not_applied` if any returned row names a
+ * different sender.
  */
 export async function listMessageTracesBySender(
   client: GraphClient,
@@ -185,10 +258,12 @@ export async function listMessageTracesBySender(
   const to = odataSeconds(args.receivedTo, 'ceil');
 
   if (args.subject === undefined) {
-    return listTraces(
+    return listTracesForAddress(
       client,
       odataFilter`receivedDateTime ge ${from} and receivedDateTime le ${to} and senderAddress eq ${args.senderAddress}`,
-      args
+      args,
+      'senderAddress',
+      args.senderAddress
     );
   }
 
@@ -206,7 +281,30 @@ export async function listMessageTracesBySender(
     default:
       throw new Error('subjectMatch must be contains, startsWith or endsWith');
   }
-  return listTraces(client, filter, args);
+  return listTracesForAddress(client, filter, args, 'senderAddress', args.senderAddress);
+}
+
+export interface TraceByRecipientArgs extends TraceOptions, TraceWindow {
+  recipientAddress: string;
+}
+
+/**
+ * Who sent mail to one recipient address in a time window. With an external
+ * address this finds the organization's own outbound mail to it. Fails with
+ * `filter_not_applied` if any returned row names a different recipient.
+ */
+export async function listMessageTracesByRecipient(
+  client: GraphClient,
+  args: TraceByRecipientArgs
+): Promise<BoundedResult<MessageTrace>> {
+  assertTraceWindow(args, args.now);
+  return listTracesForAddress(
+    client,
+    odataFilter`receivedDateTime ge ${odataSeconds(args.receivedFrom)} and receivedDateTime le ${odataSeconds(args.receivedTo, 'ceil')} and recipientAddress eq ${args.recipientAddress}`,
+    args,
+    'recipientAddress',
+    args.recipientAddress
+  );
 }
 
 /** `<id@host>` to `id@host`; anything else is returned unchanged */

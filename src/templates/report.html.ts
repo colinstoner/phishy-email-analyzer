@@ -9,6 +9,7 @@ import type {
   BlastRadiusRecipient,
   BlastRadiusReport,
 } from '../services/graph/blast-radius.service';
+import { formatSenderHistoryLines } from '../utils/sender-history.format';
 
 /** Maximum length for email body display */
 const MAX_BODY_LENGTH = 10000;
@@ -59,6 +60,16 @@ export interface ReportOptions {
     reasons: string[];
   };
   /**
+   * Who reads this particular email, when it is not the usual combined one
+   * (reporter with the security team in Cc). It decides how much of the
+   * sender-relationship result is shown: `reporter` gets none of the detail
+   * (at most the one plain sentence that arrives through `risk.reasons`);
+   * `security` — an email addressed to the security team alone — gets all of
+   * it, including the burst's sending IPs. Unset means the combined email:
+   * counts and the classification, no IPs.
+   */
+  audience?: 'reporter' | 'security';
+  /**
    * Who else received the email and what they did with it. **Security-team
    * copy only**: the caller must never set this on the reporter's copy.
    */
@@ -77,6 +88,11 @@ export interface ReportOptions {
 function silentReportNotice(reporter: string): string {
   return `Reported by ${reporter} with the Outlook Report button. The reporter was not sent this analysis.`;
 }
+
+/** Shown with the sender-relationship counts so they are not read as a clearance */
+const SENDER_HISTORY_CAVEAT =
+  'Counts from message trace, matched on the sender address the email claims. A known sender is not ' +
+  'evidence of safety: a taken-over mailbox has the same history.';
 
 /**
  * Per-verdict presentation for the employee report: a label, a color tone, a
@@ -402,7 +418,7 @@ export function buildEmailHtml(
                 <p><strong>From:</strong> ${escapeHtml(emailData.from_email)}</p>
                 ${options?.analysisId ? `<p class="ref-line">Reference: ${escapeHtml(options.analysisId)}</p>` : ''}
             </div>
-            ${buildOriginalEmailSection(emailData)}
+            ${buildOriginalEmailSection(emailData, options?.audience)}
             <div class="footer">
                 <p>This analysis was performed by Phishy powered by Anthropic's Claude AI.</p>
                 <p>Delivered via Amazon SES | Report time: ${timestamp}</p>
@@ -625,7 +641,7 @@ export function buildPlainTextReport(
   lines.push('');
 
   // Original email section
-  lines.push(buildOriginalEmailTextSection(emailData));
+  lines.push(buildOriginalEmailTextSection(emailData, options?.audience));
 
   lines.push(divider);
   lines.push("This analysis was performed by Phishy powered by Anthropic's Claude AI.");
@@ -847,7 +863,10 @@ function stripHtmlForDisplay(html: string): string {
 /**
  * Build the original email section for HTML report
  */
-function buildOriginalEmailSection(emailData: ExtractedEmailData): string {
+function buildOriginalEmailSection(
+  emailData: ExtractedEmailData,
+  audience?: ReportOptions['audience']
+): string {
   const forwardedHeadersHtml = formatForwardedHeadersForDisplay(emailData.forwardedHeaders);
   const headersHtml = formatHeadersForDisplay(emailData.headers);
   const linksHtml = formatLinksForDisplay(emailData.links);
@@ -875,6 +894,7 @@ function buildOriginalEmailSection(emailData: ExtractedEmailData): string {
             <div class="original-email">
                 <h2>Original Email for IT Review</h2>
                 ${forwardedHeadersSection}
+                ${buildSenderHistorySection(emailData, audience)}
 
                 <div class="email-section email-content">
                     <h3>Original Email Content</h3>
@@ -900,10 +920,65 @@ function buildOriginalEmailSection(emailData: ExtractedEmailData): string {
             </div>`;
 }
 
+/** Heading of the sender-relationship block, by who reads the email */
+function senderHistoryHeading(audience: ReportOptions['audience']): string {
+  return audience === 'security'
+    ? 'Sender Relationship (organization mail-flow records; security team only)'
+    : 'Sender Relationship (organization mail-flow records)';
+}
+
+/**
+ * The sender-relationship lines for one copy of the report, or none.
+ * - reporter's own copy: nothing (the reporter is never told a sender is
+ *   "known"; the one plain sentence on anomalous fan-out is a risk reason);
+ * - combined email (reporter + security team in Cc): counts, dates and the
+ *   classification — no IPs, because the reporter reads it too;
+ * - security-team-only copy: the same plus the burst's sending IPs.
+ * No copy ever shows a recipient address.
+ */
+function senderHistoryReportLines(
+  emailData: ExtractedEmailData,
+  audience: ReportOptions['audience']
+): Array<[string, string]> | undefined {
+  if (!emailData.senderHistory || audience === 'reporter') {
+    return undefined;
+  }
+  return formatSenderHistoryLines(emailData.senderHistory, {
+    includeBurstIps: audience === 'security',
+  });
+}
+
+/**
+ * Sender-relationship block for the IT-review part of the report (HTML).
+ * Every value is escaped: the IPs come from mail flow.
+ */
+function buildSenderHistorySection(
+  emailData: ExtractedEmailData,
+  audience: ReportOptions['audience']
+): string {
+  const lines = senderHistoryReportLines(emailData, audience);
+  if (!lines) {
+    return '';
+  }
+  let rows = '';
+  for (const [label, value] of lines) {
+    rows += `<tr><td>${escapeHtml(label)}</td><td>${escapeHtml(value)}</td></tr>`;
+  }
+  return `
+                <div class="email-section email-headers email-sender-history">
+                    <h3>${escapeHtml(senderHistoryHeading(audience))}</h3>
+                    <table>${rows}</table>
+                    <p class="no-items">${escapeHtml(SENDER_HISTORY_CAVEAT)}</p>
+                </div>`;
+}
+
 /**
  * Build the original email section for plain text report
  */
-function buildOriginalEmailTextSection(emailData: ExtractedEmailData): string {
+function buildOriginalEmailTextSection(
+  emailData: ExtractedEmailData,
+  audience?: ReportOptions['audience']
+): string {
   const lines: string[] = [];
   const divider = '='.repeat(50);
   const subDivider = '-'.repeat(40);
@@ -912,6 +987,18 @@ function buildOriginalEmailTextSection(emailData: ExtractedEmailData): string {
   lines.push('ORIGINAL EMAIL FOR IT REVIEW');
   lines.push(divider);
   lines.push('');
+
+  // Sender relationship (how much depends on who reads this copy)
+  const senderHistoryLines = senderHistoryReportLines(emailData, audience);
+  if (senderHistoryLines) {
+    lines.push(`${senderHistoryHeading(audience)}:`);
+    lines.push(subDivider);
+    for (const [label, value] of senderHistoryLines) {
+      lines.push(`  ${label}: ${value}`);
+    }
+    lines.push(`  Note: ${SENDER_HISTORY_CAVEAT}`);
+    lines.push('');
+  }
 
   // Headers
   lines.push('Security-Relevant Headers:');

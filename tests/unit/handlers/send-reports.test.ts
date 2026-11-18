@@ -94,11 +94,15 @@ describe('sendReports', () => {
 
     // The reporter's copy: no Cc, and never the section
     expect(reporterCall[3]).toEqual([]);
-    expect(reporterCall[4]).toBe(reportOptions);
+    expect(reporterCall[4]).toEqual({ ...reportOptions, audience: 'reporter' });
     expect(reporterCall[4]).not.toHaveProperty('blastRadius');
 
     expect(securityCall[3]).toEqual(['ciso@example.com']);
-    expect(securityCall[4]).toEqual({ ...reportOptions, blastRadius: section });
+    expect(securityCall[4]).toEqual({
+      ...reportOptions,
+      audience: 'security',
+      blastRadius: section,
+    });
 
     // Command replies come from the security team, so their copy is the one linked
     expect(result.commandReplyMessageId).toBe('security-copy');

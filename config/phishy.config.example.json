@@ -63,6 +63,14 @@
       "enabled": false,
       "timeBudgetMs": 45000,
       "maxMailboxes": 2000
+    },
+    "senderHistory": {
+      "enabled": false,
+      "lookbackDays": 30,
+      "burstWindowHours": 24,
+      "budgetMs": 8000,
+      "fanoutMinRecipients": 15,
+      "fanoutMultiplier": 3
     }
   },
   "reportButton": {

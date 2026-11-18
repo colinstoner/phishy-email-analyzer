@@ -58,6 +58,7 @@ import {
   BlastRadiusService,
   createBlastRadiusService,
 } from '../services/graph/blast-radius.service';
+import { SenderHistoryService, createSenderHistoryService } from '../services/graph/sender.history';
 
 const logger = createLogger('lambda-handler');
 
@@ -90,6 +91,7 @@ let cachedServices: {
   originalFetchClient?: GraphClient;
   /** Who-else-received-it lookup for malicious verdicts, when that feature is on */
   blastRadius?: BlastRadiusService;
+  senderHistory?: SenderHistoryService;
 } | null = null;
 
 /**
@@ -306,6 +308,17 @@ async function initializeServices(): Promise<{
     }
   }
 
+  // Sender-relationship check (optional): message trace facts about the
+  // claimed sender. A misconfiguration here must not stop email analysis.
+  let senderHistory: SenderHistoryService | undefined;
+  try {
+    senderHistory = createSenderHistoryService(config);
+  } catch (error) {
+    logger.warn('Sender history is enabled but could not be set up', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+
   cachedServices = {
     s3Service,
     emailParser,
@@ -317,6 +330,7 @@ async function initializeServices(): Promise<{
     originalFetchClient,
     // Who-else-received-it lookup for malicious verdicts (off by default)
     blastRadius: createBlastRadiusService(config.graph),
+    senderHistory,
   };
 
   logger.info('Services initialized', {
@@ -521,6 +535,12 @@ async function processEmailEvent(
   // Safelist users are outside the organization, so there is no mailbox to read.
   // A Report-button submission already carries the original with its headers.
   if (!analysis) {
+    // Sender-relationship facts for the prompt, risk fusion and the report
+    // (forwards and Report-button submissions alike). Never throws; undefined
+    // on any failure, and analysis proceeds as usual.
+    if (services.senderHistory && !isSafelistUser) {
+      emailData.senderHistory = await services.senderHistory.lookupForEmail(emailData);
+    }
     if (services.originalFetchClient && !isSafelistUser && !userReport) {
       await enrichWithOriginalMessage(
         services.originalFetchClient,
@@ -596,7 +616,10 @@ async function processEmailEvent(
         isSafelistUser
       )
     : {};
-  const riskDecision = fuseRisk(analysis, fusionSignals);
+  const riskDecision = fuseRisk(analysis, {
+    ...fusionSignals,
+    senderHistory: emailData.senderHistory,
+  });
   if (riskDecision.reasons.length) {
     logger.info('Risk fusion applied', {
       verdict: riskDecision.verdict,
@@ -837,6 +860,11 @@ async function resolveBlastRadius(
  *
  * A reporter who is on the security team gets only the security copy. The
  * security copy's message ID is the one command replies are matched to.
+ *
+ * Each of the two emails is marked with its `audience`, which decides how
+ * much sender-relationship detail it shows: none for the reporter, all of it
+ * (sending IPs included) for the security team. The single combined email
+ * carries no mark and shows counts only.
  */
 export async function sendReports(
   notifier: SESNotifier,
@@ -868,13 +896,17 @@ export async function sendReports(
   );
   const reporterResult = reporterIsSecurityTeam
     ? undefined
-    : await notifier.sendAnalysisReport(recipient, analysis, emailData, [], reportOptions);
+    : await notifier.sendAnalysisReport(recipient, analysis, emailData, [], {
+        ...reportOptions,
+        audience: 'reporter',
+      });
 
   const section = await resolveBlastRadius(blastRadius.lookup);
 
   const [first, ...rest] = blastRadius.securityTeam;
   const securityResult = await notifier.sendAnalysisReport(first, analysis, emailData, rest, {
     ...reportOptions,
+    audience: 'security',
     blastRadius: section,
   });
   if (!securityResult.success) {
@@ -961,6 +993,8 @@ async function finishSilentUserReport(
       ...(outcome.storedAnalysisId ? { analysisId: outcome.storedAnalysisId } : {}),
       risk: outcome.risk,
       silentReport: { reporter: emailData.from_email },
+      // Addressed to the security team alone: full sender-relationship detail
+      audience: 'security',
       ...(blastRadius ? { blastRadius } : {}),
     }
   );

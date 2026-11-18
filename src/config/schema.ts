@@ -199,6 +199,26 @@ const GraphBlastRadiusConfigSchema = z.object({
   maxMailboxes: z.number().int().min(1).max(20000).default(2000),
 });
 
+/**
+ * Sender-relationship check: before analysis, read the organization's own
+ * message trace for the claimed external sender and hand the model (and the
+ * report) counts about that relationship. Only effective when `graph.enabled`
+ * is true. Needs `ExchangeMessageTrace.Read.All` on the read registration.
+ */
+const GraphSenderHistoryConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  /** Days of mail-flow records to examine (message trace keeps 90) */
+  lookbackDays: z.number().int().min(14).max(90).default(30),
+  /** Hours before the email's time treated as the burst, not as history */
+  burstWindowHours: z.number().int().min(1).max(72).default(24),
+  /** Overall deadline for one lookup; on expiry analysis proceeds without it */
+  budgetMs: z.number().int().min(1000).max(30000).default(8000),
+  /** Fewest distinct recipients of one subject in the burst that can count as anomalous fan-out */
+  fanoutMinRecipients: z.number().int().min(2).max(1000).default(15),
+  /** Those recipients must be at least this many times the history recipients */
+  fanoutMultiplier: z.number().min(1).max(100).default(3),
+});
+
 const GraphConfigSchema = z
   .object({
     enabled: z.boolean().default(false),
@@ -210,6 +230,7 @@ const GraphConfigSchema = z
     originalFetch: GraphOriginalFetchConfigSchema.optional(),
     /** Who-else-received-it lookup for malicious verdicts */
     blastRadius: GraphBlastRadiusConfigSchema.optional(),
+    senderHistory: GraphSenderHistoryConfigSchema.optional(),
   })
   .superRefine((data, ctx) => {
     if (!data.enabled) {
@@ -289,6 +310,7 @@ export type GraphConfig = z.infer<typeof GraphConfigSchema>;
 export type GraphCredentialConfig = z.infer<typeof GraphCredentialConfigSchema>;
 export type GraphBlastRadiusConfig = z.infer<typeof GraphBlastRadiusConfigSchema>;
 export type ReportButtonConfig = z.infer<typeof ReportButtonConfigSchema>;
+export type GraphSenderHistoryConfig = z.infer<typeof GraphSenderHistoryConfigSchema>;
 
 /**
  * Partial configuration for merging

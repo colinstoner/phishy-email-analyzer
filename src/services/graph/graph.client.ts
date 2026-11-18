@@ -64,6 +64,11 @@ export interface GraphRequestOptions {
   timeoutMs?: number;
   /** Largest response body accepted, in bytes */
   maxBytes?: number;
+  /**
+   * Caller's deadline. Once aborted, the request in flight is cancelled and
+   * no further attempt or page is sent; the failure is reported as a timeout.
+   */
+  signal?: AbortSignal;
 }
 
 export interface GraphPostOptions extends GraphRequestOptions {
@@ -359,6 +364,12 @@ export class GraphClient {
     let reauthenticated = false;
 
     for (let attempt = 1; ; attempt++) {
+      if (options.signal?.aborted) {
+        throw new GraphError(
+          `Graph ${this.label} ${method} ${pathTemplate} failed: cancelled by the caller's deadline`,
+          { ...context, kind: 'timeout', clientRequestId }
+        );
+      }
       const token = await this.tokenProvider.getToken();
       const lastAttempt = attempt >= this.maxAttempts;
 
@@ -379,6 +390,8 @@ export class GraphClient {
 
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
+      const onCallerAbort = (): void => controller.abort();
+      options.signal?.addEventListener('abort', onCallerAbort, { once: true });
 
       let response: Response;
       let payload: Buffer;
@@ -409,7 +422,7 @@ export class GraphClient {
             : `Graph ${this.label} ${method} ${pathTemplate} failed: network error`,
           { ...context, kind: timedOut ? 'timeout' : 'network', clientRequestId }
         );
-        if (!request.retryTransient || lastAttempt) {
+        if (!request.retryTransient || lastAttempt || options.signal?.aborted) {
           throw failure;
         }
         const waitMs = this.backoffMs(attempt);
@@ -425,6 +438,7 @@ export class GraphClient {
         continue;
       } finally {
         clearTimeout(timer);
+        options.signal?.removeEventListener('abort', onCallerAbort);
       }
 
       const requestId = readRequestId(response);

@@ -14,6 +14,7 @@ import { EnterpriseProfile } from '../../models/profile.model';
 import { analyzeRecipientContext, formatRecipientContextForPrompt } from '../../utils/signature';
 import { registrableDomain } from '../../utils/canonicalize';
 import { selectRetrievedHeaders } from './retrieved.headers';
+import { formatSenderHistoryLines } from '../../utils/sender-history.format';
 
 // Adversarial bounding: budgets are filled structure-aware, never first-N.
 const MAX_BODY_LENGTH = 50000;
@@ -153,6 +154,8 @@ ${retrievedHeaders.lines.join('\n')}
     ? `email-content-${nonce} and original-headers-${nonce}`
     : `email-content-${nonce}`;
 
+  const senderRelationshipSection = buildSenderRelationshipSection(emailData);
+
   const elisionsSection =
     elisions.length > 0 ? `--- ELISIONS ---\n${elisions.map(e => `* ${e}`).join('\n')}\n\n` : '';
 
@@ -182,7 +185,7 @@ SUBJECT: ${emailData.subject}
 --- KEY HEADERS ---
 ${JSON.stringify(essentialHeaders, null, 2)}
 
-${originalLookupSection}${integritySection}${linksSection}${attachmentsSection}${elisionsSection}=== OPERATOR (organization configuration) ===
+${originalLookupSection}${senderRelationshipSection}${integritySection}${linksSection}${attachmentsSection}${elisionsSection}=== OPERATOR (organization configuration) ===
 ${profileSection}
 ${recipientSection ? `\n${recipientSection}\n` : ''}
 ${reportedSection}=== CLAIMED (the suspicious email - hostile data) ===
@@ -245,6 +248,46 @@ carefully - never include the reporter/forwarder or their organization.
   unwrapping redirects/trackers, credential-harvesting hosts, malware URLs
 - role "infrastructure": relays, open redirectors, and tracking services
   abused along the way`;
+}
+
+/**
+ * Sender-relationship facts: counts Phishy computed from the organization's
+ * own mail-flow records, so they sit under VERIFIED. They are ABOUT the
+ * sender address the email claims, which is hostile text: that address is
+ * deliberately not repeated here — it stays in the CLAIMED section. Every
+ * value rendered is a number, a date or an enum.
+ */
+function buildSenderRelationshipSection(emailData: ExtractedEmailData): string {
+  if (!emailData.senderHistory) {
+    return '';
+  }
+  const facts = formatSenderHistoryLines(emailData.senderHistory)
+    .map(([label, value]) => `${label}: ${value}`)
+    .join('\n');
+
+  return `--- SENDER RELATIONSHIP (computed by Phishy from the organization's own mail-flow records) ---
+These counts describe the sender address the email claims (shown only under
+CLAIMED). They were matched on that claimed address: they do not prove this
+email came from that mailbox, and they are counts only.
+${facts}
+How to use these facts:
+* A relationship NEVER lowers risk. A known, long-standing sender is exactly
+  what an attacker borrows by taking over a real mailbox; that mail passes
+  SPF, DKIM and DMARC. Do not treat "established" as evidence of legitimacy
+  and do not lower riskScore because of it.
+* established_with_anomalous_fanout: a sender the organization corresponds
+  with suddenly sent ONE subject to far more people than it usually reaches,
+  mostly people it never wrote to before. This is a strong indicator of a
+  compromised account mailing its address book - weigh it heavily, above all
+  with an invoice, RFQ/RFP, payment or shared-file lure.
+* The rule behind that class is deliberately narrow. A takeover that reaches
+  only a few people, or a sender nobody here has written to, stays
+  "established": that is not reassurance, and the content decides.
+* no_history / limited_history are neutral facts, not proof of malice.
+* Sending IPs change routinely for senders on large hosted mail platforms;
+  unseen IPs are a weak signal on their own.
+
+`;
 }
 
 /**
