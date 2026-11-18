@@ -14,6 +14,7 @@
  */
 
 import { z } from 'zod';
+import { MAX_MESSAGE_HEADERS as MAX_HEADERS } from './graph.limits';
 import { GraphClient } from './graph.client';
 import { GraphPath, KqlSearchTerms, graphPath, kqlSearch, odataFilter } from './graph.request';
 import {
@@ -50,7 +51,6 @@ const MESSAGE_SUMMARY_SELECT = [
 const DEFAULT_MAX_MESSAGES = 25;
 const MAX_MESSAGES = 1000;
 const MESSAGE_PAGE_SIZE = 100;
-const MAX_HEADERS = 500;
 const HEADERS_MAX_BYTES = 2 * 1024 * 1024;
 const DEFAULT_MIME_MAX_BYTES = 25 * 1024 * 1024;
 const MIME_MAX_BYTES_CEILING = 40 * 1024 * 1024;

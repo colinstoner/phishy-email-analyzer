@@ -119,6 +119,8 @@ The agentic conversation is **append-only**: the system prompt and tool list are
 | Original-message lookup | `original.fetch.ts` | the pipeline step described [below](#original-message-lookup): reporter-mailbox check, claimed-time parsing, the unique-match rule, time budget |
 | Blast radius | `blast-radius.service.ts` | the post-verdict step described [below](#blast-radius-optional): message trace, per-mailbox fallback, time budget, coverage |
 | Sender-relationship check | `sender.history.ts` | before analysis, message-trace counts about the claimed external sender (see below) |
+| Gateway | `graph.gateway.ts` | the pipeline's one way to the three features: `direct` (this function makes the requests) or `broker` (a second function does); see [Graph broker](#graph-broker) |
+| Broker | `broker.protocol.ts`, `broker.client.ts`, `broker.gateway.ts`, `src/handlers/graph.broker.handler.ts` | the typed request/response format, the main function's bounded `Invoke`, the three features in broker mode, and the broker function itself |
 | Probe CLI | `src/cli/graph-probe*.ts` | `npm run graph:probe` — an operator's local, read-only check of which of those calls work in their tenant ([GRAPH_PROBE.md](GRAPH_PROBE.md)); not part of the pipeline |
 
 Trust rules (CLAUDE.md invariant 6):
@@ -128,6 +130,55 @@ Trust rules (CLAUDE.md invariant 6):
 - **Mailbox content is hostile data.** Response bodies are never logged. Content read from any mailbox other than the reporter's own is metadata-only toward the model and logs.
 - **Reads and writes are separate identities.** A client holds exactly one credential. Configuration has a `read` app registration today; a `write` registration, when one exists, is a different app with its own certificate and its own client, so a read path can never obtain a write token. Any write to the tenant additionally requires security-team approval through the authenticated command channel.
 - **Secrets stay secret.** The private key, client assertion and access token never appear in logs or error messages; errors carry only status, Graph error code, request id and a path template with data segments blanked.
+
+### Graph broker
+
+The main function parses hostile email, and in a typical deployment it runs in a VPC with no route to the internet: it reaches AWS services through VPC endpoints and cannot reach Microsoft at all. `graph.mode: broker` keeps it that way. A second Lambda function, the **Graph broker** (`src/handlers/graph.broker.handler.ts`, entry point `src/graph-broker.ts`), runs outside the VPC and makes the Graph requests. `graph.mode: direct`, the default, is the original arrangement: the main function makes them itself, which suits a deployment that is not in a VPC or already has egress.
+
+```
+              VPC, no internet route                       outside the VPC
+┌───────────────────────────────────────────┐        ┌───────────────────────────────┐
+│ main function                             │        │ Graph broker                  │
+│  parses hostile email                     │        │  holds the read certificate   │
+│  decides: whose mailbox, is the sender    │ Invoke │  never sees a raw email       │
+│   external, how the message is keyed,     │───────▶│  validates the request        │
+│   how much time there is                  │ typed  │  runs one of three lookups    │──▶ login.microsoftonline.com
+│  NO Graph credential, client or token     │ request│   (existing feature code:     │──▶ graph.microsoft.com
+│  validates + re-bounds the answer         │◀───────│   graphPath / odataFilter)    │
+│  emits the feature metric                 │ typed  │  rate limits and caches       │
+│                                           │ result │  logs counts and outcomes     │
+└───────────────────────────────────────────┘        └───────────────────────────────┘
+```
+
+**Who holds the credential.** Only the broker. In broker mode the main function's configuration needs just the broker's name; the config schema drops any `graph.tenantId` or `graph.read.*` it finds there, so nothing downstream of configuration loading can hold a credential, and `createGraphGateway` takes a branch that builds no Graph client and no token provider (a handler-level test counts constructions and expects none). The main function's role needs `lambda:InvokeFunction` on the broker and nothing else for Graph: no access to the certificate secret, no route to Microsoft. The broker has its own configuration loader and schema (`loadGraphBrokerConfig`): `graph.*` and the log level. It has no email, AI, database or notification settings, and its bundle contains no email parser, model client or database driver.
+
+**A closed allow-list, not a proxy.** The request is `{ version: 1, operation, params }` and there are exactly three operations. Each carries the smallest typed input its lookup needs:
+
+| Operation | `params` (every string from the email is hostile) | Result |
+|---|---|---|
+| `original_message_lookup` | `mailbox` (the reporter's, confirmed by the main function), `claimedFrom` (address only), `claimedSent`, `claimedSubject?`, `budgetMs` | `outcome`, a fixed `reason` word, and for `found` the stored headers |
+| `sender_history_lookup` | `senderAddress`, `claimedDate?`, `budgetMs` | `outcome`, the facts (counts and an enum) when there are any, `forbiddenRetries`, `filterMismatch` |
+| `blast_radius_lookup` | `key` (`internetMessageId?`, `senderAddress?`, `subject?`, `receivedFrom`, `receivedTo`), `budgetMs` | the report for the security team, `errors`, `cached` |
+
+There is no path, URL, filter, query or "call Graph" operation, and no field is ever used as one. The schema (`broker.protocol.ts`) is strict at every level: an unknown operation, an unknown or missing field, a wrong type or another version is refused with `invalid_request` before any configuration is loaded or any request made. This is deliberate. A generic passthrough would move the whole of invariant 6 ("every request is built by code from parsed, escaped values") to whoever can invoke the broker; with typed operations, the broker builds every request itself, with the same `graphPath` and `odataFilter` code as before, and a new capability is a new operation added in code, where it is reviewed. The broker is invoked directly (`RequestResponse`) and has no HTTP trigger; an API Gateway, function URL or event-source event does not match the schema and is refused like any other malformed request.
+
+**What crosses, in each direction, and how it is checked.**
+
+- *Main → broker.* The main function decides everything that depends on the email or the organization's settings — `confirmedReporterMailbox` (whose mailbox may be read), whether a claimed sender is external, `deriveBlastRadiusKey` — and sends only the result. It validates its own request against the same schema, so nothing the broker would refuse is sent. The raw email, its body, attachments and the reporter's address for blast radius do not cross (the main function marks the reporter in the report itself).
+- *Broker → main.* The response is `{ ok: true, result }` or `{ ok: false, reason }`, where `reason` is one of five fixed words (`invalid_request`, `graph_disabled`, `feature_disabled`, `misconfigured`, `internal_error`). The broker never throws and never returns an error message. **The result is hostile data too**: it carries header values, addresses and subjects that originated in email. The main function checks the payload size before parsing it, validates the envelope, then validates `result` against the strict schema for the operation it asked for and **re-applies the features' own bounds** rather than trusting the broker to have applied them: at most 500 headers with the cut disclosed (the parser then reduces each to one line and drops malformed names, as for a direct lookup), at most 20 burst IPs each re-checked for shape with the rest counted as omitted, at most 100 listed recipients, bounded lengths and enums everywhere else. The bounds live in one file (`graph.limits.ts`) that both sides import. Anything that does not validate is `malformed` and is not used.
+
+**Failure is the feature's ordinary failure.** A broker timeout, throttle, crash, refusal, oversized or malformed answer is mapped onto what each feature already does when Graph fails: the original-message lookup reports `error` and attaches nothing; sender history yields no facts (`timeout` or `error`); blast radius returns an `unavailable` report with a one-line note, and the security team's email is still sent. Each feature's metric is emitted once, by the main function, with those outcomes; a second metric, `GraphBrokerCalls` (dimensions `Operation`, `Outcome`), says why. The invocation is bounded by the feature's own budget — 8 s for the original-message lookup, `graph.senderHistory.budgetMs` for sender history, and for blast radius the smaller of `graph.blastRadius.timeBudgetMs` and the main function's remaining time less the 20 s send reserve — with the broker asked to finish about a second sooner, and there are no SDK retries.
+
+**Where rate limits and caches live.** In the broker, inside the existing feature services, because that is the function whose requests Microsoft counts: the sender-history request allowance, its 403 cooldown and its five-minute result cache, the blast-radius result cache and directory cache, and the token cache. This is better than before, not just equivalent: in direct mode each main-function instance has its own allowance and caches, so a flood of reports multiplies both; in broker mode many main instances share a few broker instances, and capping how many there can be (reserved concurrency on the broker) bounds Phishy's worst-case use of the tenant's shared message-trace quota at that many instances times the per-instance allowance. The main function keeps no Graph state.
+
+**Logging.** The broker logs the operation, the outcome, counts and durations. Nothing from `params` and nothing from a result is logged at any level by the handler (invariant 1).
+
+**Direction (not built).** Two things this design leaves room for and deliberately does not include:
+
+- *A write tier.* Any write to the tenant (quarantining or removing a message, for example) will be a **separate** broker function with its **own** app registration and certificate, so that the read broker can never obtain a write token (invariant 6), and each write will require security-team approval through the authenticated command channel (invariant 2). It will not be an operation added to this broker.
+- *Model-driven hunting.* A later threat-hunting agent may be allowed to call these same typed read operations. It will never be given raw Graph: no path, filter or query authored by a model. That is why the interface is typed operations today, while the only caller is code. Until then, Graph remains code-driven and is not an agentic tool.
+
+Configuration and what the broker function needs to be deployed with are in [CONFIGURATION.md](CONFIGURATION.md#graph-broker-optional).
 
 ### Blast radius (optional)
 
@@ -214,6 +265,7 @@ Everything optional is off by default and independently enableable:
 | `PHISHY_EMAIL_COMMANDS_ENABLED` | security-team replies | intelligence DB + migration 002 |
 | `PHISHY_AGENTIC_ENABLED` | tool-loop analysis + AI command parsing | nothing (tools appear as their backends do) |
 | `PHISHY_GRAPH_ENABLED` | Microsoft Graph access (foundation — changes nothing on its own; the three features below have their own flags) | Entra app registration with a certificate; outbound HTTPS to Microsoft |
+| `PHISHY_GRAPH_MODE` | `direct` (default): the main function calls Graph. `broker`: it invokes the [Graph broker](#graph-broker) function and holds no Graph credential | for `broker`: the broker function, `PHISHY_GRAPH_BROKER_FUNCTION`, and `lambda:InvokeFunction` on it |
 | `PHISHY_GRAPH_ORIGINAL_FETCH_ENABLED` | read the original message's real headers from the reporter's mailbox | `PHISHY_GRAPH_ENABLED`; `Mail.Read` on reporters' mailboxes |
 | `PHISHY_GRAPH_BLAST_RADIUS_ENABLED` | who else received a malicious email (security-team copy only) | `PHISHY_GRAPH_ENABLED` + read permissions listed in [CONFIGURATION.md](CONFIGURATION.md#blast-radius-optional) |
 | `PHISHY_GRAPH_SENDER_HISTORY_ENABLED` | sender-relationship check: message-trace counts about the claimed sender, before analysis | `PHISHY_GRAPH_ENABLED`; `ExchangeMessageTrace.Read.All` |

@@ -46,19 +46,8 @@ import {
 } from '../services/intelligence';
 import { extractIOCs, IOCSourceContext } from '../services/intelligence/ioc.extractor';
 import { ThreatIndicatorRecord } from '../services/intelligence/database.service';
-import {
-  GraphClient,
-  ORIGINAL_FETCH_CLIENT_OPTIONS,
-  ORIGINAL_FETCH_TOKEN_OPTIONS,
-  createGraphReadClient,
-  enrichWithOriginalMessage,
-} from '../services/graph';
-import {
-  BlastRadiusReport,
-  BlastRadiusService,
-  createBlastRadiusService,
-} from '../services/graph/blast-radius.service';
-import { SenderHistoryService, createSenderHistoryService } from '../services/graph/sender.history';
+import type { BlastRadiusReport } from '../services/graph/blast-radius.service';
+import { GraphGateway, createGraphGateway } from '../services/graph/graph.gateway';
 
 const logger = createLogger('lambda-handler');
 
@@ -87,11 +76,12 @@ let cachedServices: {
   campaignService?: CampaignAlertService;
   intelligenceDb?: IntelligenceDatabaseService;
   commandService?: EmailCommandService;
-  /** Read-only Graph client for the original-message lookup, when that feature is on */
-  originalFetchClient?: GraphClient;
-  /** Who-else-received-it lookup for malicious verdicts, when that feature is on */
-  blastRadius?: BlastRadiusService;
-  senderHistory?: SenderHistoryService;
+  /**
+   * The three optional Microsoft Graph features (original-message lookup,
+   * sender-relationship check, blast radius), run by this function
+   * (`graph.mode: direct`) or by the Graph broker function (`broker`)
+   */
+  graph: GraphGateway;
 } | null = null;
 
 /**
@@ -292,32 +282,11 @@ async function initializeServices(): Promise<{
     });
   }
 
-  // Original-message lookup: read a forwarded email's real headers from the
-  // reporter's own mailbox before analysis. Code-driven and read-only; the
-  // client is built here but contacts nothing until the first lookup.
-  let originalFetchClient: GraphClient | undefined;
-  if (config.graph?.originalFetch?.enabled) {
-    if (config.graph.enabled) {
-      originalFetchClient = createGraphReadClient(config.graph, {
-        clientOptions: ORIGINAL_FETCH_CLIENT_OPTIONS,
-        tokenOptions: ORIGINAL_FETCH_TOKEN_OPTIONS,
-      });
-      logger.info('Original-message lookup enabled');
-    } else {
-      logger.warn('graph.originalFetch.enabled has no effect while graph.enabled is false');
-    }
-  }
-
-  // Sender-relationship check (optional): message trace facts about the
-  // claimed sender. A misconfiguration here must not stop email analysis.
-  let senderHistory: SenderHistoryService | undefined;
-  try {
-    senderHistory = createSenderHistoryService(config);
-  } catch (error) {
-    logger.warn('Sender history is enabled but could not be set up', {
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
+  // Microsoft Graph features (all optional, code-driven and read-only).
+  // Nothing is contacted until the first lookup. In broker mode this builds
+  // no Graph client and holds no Graph credential: the lookups are typed
+  // invocations of the Graph broker function.
+  const graph = createGraphGateway(config);
 
   cachedServices = {
     s3Service,
@@ -327,10 +296,7 @@ async function initializeServices(): Promise<{
     intelligenceDb,
     campaignService,
     commandService,
-    originalFetchClient,
-    // Who-else-received-it lookup for malicious verdicts (off by default)
-    blastRadius: createBlastRadiusService(config.graph),
-    senderHistory,
+    graph,
   };
 
   logger.info('Services initialized', {
@@ -538,12 +504,11 @@ async function processEmailEvent(
     // Sender-relationship facts for the prompt, risk fusion and the report
     // (forwards and Report-button submissions alike). Never throws; undefined
     // on any failure, and analysis proceeds as usual.
-    if (services.senderHistory && !isSafelistUser) {
-      emailData.senderHistory = await services.senderHistory.lookupForEmail(emailData);
+    if (services.graph.senderHistory && !isSafelistUser) {
+      emailData.senderHistory = await services.graph.lookupSenderHistory(emailData);
     }
-    if (services.originalFetchClient && !isSafelistUser && !userReport) {
-      await enrichWithOriginalMessage(
-        services.originalFetchClient,
+    if (services.graph.originalFetch && !isSafelistUser && !userReport) {
+      await services.graph.enrichWithOriginalMessage(
         services.emailParser,
         msg,
         emailData,
@@ -740,13 +705,17 @@ async function processEmailEvent(
   // they did with it. Code-driven, after the verdict; the result goes only
   // into an email addressed to the security team and never to the model or
   // the reporter. Decided here, run just before that email is sent.
-  const blastRadiusService =
-    riskDecision.isPhishing && !analysis.analysisFailed && !isSafelistUser
-      ? services.blastRadius
-      : undefined;
-  const lookupBlastRadius = blastRadiusService
+  const runBlastRadius =
+    riskDecision.isPhishing &&
+    !analysis.analysisFailed &&
+    !isSafelistUser &&
+    services.graph.blastRadius;
+  const lookupBlastRadius = runBlastRadius
     ? (reporterAddress?: string): Promise<BlastRadiusReport> =>
-        blastRadiusService.lookup(emailData, { remainingMs: getRemainingMs?.(), reporterAddress })
+        services.graph.lookupBlastRadius(emailData, {
+          remainingMs: getRemainingMs?.(),
+          reporterAddress,
+        })
     : undefined;
 
   // Report-button submissions never produce a reply to the reporter. The

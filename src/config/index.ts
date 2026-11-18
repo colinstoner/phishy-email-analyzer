@@ -6,7 +6,13 @@
 import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
 import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 import { Readable } from 'stream';
-import { PhishyConfig, PartialPhishyConfig, safeValidateConfig } from './schema';
+import {
+  GraphBrokerConfig,
+  GraphBrokerConfigSchema,
+  PhishyConfig,
+  PartialPhishyConfig,
+  safeValidateConfig,
+} from './schema';
 import { createLogger } from '../utils/logger';
 
 const logger = createLogger('config');
@@ -76,6 +82,8 @@ const ENV_MAPPINGS: Record<string, string> = {
 
   // Microsoft Graph (optional; certificate is a Secrets Manager ARN or inline PEM)
   PHISHY_GRAPH_ENABLED: 'graph.enabled',
+  PHISHY_GRAPH_MODE: 'graph.mode',
+  PHISHY_GRAPH_BROKER_FUNCTION: 'graph.brokerFunctionName',
   PHISHY_GRAPH_TENANT_ID: 'graph.tenantId',
   PHISHY_GRAPH_READ_CLIENT_ID: 'graph.read.clientId',
   PHISHY_GRAPH_READ_CERTIFICATE: 'graph.read.certificate',
@@ -129,6 +137,8 @@ export async function loadConfig(): Promise<PhishyConfig> {
   // Resolve secrets from AWS Secrets Manager if configured
   config = await resolveSecrets(config);
 
+  warnAboutCredentialInBrokerMode(config);
+
   // Validate final configuration
   const validation = safeValidateConfig(config);
 
@@ -146,6 +156,66 @@ export async function loadConfig(): Promise<PhishyConfig> {
   });
 
   return validation.data!;
+}
+
+/**
+ * In broker mode the main function must hold no Graph credential. The schema
+ * drops `graph.tenantId` and `graph.read` either way; this says so when
+ * certificate material itself (not a Secrets Manager ARN) was supplied,
+ * because that material should not be in this function's environment at all.
+ */
+function warnAboutCredentialInBrokerMode(config: PartialPhishyConfig): void {
+  const graph = config.graph;
+  if (!graph?.enabled || graph.mode !== 'broker') {
+    return;
+  }
+  const certificate = graph.read?.certificate?.trim();
+  if (certificate && !certificate.startsWith('arn:aws:secretsmanager:')) {
+    logger.warn(
+      'graph.mode is broker but inline certificate material is configured for this function. ' +
+        'It is ignored here; remove it so only the Graph broker holds the credential'
+    );
+  }
+}
+
+/**
+ * Load the Graph broker's configuration: the same sources and the same
+ * `graph.*` names as the main function (optional S3 file, then environment
+ * variables), validated against the broker's own schema. Nothing but
+ * `graph.*` and the log level is read, so the broker needs no email, AI,
+ * database or notification settings, and no database secret is resolved.
+ */
+export async function loadGraphBrokerConfig(): Promise<GraphBrokerConfig> {
+  let config: PartialPhishyConfig = {} as PartialPhishyConfig;
+
+  const s3ConfigPath = process.env.PHISHY_CONFIG_S3;
+  if (s3ConfigPath) {
+    try {
+      config = mergeConfigs(config, await loadConfigFromS3(s3ConfigPath));
+    } catch (error) {
+      logger.warn('Failed to load S3 configuration', {
+        path: s3ConfigPath,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  config = applyEnvironmentOverrides(config);
+
+  const validation = GraphBrokerConfigSchema.safeParse({
+    graph: config.graph ?? {},
+    logLevel: config.logLevel,
+  });
+  if (!validation.success) {
+    // Paths and fixed messages only: never a configured value
+    const issues = validation.error.issues.map(issue => ({
+      path: issue.path.join('.'),
+      message: issue.message,
+    }));
+    logger.error('Graph broker configuration validation failed', { issues });
+    throw new Error('Invalid Graph broker configuration');
+  }
+  return validation.data;
 }
 
 /**
@@ -402,4 +472,4 @@ async function streamToString(stream: Readable): Promise<string> {
 }
 
 // Re-export types
-export { PhishyConfig, PartialPhishyConfig } from './schema';
+export { GraphBrokerConfig, PhishyConfig, PartialPhishyConfig } from './schema';
