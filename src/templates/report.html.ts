@@ -63,6 +63,19 @@ export interface ReportOptions {
    * copy only**: the caller must never set this on the reporter's copy.
    */
   blastRadius?: BlastRadiusReport;
+  /**
+   * Set when the analysis came from an Outlook Report-button submission and
+   * is being sent to the security team only. Replaces the reporter thank-you
+   * with a line saying who reported it and that they were not notified.
+   */
+  silentReport?: {
+    reporter: string;
+  };
+}
+
+/** Lead line for a report sent to the security team about a silent button report */
+function silentReportNotice(reporter: string): string {
+  return `Reported by ${reporter} with the Outlook Report button. The reporter was not sent this analysis.`;
 }
 
 /**
@@ -414,7 +427,9 @@ function buildAnalysisSection(analysis: AnalysisResult, options?: ReportOptions)
     tone === 'safe'
       ? 'Thanks for checking — flagging anything that looks off is exactly the right habit.'
       : 'Good catch, and thanks for reporting. Sending this to Phishy helped protect you and your colleagues.';
-  html += `<p class="thanks">${thanks}</p>`;
+  html += options?.silentReport
+    ? `<p class="thanks">${escapeHtml(silentReportNotice(options.silentReport.reporter))}</p>`
+    : `<p class="thanks">${thanks}</p>`;
 
   // Verdict banner: label + plain-language gloss + the prominent score/level
   // employees engage with.
@@ -522,11 +537,14 @@ export function buildPlainTextReport(
   const display = options?.risk ? VERDICT_DISPLAY[options.risk.verdict] : undefined;
   const tone: VerdictTone = display?.tone ?? (analysis.isPhishing ? 'danger' : 'safe');
 
-  // Thank the reporter
+  // Thank the reporter — or, for a silent button report, tell the security
+  // team who reported it and that the reporter was not notified
   lines.push(
-    tone === 'safe'
-      ? 'Thanks for checking — flagging anything that looks off is exactly the right habit.'
-      : 'Good catch, and thanks for reporting. Sending this to Phishy helped protect you and your colleagues.'
+    options?.silentReport
+      ? silentReportNotice(options.silentReport.reporter)
+      : tone === 'safe'
+        ? 'Thanks for checking — flagging anything that looks off is exactly the right habit.'
+        : 'Good catch, and thanks for reporting. Sending this to Phishy helped protect you and your colleagues.'
   );
   lines.push('');
 

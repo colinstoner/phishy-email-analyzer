@@ -17,6 +17,8 @@ export interface AIUsageMetric {
   estimatedCostUsd: number;
   processingTimeMs: number;
   isPhishing: boolean;
+  /** Share of outputTokens spent on thinking, when the API reported it */
+  thinkingTokens?: number;
 }
 
 const NAMESPACE = 'Phishy';
@@ -58,6 +60,9 @@ export function emitAIUsageMetric(metric: AIUsageMetric): void {
     EstimatedCostUSD: metric.estimatedCostUsd,
     ProcessingTimeMs: metric.processingTimeMs,
     PhishingDetected: metric.isPhishing ? 1 : 0,
+    // A property, not a metric: thinking is already inside OutputTokens, and a
+    // separate metric would invite double counting. Query it with Logs Insights.
+    ...(metric.thinkingTokens !== undefined ? { ThinkingTokens: metric.thinkingTokens } : {}),
   };
 
   // EMF must be a raw JSON line on stdout — bypass the structured logger,
@@ -97,6 +102,42 @@ export function emitAnalysisFailureMetric(provider: string, model: string): void
 }
 
 /**
+ * Emit a model refusal: the model's safety classifiers (or the model itself)
+ * declined the request with `stop_reason: "refusal"`. Emitted once per refused
+ * call, against the model that refused, so a refusal that the fallback model
+ * then answers still counts. Category is a property rather than a dimension —
+ * it is an open-ended, informational value and can be null.
+ */
+export function emitAnalysisRefusalMetric(
+  provider: string,
+  model: string,
+  category: string | null
+): void {
+  if (process.env.PHISHY_DISABLE_METRICS === 'true') {
+    return;
+  }
+
+  const emf = {
+    _aws: {
+      Timestamp: Date.now(),
+      CloudWatchMetrics: [
+        {
+          Namespace: NAMESPACE,
+          Dimensions: [['Provider', 'Model'], ['Provider']],
+          Metrics: [{ Name: 'AnalysisRefusalCount', Unit: 'Count' }],
+        },
+      ],
+    },
+    Provider: provider,
+    Model: model,
+    AnalysisRefusalCount: 1,
+    RefusalCategory: category ?? 'unspecified',
+  };
+
+  process.stdout.write(`${JSON.stringify(emf)}\n`);
+}
+
+/**
  * Emit a campaign verdict cache hit: a report answered from a recent analysis
  * of the same campaign instead of a fresh AI call. EstimatedCostSavedUSD
  * approximates what the skipped call would have cost (based on the most
@@ -123,6 +164,73 @@ export function emitCampaignCacheHitMetric(estimatedCostSavedUsd: number): void 
     },
     CampaignCacheHits: 1,
     EstimatedCostSavedUSD: estimatedCostSavedUsd,
+  };
+
+  process.stdout.write(`${JSON.stringify(emf)}\n`);
+}
+
+/**
+ * Emit an Outlook Report-button submission. Dimensioned by what the employee
+ * chose (phishing / junk / not_junk). Button reports arrive through an
+ * organization-side mail setting Phishy cannot see, so this count is the only
+ * signal that intake is still flowing — alarm on it going quiet.
+ */
+export function emitUserReportMetric(reportedAs: string): void {
+  if (process.env.PHISHY_DISABLE_METRICS === 'true') {
+    return;
+  }
+
+  const emf = {
+    _aws: {
+      Timestamp: Date.now(),
+      CloudWatchMetrics: [
+        {
+          Namespace: NAMESPACE,
+          Dimensions: [['ReportedAs'], []],
+          Metrics: [{ Name: 'UserReports', Unit: 'Count' }],
+        },
+      ],
+    },
+    ReportedAs: reportedAs,
+    UserReports: 1,
+  };
+
+  process.stdout.write(`${JSON.stringify(emf)}\n`);
+}
+
+/** How one original-message lookup ended */
+export type OriginalFetchOutcome = 'found' | 'not_found' | 'ambiguous' | 'error' | 'skipped';
+
+/**
+ * Emit the outcome of one original-message lookup (the optional Graph
+ * feature that reads a forwarded email's real headers from the reporter's
+ * mailbox). `OriginalFetchCount` is dimensioned by Outcome, so a rising
+ * `error` share is alarmable; `OriginalFetchDurationMs` is the time the
+ * lookup added to the pipeline. `skipped` means no Graph request was made
+ * (nothing usable to search with, or the reporter could not be confirmed).
+ */
+export function emitOriginalFetchMetric(outcome: OriginalFetchOutcome, durationMs: number): void {
+  if (process.env.PHISHY_DISABLE_METRICS === 'true') {
+    return;
+  }
+
+  const emf = {
+    _aws: {
+      Timestamp: Date.now(),
+      CloudWatchMetrics: [
+        {
+          Namespace: NAMESPACE,
+          Dimensions: [['Outcome']],
+          Metrics: [
+            { Name: 'OriginalFetchCount', Unit: 'Count' },
+            { Name: 'OriginalFetchDurationMs', Unit: 'Milliseconds' },
+          ],
+        },
+      ],
+    },
+    Outcome: outcome,
+    OriginalFetchCount: 1,
+    OriginalFetchDurationMs: durationMs,
   };
 
   process.stdout.write(`${JSON.stringify(emf)}\n`);
@@ -193,9 +301,10 @@ export function emitBlastRadiusMetric(metric: BlastRadiusMetric): void {
 }
 
 /**
- * Emit a failure to send the security team's separate copy of a malicious
- * report (sent after the reporter's copy when blast radius is enabled). The
- * reporter was warned but the security team was not told: alarm on this.
+ * Emit a failure to send the security team's copy of a malicious report
+ * carrying the blast-radius result: the separate copy sent after the
+ * reporter's, or the single email about a silent Report-button report.
+ * The security team was not told: alarm on this.
  */
 export function emitSecurityCopyFailureMetric(): void {
   if (process.env.PHISHY_DISABLE_METRICS === 'true') {

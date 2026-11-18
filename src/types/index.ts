@@ -25,6 +25,26 @@ export interface EmailMessage {
     dkim?: string;
     dmarc?: string;
   };
+  /**
+   * Set when the message is an Outlook Report-button submission rather than a
+   * forward. Derived only from SES-delivered mail by the parser — the external
+   * payload schema strips it.
+   */
+  userReport?: UserReport;
+}
+
+/** What the employee chose in Outlook's Report menu */
+export type UserReportKind = 'phishing' | 'junk' | 'not_junk';
+
+/**
+ * An Outlook Report-button submission: the reporter clicked a button and is
+ * not waiting for an answer, so these are handled without replying to them.
+ */
+export interface UserReport {
+  source: 'outlook-report-button';
+  reportedAs: UserReportKind;
+  /** Exchange network message ID of the reported (original) message */
+  networkMessageId: string;
 }
 
 /**
@@ -70,6 +90,39 @@ export interface ExtractedEmailData {
   canonicalText?: string;
   /** Obfuscation indicators found during canonicalization — themselves signals */
   contentFlags?: string[];
+  /** Present when this is an Outlook Report-button submission (handled silently) */
+  userReport?: UserReport;
+  /**
+   * Internet headers of the original message, read by Phishy from the
+   * reporter's own mailbox (optional Graph feature). Absent whenever the
+   * lookup is off, failed, or did not find exactly one match.
+   */
+  retrievedOriginal?: RetrievedOriginal;
+}
+
+/** One Internet header of a retrieved original. Name and value are hostile data. */
+export interface RetrievedHeader {
+  name: string;
+  value: string;
+}
+
+/**
+ * The original of a forwarded message as Phishy itself found it in the
+ * reporter's mailbox. What is verified is the retrieval (Phishy read this
+ * from the stored copy; nothing here was pasted by the forwarder) and the
+ * two fields the mailbox system stamps: `location` and `receivedAt`. The
+ * header contents are written by the sender and by every server the message
+ * passed through, so they stay hostile data.
+ */
+export interface RetrievedOriginal {
+  /** `recoverable_items`: the reporter deleted the message after forwarding it */
+  location: 'mailbox' | 'recoverable_items';
+  /** When the mailbox received the message (ISO 8601), stamped by the mail system */
+  receivedAt?: string;
+  /** Headers in stored order, top of the message first */
+  headers: RetrievedHeader[];
+  /** True when the stored copy had more headers than were read */
+  headersTruncated: boolean;
 }
 
 /**
@@ -87,8 +140,15 @@ export interface LinkFact {
  */
 export interface TokenUsage {
   inputTokens: number;
+  /** Billed output tokens. Includes thinking tokens on models that think. */
   outputTokens: number;
   totalTokens: number;
+  /**
+   * The share of outputTokens spent on thinking, when the API reports it
+   * (`usage.output_tokens_details.thinking_tokens`). Already counted in
+   * outputTokens — never add it on top.
+   */
+  thinkingTokens?: number;
 }
 
 /**

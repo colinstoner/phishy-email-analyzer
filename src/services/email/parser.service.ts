@@ -14,6 +14,7 @@ import {
   SESEvent,
   EmailEvent,
   S3Location,
+  RetrievedOriginal,
 } from '../../types';
 import { createLogger } from '../../utils/logger';
 import {
@@ -25,11 +26,17 @@ import {
 } from '../../utils/validation';
 import { S3Service } from '../storage/s3.service';
 import { buildLinkFacts, canonicalizeText, findAnchorMismatches } from '../../utils/canonicalize';
+import { detectUserReport } from './user.report';
 
 const logger = createLogger('email-parser');
 
 /** Cap on attachment metadata entries carried per message */
 const MAX_ATTACHMENTS = 20;
+
+/** An RFC 5322 header field name: printable ASCII without the colon */
+const HEADER_NAME_PATTERN = /^[\x21-\x39\x3B-\x7E]{1,100}$/;
+/** Control characters and Unicode line breaks: folding and any attempt to start a new line */
+const HEADER_LINE_BREAKS_AND_CONTROLS = /[\p{Cc}\p{Zl}\p{Zp}]+/gu;
 
 /**
  * Schema for events arriving from outside SES (API Gateway, tests).
@@ -85,15 +92,30 @@ const ESSENTIAL_HEADER_NAMES = [
  */
 const ORIGINAL_SENDER_HEADERS = ['X-Original-From', 'X-Sender', 'Original-From', 'X-Envelope-From'];
 
+export interface EmailParserOptions {
+  /**
+   * Recognize Outlook Report-button submissions (see user.report.ts). Off by
+   * default: without it a button report is parsed like any other forward.
+   */
+  detectUserReports?: boolean;
+}
+
 export class EmailParserService {
   private s3Service: S3Service;
   private safeDomains: string[];
   private defaultBucket: string;
+  private detectUserReports: boolean;
 
-  constructor(s3Service: S3Service, safeDomains: string[], defaultBucket: string) {
+  constructor(
+    s3Service: S3Service,
+    safeDomains: string[],
+    defaultBucket: string,
+    options: EmailParserOptions = {}
+  ) {
     this.s3Service = s3Service;
     this.safeDomains = safeDomains.map(d => d.toLowerCase());
     this.defaultBucket = defaultBucket;
+    this.detectUserReports = options.detectUserReports ?? false;
   }
 
   /**
@@ -212,11 +234,19 @@ export class EmailParserService {
             logger.warn('Empty or very short email content received');
           }
 
-          const forwarded = await this.parseRawEmail(content);
+          const subject = record.ses.mail.commonHeaders?.subject ?? 'No Subject';
+          const userReport = this.detectUserReports ? detectUserReport(subject) : null;
+
+          // A button report's wrapper body is a machine-generated dump of the
+          // reported email's headers, not an employee's note — drop it so
+          // attacker-controlled header text is never labeled REPORTED.
+          const forwarded = await this.parseRawEmail(content, {
+            discardWrapperBody: !!userReport,
+          });
 
           const msg: EmailMessage = {
             from_email: record.ses.mail.source,
-            subject: record.ses.mail.commonHeaders?.subject ?? 'No Subject',
+            subject,
             headers: this.extractHeaders(record.ses.mail.headers),
             text: forwarded.text || record.ses.mail.commonHeaders?.subject || 'No email content',
             html: forwarded.html,
@@ -232,6 +262,7 @@ export class EmailParserService {
               dkim: record.ses.receipt?.dkimVerdict?.status,
               dmarc: record.ses.receipt?.dmarcVerdict?.status,
             },
+            ...(userReport ? { userReport } : {}),
           };
 
           logger.debug('Processed email', {
@@ -331,7 +362,10 @@ export class EmailParserService {
    * forwarded block, so downstream forwarded-header extraction and analysis
    * see the original email rather than just the wrapper.
    */
-  private async parseRawEmail(content: string): Promise<{
+  private async parseRawEmail(
+    content: string,
+    options: { discardWrapperBody?: boolean } = {}
+  ): Promise<{
     text: string;
     html: string | null;
     attachments: EmailAttachment[];
@@ -369,8 +403,10 @@ export class EmailParserService {
       return result;
     }
 
-    result.text = parsed.text ?? '';
-    result.html = typeof parsed.html === 'string' ? parsed.html : null;
+    if (!options.discardWrapperBody) {
+      result.text = parsed.text ?? '';
+      result.html = typeof parsed.html === 'string' ? parsed.html : null;
+    }
 
     for (const attachment of parsed.attachments.slice(0, MAX_ATTACHMENTS)) {
       // Forward-as-attachment: parse the embedded original email
@@ -539,6 +575,18 @@ export class EmailParserService {
     emailData.originalForwarder = this.findOriginalForwarder(msg, emailData.headers);
     emailData.forwardedHeaders = this.extractForwardedHeaders(emailData.text);
 
+    if (msg.userReport) {
+      emailData.userReport = msg.userReport;
+      // The wrapper subject embeds a per-recipient message ID and a timestamp,
+      // so it never repeats. Use the reported email's own subject (from the
+      // attached original) so campaign grouping and reports line up with
+      // forwards of the same email.
+      const originalSubject = emailData.forwardedHeaders['Original-Subject'];
+      if (originalSubject) {
+        emailData.subject = originalSubject;
+      }
+    }
+
     // Canonicalize hostile content: links are unwrapped to their true
     // destinations (gateway wrappers removed), the body is normalized, and
     // every raw-vs-canonical divergence becomes a flag — obfuscation is
@@ -552,6 +600,45 @@ export class EmailParserService {
     emailData.contentFlags = [...flags, ...findAnchorMismatches(emailData.html)];
 
     return emailData;
+  }
+
+  /**
+   * Add the original message's headers, as Phishy read them from the
+   * reporter's mailbox, to the email facts.
+   *
+   * Provenance: the retrieval is Phishy's own act, so that it happened —
+   * and where and when the mailbox says the message arrived — is a fact.
+   * The header names and values are not: the sender and every server on the
+   * route wrote them. They are stored as hostile data and the prompt
+   * builder presents them fenced under CLAIMED, never as VERIFIED.
+   *
+   * Each header is reduced to a single line (unfolded, control characters
+   * removed) so a value cannot start a line of its own in the prompt, and
+   * entries whose name is not a header field name are dropped. With no
+   * usable header left, nothing is attached.
+   */
+  attachRetrievedOriginal(emailData: ExtractedEmailData, original: RetrievedOriginal): void {
+    const headers = original.headers
+      .map(header => ({
+        name: header.name.trim(),
+        value: header.value
+          .replace(HEADER_LINE_BREAKS_AND_CONTROLS, ' ')
+          .replace(/\s+/g, ' ')
+          .trim(),
+      }))
+      .filter(header => HEADER_NAME_PATTERN.test(header.name));
+
+    if (headers.length === 0) {
+      return;
+    }
+
+    const receivedAt = original.receivedAt ? Date.parse(original.receivedAt) : NaN;
+    emailData.retrievedOriginal = {
+      location: original.location === 'recoverable_items' ? 'recoverable_items' : 'mailbox',
+      receivedAt: Number.isNaN(receivedAt) ? undefined : new Date(receivedAt).toISOString(),
+      headers,
+      headersTruncated: original.headersTruncated,
+    };
   }
 
   /**

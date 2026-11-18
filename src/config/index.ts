@@ -32,6 +32,8 @@ const ENV_MAPPINGS: Record<string, string> = {
   PHISHY_AI_PROVIDER: 'ai.provider',
   PHISHY_BEDROCK_REGION: 'ai.bedrock.region',
   PHISHY_BEDROCK_MODEL: 'ai.bedrock.modelId',
+  PHISHY_AI_EFFORT: 'ai.effort',
+  PHISHY_AI_REFUSAL_FALLBACK_MODEL: 'ai.refusalFallbackModel',
 
   // Email
   SAFE_DOMAINS: 'email.safeDomains',
@@ -65,6 +67,9 @@ const ENV_MAPPINGS: Record<string, string> = {
   // Email commands
   PHISHY_EMAIL_COMMANDS_ENABLED: 'commands.enabled',
 
+  // Outlook Report-button intake
+  PHISHY_REPORT_BUTTON_ENABLED: 'reportButton.enabled',
+
   // Agentic analysis
   PHISHY_AGENTIC_ENABLED: 'agentic.enabled',
   PHISHY_AGENTIC_MAX_TOOL_ROUNDS: 'agentic.maxToolRounds',
@@ -74,6 +79,7 @@ const ENV_MAPPINGS: Record<string, string> = {
   PHISHY_GRAPH_TENANT_ID: 'graph.tenantId',
   PHISHY_GRAPH_READ_CLIENT_ID: 'graph.read.clientId',
   PHISHY_GRAPH_READ_CERTIFICATE: 'graph.read.certificate',
+  PHISHY_GRAPH_ORIGINAL_FETCH_ENABLED: 'graph.originalFetch.enabled',
   PHISHY_GRAPH_BLAST_RADIUS_ENABLED: 'graph.blastRadius.enabled',
   PHISHY_GRAPH_BLAST_RADIUS_TIME_BUDGET_MS: 'graph.blastRadius.timeBudgetMs',
   PHISHY_GRAPH_BLAST_RADIUS_MAX_MAILBOXES: 'graph.blastRadius.maxMailboxes',
@@ -145,8 +151,8 @@ function getDefaultConfig(): PartialPhishyConfig {
       // This allows bedrock provider to work without requiring an Anthropic key
       bedrock: {
         region: 'us-east-1',
-        modelId: 'global.anthropic.claude-opus-4-8',
-        maxTokens: 4096,
+        modelId: 'global.anthropic.claude-opus-5-5',
+        maxTokens: 16000,
         timeout: 60000,
       },
     },

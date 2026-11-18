@@ -4,21 +4,23 @@
  */
 
 import { z } from 'zod';
+import { EFFORT_LEVELS } from '../services/ai/model.capabilities';
 
 /**
  * AI Provider configuration schemas
  */
 const AnthropicConfigSchema = z.object({
   apiKey: z.string().min(1, 'Anthropic API key is required'),
-  model: z.string().default('claude-opus-4-8'),
-  maxTokens: z.number().positive().default(4096),
+  model: z.string().default('claude-opus-5-5'),
+  // Thinking counts toward max_tokens on Opus 5.5 — leave room for it
+  maxTokens: z.number().positive().default(16000),
   timeout: z.number().positive().default(60000),
 });
 
 const BedrockConfigSchema = z.object({
   region: z.string().default('us-east-1'),
-  modelId: z.string().default('global.anthropic.claude-opus-4-8'),
-  maxTokens: z.number().positive().default(4096),
+  modelId: z.string().default('global.anthropic.claude-opus-5-5'),
+  maxTokens: z.number().positive().default(16000),
   timeout: z.number().positive().default(60000),
 });
 
@@ -28,6 +30,18 @@ const AIConfigSchema = z
     anthropic: AnthropicConfigSchema.optional(),
     bedrock: BedrockConfigSchema.optional(),
     fallbackProvider: z.enum(['anthropic', 'bedrock']).optional(),
+    /**
+     * How much the model thinks, and so the main cost/latency control. Sent as
+     * output_config.effort to models that accept it; omitted for the rest.
+     */
+    effort: z.enum(EFFORT_LEVELS).default('medium'),
+    /**
+     * Model a request is retried on, once, when the primary provider's model
+     * declines it (stop_reason "refusal"). Must be a model ID for the primary
+     * provider. Unset: that provider's built-in default (`claude-opus-4-8` /
+     * `global.anthropic.claude-opus-4-8`). Empty string: no retry.
+     */
+    refusalFallbackModel: z.string().optional(),
   })
   .refine(
     data => {
@@ -103,6 +117,19 @@ const CommandsConfigSchema = z.object({
 });
 
 /**
+ * Outlook Report-button intake configuration schema
+ * When the organization's Microsoft 365 "user reported settings" deliver
+ * Report-button submissions to Phishy, recognize them and handle them
+ * silently: phishing reports are analyzed and recorded and only the security
+ * team is told (when the verdict warrants it); junk / not-junk reports are
+ * skipped. The reporter is never emailed. Off by default — without it a
+ * button report is treated like any other forward.
+ */
+const ReportButtonConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+});
+
+/**
  * Agentic analysis configuration schema
  * Runs analysis as a bounded tool-use loop: Claude may consult Phishy's own
  * threat intelligence (known indicators, campaign history, URL inspection,
@@ -150,6 +177,15 @@ const GraphCredentialConfigSchema = z.object({
 });
 
 /**
+ * Original-message fetch: before analysis, look up the original of a
+ * forwarded email in the reporter's own mailbox and read its Internet
+ * headers. Has effect only when `graph.enabled` is also true.
+ */
+const GraphOriginalFetchConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+});
+
+/**
  * Blast radius: after a malicious verdict, look up who else in the
  * organization received the message and what they did with it, for the
  * security team's copy of the report. Read-only; effective only when
@@ -170,6 +206,8 @@ const GraphConfigSchema = z
     tenantId: z.string().optional(),
     /** App registration holding read-only application permissions */
     read: GraphCredentialConfigSchema.optional(),
+    /** Fetch the original message's headers from the reporter's mailbox */
+    originalFetch: GraphOriginalFetchConfigSchema.optional(),
     /** Who-else-received-it lookup for malicious verdicts */
     blastRadius: GraphBlastRadiusConfigSchema.optional(),
   })
@@ -225,6 +263,7 @@ export const PhishyConfigSchema = z.object({
   campaignAlerts: CampaignAlertConfigSchema.optional(),
   campaignCache: CampaignCacheConfigSchema.optional(),
   commands: CommandsConfigSchema.optional(),
+  reportButton: ReportButtonConfigSchema.optional(),
   agentic: AgenticConfigSchema.optional(),
   graph: GraphConfigSchema.optional(),
   logLevel: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
@@ -249,6 +288,7 @@ export type AgenticConfig = z.infer<typeof AgenticConfigSchema>;
 export type GraphConfig = z.infer<typeof GraphConfigSchema>;
 export type GraphCredentialConfig = z.infer<typeof GraphCredentialConfigSchema>;
 export type GraphBlastRadiusConfig = z.infer<typeof GraphBlastRadiusConfigSchema>;
+export type ReportButtonConfig = z.infer<typeof ReportButtonConfigSchema>;
 
 /**
  * Partial configuration for merging

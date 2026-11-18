@@ -1,7 +1,8 @@
 /**
  * Microsoft Graph foundation: authentication, credential loading and a
- * constrained HTTP client. Optional and off by default; nothing in the
- * email-processing path calls Graph.
+ * constrained HTTP client, read-only operations, and the pipeline features
+ * built on them (`original.fetch.ts`, `blast-radius.service.ts`). Optional
+ * and off by default.
  */
 
 export * from './graph.errors';
@@ -13,4 +14,5 @@ export * from './operations.common';
 export * from './mail.operations';
 export * from './trace.operations';
 export * from './directory.operations';
+export * from './original.fetch';
 export * from './blast-radius.service';

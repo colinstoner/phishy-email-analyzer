@@ -39,11 +39,36 @@ When the same setting is defined in multiple places, Phishy uses this priority (
 |----------|---------|-------------|
 | `PHISHY_AI_PROVIDER` | `anthropic` | AI provider: `anthropic` or `bedrock` |
 | `ANTHROPIC_API_KEY` | - | Anthropic API key (required for anthropic provider) |
-| `CLAUDE_MODEL` | `claude-opus-4-8` | Model for Anthropic provider |
+| `CLAUDE_MODEL` | `claude-opus-5-5` | Model for Anthropic provider |
 | `PHISHY_BEDROCK_REGION` | `us-east-1` | AWS region for Bedrock |
-| `PHISHY_BEDROCK_MODEL` | `global.anthropic.claude-opus-4-8` | Bedrock model ID |
+| `PHISHY_BEDROCK_MODEL` | `global.anthropic.claude-opus-5-5` | Bedrock model ID (an inference-profile ID) |
+| `PHISHY_AI_EFFORT` | `medium` | How much the model thinks: `low`, `medium`, `high`, `xhigh`, or `max` (`ai.effort`) |
+| `PHISHY_AI_REFUSAL_FALLBACK_MODEL` | `claude-opus-4-8` / `global.anthropic.claude-opus-4-8` | Model a declined request is retried on once (`ai.refusalFallbackModel`). Set to an empty string to disable the retry |
 
-> Max tokens and request timeout are file-config only (`ai.anthropic.maxTokens` / `ai.bedrock.timeout`, etc.) — see the example configuration below.
+> Max tokens and request timeout are file-config only (`ai.anthropic.maxTokens` / `ai.bedrock.timeout`, etc.) — see the example configuration below. Both providers default to `maxTokens: 16000` and `timeout: 60000`.
+
+#### Effort and max tokens
+
+Claude Opus 5.5 always thinks before it answers, and thinking cannot be turned off. Two settings follow from that:
+
+- **`ai.effort`** is the control for how much it thinks, and so for cost and latency per email. `medium` is the model's own default and Phishy's. Lower it to `low` to cut cost and latency; raise it only if you have measured a detection gain. Phishy sends the value as `output_config.effort` to models that accept it and omits it for those that don't (Sonnet 4.5, Haiku 4.5, and any model ID it does not recognize). A level the model lacks is stepped down to the nearest one it has (`xhigh` on Opus 4.6 becomes `high`).
+- **`maxTokens`** caps thinking *plus* the answer. A limit sized for the JSON verdict alone cuts the reply off mid-answer, which is why the default is 16000. If you override it, leave room for thinking. A reply that hits the limit is treated as a failed analysis, never parsed as a verdict.
+
+Thinking tokens are billed as output tokens. They are already included in the `OutputTokens` metric; the share spent on thinking is logged as the `ThinkingTokens` property on each usage line (see Cost Tracking).
+
+#### Refusals
+
+Claude Opus 5.5 runs safety classifiers on incoming requests, and security content is one of the things they look for. A phishing email is, by design, full of that content, so the model will occasionally decline to analyze a reported email. This is not an error: the API answers normally with `stop_reason: "refusal"`.
+
+What Phishy does:
+
+1. Retries the same request **once** on `ai.refusalFallbackModel` (Claude Opus 4.8 by default, in the same provider). In agentic mode the tool loop is abandoned first and the retry uses the standard single-shot analysis.
+2. If that model declines too, or the retry is disabled, the reporter receives the **"ANALYSIS UNAVAILABLE"** report, which says the email was *not* checked. A refusal is never reported as "legitimate", never stored as a verdict, and never cached.
+3. Emits the `AnalysisRefusalCount` metric for every declined call.
+
+Refusals in the `reasoning_extraction` category are not retried: they mean the prompt asked the model to reproduce its reasoning, which a different model does not fix.
+
+`ai.refusalFallbackModel` must be a model ID for your **primary** provider (`claude-…` for Anthropic, an inference-profile ID such as `global.anthropic.claude-…` for Bedrock). The fallback model needs the same access as the primary one: on Bedrock, the Lambda role must be allowed to invoke it.
 
 ### Email Settings
 
@@ -139,9 +164,28 @@ Requires the intelligence database and `migrations/002_analysis_feedback.sql`.
 |----------|---------|-------------|
 | `PHISHY_EMAIL_COMMANDS_ENABLED` | `false` | Process security-team replies as commands |
 
+### Outlook Report Button Intake
+
+Microsoft 365 can deliver a copy of every message an employee reports with Outlook's built-in **Report** button to a mailbox of your choice (Defender portal → Settings → Email & collaboration → User reported settings → *Send reported messages to*). If those reports reach Phishy's address, this flag makes Phishy recognize them and handle them **silently** — the employee clicked a button and is not waiting for an answer, so their experience does not change:
+
+- **Reported as Phishing** — analyzed, stored, and counted toward campaign detection exactly like a forward. The reporter is **not** emailed. The security team (`SECURITY_TEAM_DISTRIBUTION`) receives the report only when the verdict is malicious or suspicious, or when the analysis could not be completed.
+- **Reported as Junk / Not junk** — counted and skipped. No analysis, no email.
+
+Forwards to Phishy are unaffected: the person who forwards still gets their answer.
+
+A button report carries the reported email as an attachment with its full original headers, so the analysis sees the real `Authentication-Results`. The wrapper's machine-generated body (a dump of the reported email's headers) is discarded and never presented to the model as the employee's note.
+
+Every report emits a `UserReports` CloudWatch metric (dimension `ReportedAs`). Delivery depends on a Microsoft 365 setting Phishy cannot see, so alarm on that metric going quiet.
+
+With the flag off (the default), a button report that reaches Phishy is treated like any other forward — it is analyzed and the reporter gets a reply.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PHISHY_REPORT_BUTTON_ENABLED` | `false` | Handle Outlook Report-button submissions silently |
+
 ### Microsoft Graph (Optional)
 
-Phishy can authenticate to Microsoft Graph on your own Microsoft 365 tenant. This is a **foundation**: enabling it does not by itself change how emails are analyzed. It exists so that features with their own flags (checking who else received an email — see [Blast radius](#blast-radius-optional)) have a safe, already-reviewed way to reach the tenant. Leave it off unless you use one of those. See [ARCHITECTURE.md](ARCHITECTURE.md#microsoft-graph-optional-foundation) for the trust rules.
+Phishy can authenticate to Microsoft Graph on your own Microsoft 365 tenant. `PHISHY_GRAPH_ENABLED` is a **foundation**: on its own it does not change how emails are analyzed. Each feature that uses Graph has its own flag — today the [original-message lookup](#original-message-lookup) and [blast radius](#blast-radius-optional) (checking who else received a malicious email) — so that features share one safe, already-reviewed way to reach the tenant. Leave it off unless you are enabling one of them. See [ARCHITECTURE.md](ARCHITECTURE.md#microsoft-graph-optional-foundation) for the trust rules.
 
 To find out which Graph calls work in your tenant — with which permissions and licences — before any feature depends on them, run the read-only probe: [GRAPH_PROBE.md](GRAPH_PROBE.md). It runs locally (`npm run graph:probe`), takes the same tenant ID, client ID and certificate, and does not need `PHISHY_GRAPH_ENABLED`.
 
@@ -151,8 +195,11 @@ To find out which Graph calls work in your tenant — with which permissions and
 | `PHISHY_GRAPH_TENANT_ID` | - | Directory (tenant) ID (GUID), or a verified domain of the tenant. Required when enabled |
 | `PHISHY_GRAPH_READ_CLIENT_ID` | - | Application (client) ID (GUID) of the read-only app registration. Required when enabled |
 | `PHISHY_GRAPH_READ_CERTIFICATE` | - | Secrets Manager ARN (recommended) or inline PEM holding the app's private key and certificate. Required when enabled |
+| `PHISHY_GRAPH_ORIGINAL_FETCH_ENABLED` | `false` | Before analysis, read the original message's real headers from the reporter's own mailbox. Has effect only when `PHISHY_GRAPH_ENABLED` is also `true`. See [Original-message lookup](#original-message-lookup) |
 
-File configuration uses the same names: `graph.enabled`, `graph.tenantId`, `graph.read.clientId`, `graph.read.certificate`. With `enabled` set, a missing or malformed value fails configuration at startup; with it unset, the other values are ignored.
+Blast radius has its own variables, listed under [Blast radius](#blast-radius-optional).
+
+File configuration uses the same names: `graph.enabled`, `graph.tenantId`, `graph.read.clientId`, `graph.read.certificate`, `graph.originalFetch.enabled`. With `graph.enabled` set, a missing or malformed value fails configuration at startup; with it unset, the other values are ignored.
 
 Authentication is **certificate-only** — there is no client-secret option. Phishy signs a five-minute JWT assertion with the private key and exchanges it for an access token, which is cached in memory and refreshed before it expires. The certificate thumbprint is derived from the certificate itself; you do not configure it.
 
@@ -237,11 +284,33 @@ Things to know before enabling:
 - **Coverage is always stated.** The section reads "checked N of M mailboxes" and is marked `PARTIAL COVERAGE` whenever the time budget, the mailbox cap, throttling or failed requests kept the lookup from covering everything. The per-mailbox route covers licensed, enabled user mailboxes only: shared mailboxes, unlicensed and disabled accounts are not searched.
 - **The reporter never waits for it.** For a malicious verdict the reporter's report is sent first, then the lookup runs, then the security team's copy is sent. The security team's copy arrives later by at most the time budget. Reports with any other verdict are unaffected. Keep the budget well under the Lambda timeout minus the time analysis can take.
 - **Two emails instead of one.** For a malicious verdict with the lookup enabled, the reporter receives the usual report without the security team in Cc, and the security team receives its own copy carrying the section. The security team's copy is always sent: with the section, or with a one-line note when the lookup failed or ran out of time. A reporter who is on the security-team distribution gets only the security team's copy. Command replies ([email commands](#email-commands-security-team-correspondence)) are matched to the security team's copy. If that copy cannot be sent, Phishy logs an error and emits the `SecurityCopySendFailures` metric; alarm on it, because the reporter has been told and the security team has not.
+- **Outlook Report-button reports get one email, not two.** With `PHISHY_REPORT_BUTTON_ENABLED`, a malicious button report is still handled silently: the reporter is never emailed, and the single email to the security team carries the section (or the one-line note). The lookup runs before that email.
 - **Not every trace row is a mailbox copy.** Rows that message trace reports as *expanded* are distribution lists (their members are listed individually) and are left out; *failed* rows are listed as "Not delivered" and counted separately.
 - **Request volume.** The per-mailbox route makes one or two requests per mailbox. Microsoft limits an app to 10,000 Outlook requests per 10 minutes; a flood of reports of different malicious messages in a large tenant can reach that. Phishy stops a lookup when throttled, reports what it covered, and reuses a result for repeat reports of the same message for 10 minutes (per Lambda instance). Lower the mailbox cap if you see `BlastRadiusPartial` rise.
 - **Failure changes nothing else.** If the lookup fails or runs out of time before finding anything, the report is sent as usual with a one-line note to the security team.
 
 CloudWatch metrics (namespace `Phishy`, dimension `BlastRadiusRoute` = `trace`, `mailbox` or `none`): `BlastRadiusLookups`, `BlastRadiusRecipientsFound`, `BlastRadiusMailboxesChecked`, `BlastRadiusMailboxesEligible`, `BlastRadiusCoveragePercent`, `BlastRadiusPartial`, `BlastRadiusFailures`, `BlastRadiusErrors`, `BlastRadiusCacheHits`, `BlastRadiusDurationMs`. Without a dimension: `SecurityCopySendFailures`.
+
+#### Original-message lookup
+
+When an employee forwards a suspicious email, the forward carries none of the original's headers — only the From, Sent and Subject lines the mail client pasted in. With `PHISHY_GRAPH_ORIGINAL_FETCH_ENABLED=true` (and Graph enabled), Phishy looks the original up in **the reporter's own mailbox** and gives the analysis its real headers: `Authentication-Results`, the `Received` chain, `Return-Path`, `Reply-To`, `Message-ID`.
+
+- **Permission:** `Mail.Read` (application) on the mailboxes of the people who report to Phishy, on the read-only app registration. Grant it through Exchange RBAC for Applications as described above, scoped to those mailboxes, not tenant-wide in Entra. No other permission is used, and nothing is ever written.
+- **What is read:** message metadata to find the message, then that one message's Internet headers. Never a body or an attachment, and never a mailbox other than the reporter's.
+- **When it runs:** only for reports that arrive through SES with an SPF or DKIM `PASS` and whose `From` address is the safe-domain reporter; not for safelist senders, not when a campaign verdict is reused.
+- **Matching:** the claimed sender, sent time and subject must match **exactly one** message, counting the mailbox and its Recoverable Items (so a message the reporter deleted after forwarding is still found). No match, or more than one, and the analysis proceeds exactly as it does without this feature. So does any Graph error or timeout: the lookup has an 8-second overall budget and never fails a report.
+- **Network:** the hosts listed under [Network](#network) must be reachable from the function.
+
+To confirm beforehand that these calls work in your tenant, run the [probe](GRAPH_PROBE.md) (`Sender + time-window filter`, `/messages covers Recoverable Items`, `Internet headers via $select`).
+
+Each lookup emits one CloudWatch EMF line in the `Phishy` namespace:
+
+| Metric | Dimension | Meaning |
+|--------|-----------|---------|
+| `OriginalFetchCount` | `Outcome` = `found` / `not_found` / `ambiguous` / `error` / `skipped` | One per lookup. `skipped`: no request was made (no usable claimed sender or sent time, or the reporter could not be confirmed). A sustained `error` share means a permission, certificate or network problem — the log line `Original-message lookup failed` carries Graph's status, error code and request id |
+| `OriginalFetchDurationMs` | `Outcome` | Time the lookup added to the report |
+
+How the retrieved headers are labelled for the model, and why they are not treated as verified facts, is in [ARCHITECTURE.md](ARCHITECTURE.md#original-message-lookup).
 
 ### AWS Secrets Manager Integration
 
@@ -280,10 +349,14 @@ Metrics appear in the **`Phishy`** namespace, dimensioned by `Provider` and `Mod
 | `EstimatedCostUSD` | Estimated spend per analysis (per-model pricing, including the 10% Bedrock regional-endpoint premium) |
 | `ProcessingTimeMs` | End-to-end analysis latency |
 | `PhishingDetected` | 1 if the verdict was phishing, 0 otherwise |
+| `AnalysisFailureCount` | Reports sent as "analysis unavailable" — the provider was unreachable, the model declined, or its reply was incomplete |
+| `AnalysisRefusalCount` | Model calls declined with `stop_reason: "refusal"`, counted against the model that declined. The category (`cyber`, `bio`, …) is the `RefusalCategory` property on the log line |
 | `CampaignCacheHits` | Reports answered from the campaign verdict cache (no AI call) |
 | `EstimatedCostSavedUSD` | Approximate spend avoided by cache hits |
 
-Useful starting points: a dashboard widget on `SUM(EstimatedCostUSD)` per day, and a billing alarm such as "alert when `SUM(EstimatedCostUSD)` over 24h exceeds $X". Set `PHISHY_DISABLE_METRICS=true` to turn emission off.
+`OutputTokens` includes thinking tokens. When the API reports the thinking share, each usage line also carries a `ThinkingTokens` property — a log field you can query with CloudWatch Logs Insights, not a separate metric.
+
+Useful starting points: a dashboard widget on `SUM(EstimatedCostUSD)` per day, a billing alarm such as "alert when `SUM(EstimatedCostUSD)` over 24h exceeds $X", and an alarm on `AnalysisRefusalCount` relative to `AnalysisCount`. Set `PHISHY_DISABLE_METRICS=true` to turn emission off.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -308,10 +381,12 @@ For more complex setups, use a JSON configuration file.
     "provider": "bedrock",
     "bedrock": {
       "region": "us-east-1",
-      "modelId": "global.anthropic.claude-opus-4-8",
-      "maxTokens": 4096,
+      "modelId": "global.anthropic.claude-opus-5-5",
+      "maxTokens": 16000,
       "timeout": 60000
     },
+    "effort": "medium",
+    "refusalFallbackModel": "global.anthropic.claude-opus-4-8",
     "fallbackProvider": "anthropic"
   },
   "email": {
@@ -379,6 +454,8 @@ Configure automatic fallback if primary provider fails:
   }
 }
 ```
+
+Provider fallback covers outages and errors. A model *refusal* is handled separately, inside the primary provider, by `ai.refusalFallbackModel` (see [Refusals](#refusals)) — a declined request is not sent to the fallback provider.
 
 ---
 
