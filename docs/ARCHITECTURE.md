@@ -182,7 +182,7 @@ There is no path, URL, filter, query or "call Graph" operation, and no field is 
 - *A write tier.* Any write to the tenant (quarantining or removing a message, for example) will be a **separate** broker function with its **own** app registration and certificate, so that the read broker can never obtain a write token (invariant 6), and each write will require security-team approval through the authenticated command channel (invariant 2). It will not be an operation added to this broker.
 - *Model-driven hunting.* A later threat-hunting agent may be allowed to call these same typed read operations. It will never be given raw Graph: no path, filter or query authored by a model. That is why the interface is typed operations today, while the only caller is code. Until then, Graph remains code-driven and is not an agentic tool.
 
-Configuration and what the broker function needs to be deployed with are in [CONFIGURATION.md](CONFIGURATION.md#graph-broker-optional).
+Configuration and what the broker function needs to be deployed with are in [CONFIGURATION.md](CONFIGURATION.md#graph-broker-optional); the SAM template deploys Graph in broker mode (`GraphEnabled=true`), described with its cost in [AWS.md](../AWS.md#optional-microsoft-graph-the-graph-broker-function).
 
 ### Blast radius (optional)
 

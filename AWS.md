@@ -32,6 +32,46 @@ Two manual steps remain, because CloudFormation cannot do them:
 
 If you deploy with SAM, you can skip to Section 9 (production access) and Section 10 (testing). The sections below document the same setup done manually via the console.
 
+### Optional: Microsoft Graph (the Graph broker function)
+
+Phishy's three optional Microsoft Graph features (original-message lookup, sender-relationship check, blast radius) are off by default, and with `GraphEnabled=false` the template creates exactly what it creates without them. Setting `GraphEnabled=true` deploys them in **broker mode**: Graph requests are made by a second function, the Graph broker, and never by the function that parses email. Why, and what crosses between the two, is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#graph-broker).
+
+Before deploying, create the read-only Entra app registration and store its certificate in Secrets Manager as described in [docs/CONFIGURATION.md](docs/CONFIGURATION.md#microsoft-graph-optional).
+
+| Parameter | Default | |
+|---|---|---|
+| `GraphEnabled` | `false` | Adds the Graph broker and points the main function at it. Changes nothing on its own |
+| `GraphTenantId` | - | Directory (tenant) ID, or a verified domain of the tenant. Required with `GraphEnabled` |
+| `GraphReadClientId` | - | Application (client) ID of the read-only app registration. Required with `GraphEnabled` |
+| `GraphCertificateSecretArn` | - | ARN of the Secrets Manager secret holding the app's private key and certificate. Required with `GraphEnabled` |
+| `GraphOriginalFetchEnabled` | `false` | Original-message lookup |
+| `GraphBlastRadiusEnabled` | `false` | Blast radius |
+| `GraphSenderHistoryEnabled` | `false` | Sender-relationship check |
+| `GraphBrokerReservedConcurrency` | `5` | Most broker instances that can run at once; `0` reserves nothing |
+
+A deploy with `GraphEnabled=true` and one of the three required values missing is rejected before anything is created.
+
+What the stack adds when Graph is enabled:
+
+- **`GraphBrokerFunction`** — built from `src/graph-broker.ts` (handler `graph-broker.handler`), Node.js 22, 512 MB, 180-second timeout. It is **not attached to the VPC**, because it needs the route to Microsoft that the main function should not have. It has no trigger of any kind: no function URL, no API, no event source.
+- **`GraphBrokerRole`** — the broker's own role, written out in full rather than generated: `logs:CreateLogStream` and `logs:PutLogEvents` on its own log group, and `secretsmanager:GetSecretValue` on the certificate secret. Nothing else: no S3, SES, Bedrock, database secret or VPC permissions.
+- **`GraphBrokerLogGroup`** — the broker's log group (90-day retention), so the role can be scoped to it.
+- **On the main function** — `PHISHY_GRAPH_ENABLED=true`, `PHISHY_GRAPH_MODE=broker`, `PHISHY_GRAPH_BROKER_FUNCTION` (the broker's name) and the enabled feature flags, plus one new permission: `lambda:InvokeFunction` on the broker, and only on it. The main function is given no tenant ID, client ID or certificate, and its role cannot read the certificate secret.
+- **`LambdaEndpoint`** — only when the main function is in a VPC (`IntelligenceDbSecretArn` set) and `CreateVpcEndpoints=true`: an interface VPC endpoint for the Lambda API (`com.amazonaws.<region>.lambda`), alongside the existing bedrock-runtime, SES and Secrets Manager endpoints and using the same security group. This is how a function with no internet route invokes the broker. If you set `CreateVpcEndpoints=false` because the VPC already has its endpoints, it must have one for Lambda too (or NAT), or every broker call fails with `Outcome=invoke_error` and the features quietly do nothing.
+
+The feature flags are set on both functions from the same parameters. Other Graph settings (`PHISHY_GRAPH_BLAST_RADIUS_TIME_BUDGET_MS`, `PHISHY_GRAPH_SENDER_HISTORY_LOOKBACK_DAYS` and the rest in [docs/CONFIGURATION.md](docs/CONFIGURATION.md)) keep their defaults; to change one, add it to the environment of both functions in the template.
+
+**Why a reserved concurrency.** Sender history allows each broker *instance* 60 message-trace requests per 5 minutes, against a Microsoft limit of 100 per 5 minutes for the whole tenant, shared with everything else that uses message trace. Without a cap, a flood of reports could start as many broker instances as there are concurrent emails, each with its own allowance. `GraphBrokerReservedConcurrency` bounds that: at the default of 5 the worst case is 300 requests per 5 minutes (a typical lookup is 6 and results are cached per sender for 5 minutes), and Microsoft's own throttling takes over beyond the tenant limit; set it to `1` for a hard ceiling below the tenant limit at the cost of more skipped lookups during a flood. An invocation Lambda throttles because of this limit is counted (`GraphBrokerCalls`, `Outcome=throttled`) and the email is analyzed without that lookup, exactly as when Graph is unavailable. Reserving concurrency takes it out of the account's shared pool, and AWS refuses the deploy if that would leave the account with less unreserved concurrency than its minimum; in an account with a small concurrency quota, set the parameter to `0`.
+
+**What it costs to run** (us-east-1 list prices at the time of writing; check current pricing for your region):
+
+- The **Lambda interface endpoint** is the only fixed cost: about USD 0.01 per hour per Availability Zone, so roughly **USD 7.30 a month for each subnet** in `SubnetIds` (about USD 14.60 with two), plus USD 0.01 per GB of data, which is negligible here because requests and responses are a few kilobytes.
+- The **broker function** is billed per use like any Lambda: 512 MB for the seconds a lookup runs. A report with all three features on uses a few seconds, up to the blast-radius budget (45 seconds by default) for a malicious verdict. A thousand malicious reports a month at the full budget is about 22,500 GB-seconds, well under a dollar and inside the Lambda free tier if you have it. Reserved concurrency itself is free.
+- The **log group** stores a few short lines per lookup.
+- The certificate **secret** (about USD 0.40 a month) is needed in either mode.
+
+After deploying, alarm on `GraphBrokerCalls` with any `Outcome` other than `ok`, and see [docs/CONFIGURATION.md](docs/CONFIGURATION.md#graph-broker-optional) for what each outcome means.
+
 ## Option B: Manual Console Setup
 
 ### 1. Domain Verification in SES
