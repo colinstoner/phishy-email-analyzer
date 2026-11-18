@@ -65,6 +65,22 @@ export const BEDROCK_CLAUDE_MODELS = {
 const DEFAULT_MODEL = BEDROCK_CLAUDE_MODELS.CLAUDE_OPUS_5_5;
 /** Where a refused request is retried once. Opus 4.8 runs a narrower classifier set. */
 const DEFAULT_REFUSAL_FALLBACK_MODEL = BEDROCK_CLAUDE_MODELS.CLAUDE_OPUS_4_8;
+
+/** Routing prefix of an inference-profile ID: `us.anthropic.…` → `us` */
+const INFERENCE_PROFILE_PREFIX = /^([a-z][a-z-]{1,15})\.anthropic\./;
+
+/**
+ * The default refusal-fallback model for a primary model. It keeps the
+ * primary's routing prefix, so a deployment pinned to a geography (for
+ * example `us.`) never sends the retry through a different one.
+ */
+export function defaultRefusalFallbackModel(primaryModel: string): string {
+  const prefix = INFERENCE_PROFILE_PREFIX.exec(primaryModel)?.[1];
+  if (!prefix || prefix === 'global') {
+    return DEFAULT_REFUSAL_FALLBACK_MODEL;
+  }
+  return DEFAULT_REFUSAL_FALLBACK_MODEL.replace(/^global\./, `${prefix}.`);
+}
 /**
  * Thinking is always on for Opus 5.5 and counts toward max_tokens, so the
  * limit has to hold the thinking as well as the JSON verdict.
@@ -182,7 +198,8 @@ export class BedrockProvider implements AIProvider {
     this.maxTokens = config.maxTokens ?? DEFAULT_MAX_TOKENS;
     this.timeout = config.timeout ?? DEFAULT_TIMEOUT_MS;
     this.effort = config.effort ?? DEFAULT_EFFORT;
-    this.refusalFallbackModel = config.refusalFallbackModel ?? DEFAULT_REFUSAL_FALLBACK_MODEL;
+    this.refusalFallbackModel =
+      config.refusalFallbackModel ?? defaultRefusalFallbackModel(this.model);
     this.profile = profile;
     this.essentialHeadersExtractor = essentialHeadersExtractor;
   }
