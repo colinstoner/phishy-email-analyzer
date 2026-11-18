@@ -143,6 +143,8 @@ Requires the intelligence database and `migrations/002_analysis_feedback.sql`.
 
 Phishy can authenticate to Microsoft Graph on your own Microsoft 365 tenant. This is a **foundation**: enabling it does not change how emails are analyzed — no feature calls Graph yet. It exists so that later features (retrieving a reporter's original message, checking who else received an email) have a safe, already-reviewed way to reach the tenant. Leave it off unless you are preparing for those. See [ARCHITECTURE.md](ARCHITECTURE.md#microsoft-graph-optional-foundation) for the trust rules.
 
+To find out which Graph calls work in your tenant — with which permissions and licences — before any feature depends on them, run the read-only probe: [GRAPH_PROBE.md](GRAPH_PROBE.md). It runs locally (`npm run graph:probe`), takes the same tenant ID, client ID and certificate, and does not need `PHISHY_GRAPH_ENABLED`.
+
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PHISHY_GRAPH_ENABLED` | `false` | Enable Microsoft Graph access |
