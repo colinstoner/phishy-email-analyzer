@@ -1,13 +1,13 @@
-From: notifications@github.com
+From: notifications@codehost.example
 To: user@example.com
-Subject: [GitHub] A new device has been authorized
+Subject: [CodeHost] A new device has been authorized
 Date: Mon, 15 Jan 2024 10:30:00 -0500
-Message-ID: <notification-12345@github.com>
+Message-ID: <notification-12345@codehost.example>
 Content-Type: text/plain; charset=utf-8
 
 Hi @username,
 
-A new device was used to sign in to your GitHub account.
+A new device was used to sign in to your CodeHost account.
 
 Device: Chrome on Mac
 IP address: 192.0.2.1
@@ -17,7 +17,7 @@ If this was you, you can safely ignore this email.
 
 If you did not sign in from this device, your password may have been compromised.
 Please secure your account by visiting:
-https://github.com/settings/security
+https://codehost.example/settings/security
 
 Thanks,
-The GitHub Team
+The CodeHost Team

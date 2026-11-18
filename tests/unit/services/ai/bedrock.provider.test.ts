@@ -8,9 +8,11 @@ import { mockClient } from 'aws-sdk-client-mock';
 import {
   BedrockProvider,
   defaultRefusalFallbackModel,
+  isBedrockAuthError,
 } from '../../../../src/services/ai/bedrock.provider';
 import {
   ModelRefusalError,
+  ProviderAuthError,
   TruncatedResponseError,
 } from '../../../../src/services/ai/model.response';
 import * as metrics from '../../../../src/utils/metrics';
@@ -288,6 +290,57 @@ describe('BedrockProvider', () => {
       await expect(makeProvider().analyzeEmail(EMAIL)).rejects.toThrow('rejected');
       expect(bedrockMock.commandCalls(InvokeModelCommand)).toHaveLength(1);
     });
+
+    it.each([
+      ['CredentialsProviderError', 'Could not load credentials from any providers', undefined],
+      [
+        'TokenProviderError',
+        'Token is expired. To refresh this SSO session run aws sso login',
+        undefined,
+      ],
+      ['ExpiredTokenException', 'The security token included in the request is expired', 403],
+      ['UnrecognizedClientException', 'The security token included in the request is invalid', 403],
+      ['AccessDeniedException', 'User is not authorized to perform bedrock:InvokeModel', 403],
+      ['Error', 'Token is expired', undefined],
+      ['SomeNewAuthException', 'opaque', 401],
+    ])('fails at once on a credential error (%s)', async (name, message, httpStatusCode) => {
+      bedrockMock.on(InvokeModelCommand).rejects(
+        Object.assign(new Error(message), {
+          name,
+          ...(httpStatusCode ? { $metadata: { httpStatusCode } } : {}),
+        })
+      );
+
+      const failure = makeProvider().analyzeEmail(EMAIL);
+
+      await expect(failure).rejects.toBeInstanceOf(ProviderAuthError);
+      await expect(failure).rejects.toThrow(/AWS credentials or permissions .*not retried/);
+      expect(bedrockMock.commandCalls(InvokeModelCommand)).toHaveLength(1);
+    });
+  });
+
+  describe('isBedrockAuthError', () => {
+    const sdkError = (name: string, httpStatusCode?: number, message = 'x'): Error =>
+      Object.assign(new Error(message), { name, $metadata: { httpStatusCode } });
+
+    it('leaves throttling, timeouts and server errors retryable', () => {
+      for (const error of [
+        sdkError('ThrottlingException', 429, 'Too many requests'),
+        sdkError('ServiceUnavailableException', 503),
+        sdkError('InternalServerException', 500),
+        sdkError('ModelTimeoutException', 408),
+        sdkError('TimeoutError', undefined, 'socket hang up'),
+        new Error('ETIMEDOUT'),
+      ]) {
+        expect(isBedrockAuthError(error)).toBe(false);
+      }
+    });
+
+    it('matches authentication and authorization failures', () => {
+      expect(isBedrockAuthError(sdkError('ExpiredTokenException', 400))).toBe(true);
+      expect(isBedrockAuthError(sdkError('AccessDeniedException', 403))).toBe(true);
+      expect(isBedrockAuthError(sdkError('Error', undefined, 'Token is expired'))).toBe(true);
+    });
   });
 
   describe('sendPrompt', () => {
@@ -379,7 +432,10 @@ describe('BedrockProvider', () => {
       const health = await provider.healthCheck();
 
       expect(health.available).toBe(false);
-      expect(health.lastError).toBe('no access');
+      expect(health.lastError).toContain('AccessDeniedException');
+      expect(health.lastError).toContain('not retried');
+      // Denied access fails at once: one call per check, no backoff
+      expect(bedrockMock.commandCalls(InvokeModelCommand)).toHaveLength(2);
     });
   });
 });

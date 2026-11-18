@@ -118,7 +118,7 @@ export function createMockSESEvent(options: {
   s3Key?: string;
 }): SESEvent {
   const {
-    from = 'user@trusted.com',
+    from = 'user@trusted.example',
     to = 'phishy@example.com',
     subject = 'Fw: Suspicious Email',
     messageId = 'test-message-123',
@@ -210,11 +210,11 @@ export function createMockContext(): {
 /**
  * Sample raw email content for testing
  */
-export const SAMPLE_EMAIL_CONTENT = `From: attacker@phishing-site.com
-To: victim@company.com
+export const SAMPLE_EMAIL_CONTENT = `From: attacker@phishing-site.test
+To: victim@company.example
 Subject: Urgent: Verify Your Account
 Date: Mon, 15 Jan 2024 10:00:00 -0500
-Message-ID: <suspicious-123@phishing-site.com>
+Message-ID: <suspicious-123@phishing-site.test>
 Content-Type: text/plain; charset="UTF-8"
 
 Dear Customer,
@@ -231,18 +231,18 @@ Security Team
 /**
  * Sample forwarded email for testing
  */
-export const SAMPLE_FORWARDED_EMAIL = `From: user@trusted.com
+export const SAMPLE_FORWARDED_EMAIL = `From: user@trusted.example
 To: phishy@example.com
 Subject: Fw: Urgent: Verify Your Account
 Date: Mon, 15 Jan 2024 11:00:00 -0500
-Message-ID: <forward-456@trusted.com>
+Message-ID: <forward-456@trusted.example>
 Content-Type: text/plain; charset="UTF-8"
 
 ---------- Forwarded message ---------
-From: attacker@phishing-site.com
+From: attacker@phishing-site.test
 Date: Mon, 15 Jan 2024 10:00:00 -0500
 Subject: Urgent: Verify Your Account
-To: victim@company.com
+To: victim@company.example
 
 Dear Customer,
 
@@ -258,11 +258,11 @@ Security Team
 /**
  * Sample legitimate email for testing
  */
-export const SAMPLE_LEGITIMATE_EMAIL = `From: newsletter@company.com
-To: user@trusted.com
+export const SAMPLE_LEGITIMATE_EMAIL = `From: newsletter@company.example
+To: user@trusted.example
 Subject: Monthly Newsletter - January 2024
 Date: Mon, 15 Jan 2024 09:00:00 -0500
-Message-ID: <newsletter-789@company.com>
+Message-ID: <newsletter-789@company.example>
 Content-Type: text/plain; charset="UTF-8"
 
 Hello,

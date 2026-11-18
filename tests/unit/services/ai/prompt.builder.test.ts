@@ -29,7 +29,7 @@ describe('buildPhishingAnalysisPrompt', () => {
     forwardedHeaders: {},
     attachments: [],
     sender: 'sender@example.com',
-    to: 'recipient@test.org',
+    to: 'recipient@test.example',
     original_sender: 'sender@example.com',
     originalForwarder: '',
     links: [],
@@ -44,14 +44,14 @@ describe('buildPhishingAnalysisPrompt', () => {
 
   it('should include email content in prompt', () => {
     const emailData = createMockEmailData({
-      from_email: 'phisher@fake.com',
+      from_email: 'phisher@fake.test',
       subject: 'Urgent Action Required',
       text: 'Please click this link immediately',
     });
 
     const prompt = buildPhishingAnalysisPrompt(emailData, createMockHeaders());
 
-    expect(prompt).toContain('FROM: phisher@fake.com');
+    expect(prompt).toContain('FROM: phisher@fake.test');
     expect(prompt).toContain('Subject: Urgent Action Required');
     expect(prompt).toContain('Please click this link immediately');
     // The subject is quoted inside the fence, never stated under VERIFIED
@@ -62,13 +62,13 @@ describe('buildPhishingAnalysisPrompt', () => {
 
   it('should include links section when links exist', () => {
     const emailData = createMockEmailData({
-      links: ['https://suspicious.com/login', 'http://192.168.1.1/verify'],
+      links: ['https://suspicious.test/login', 'http://192.168.1.1/verify'],
     });
 
     const prompt = buildPhishingAnalysisPrompt(emailData, createMockHeaders());
 
     expect(prompt).toContain('--- LINKS IN EMAIL');
-    expect(prompt).toContain('https://suspicious.com/login');
+    expect(prompt).toContain('https://suspicious.test/login');
     expect(prompt).toContain('http://192.168.1.1/verify');
   });
 
@@ -213,7 +213,7 @@ describe('buildPhishingAnalysisPrompt', () => {
 
   it('should include headers in prompt', () => {
     const headers = {
-      From: 'Test Sender <test@sender.com>',
+      From: 'Test Sender <test@sender.example>',
       'X-Originating-IP': '10.0.0.1',
     };
 
@@ -248,13 +248,13 @@ describe('buildPhishingAnalysisPrompt', () => {
       name: 'Test Corp',
       organization: {
         name: 'Test Corporation',
-        domains: ['testcorp.com', 'testcorp.io'],
+        domains: ['testcorp.example', 'testcorp-io.example'],
         aliases: ['Test Corp', 'TC'],
       },
       systems: {
         email: {
           providers: ['Google Workspace'],
-          legitimateServices: ['sendgrid.net'],
+          legitimateServices: ['mailer-service.example'],
         },
         authentication: {
           providers: ['Azure AD'],
@@ -266,7 +266,7 @@ describe('buildPhishingAnalysisPrompt', () => {
         {
           name: 'Jane CEO',
           title: 'CEO',
-          email: 'jane@testcorp.com',
+          email: 'jane@testcorp.example',
           aliases: ['Jane C'],
           impersonationRisk: 'critical',
         },
@@ -274,13 +274,13 @@ describe('buildPhishingAnalysisPrompt', () => {
       trustedPartners: [
         {
           name: 'Partner Inc',
-          domains: ['partner.com'],
+          domains: ['partner.example'],
           relationship: 'vendor',
         },
       ],
       customPatterns: {
         highRiskKeywords: ['wire transfer', 'urgent'],
-        knownBadDomains: ['testcorp-secure.com'],
+        knownBadDomains: ['testcorp-secure.test'],
         recentThreats: [
           {
             description: 'CEO impersonation campaign',
@@ -305,7 +305,7 @@ describe('buildPhishingAnalysisPrompt', () => {
 
       expect(prompt).toContain('--- ORGANIZATION CONTEXT ---');
       expect(prompt).toContain('Test Corporation');
-      expect(prompt).toContain('testcorp.com');
+      expect(prompt).toContain('testcorp.example');
     });
 
     it('should include VIP watch list', () => {
@@ -342,7 +342,7 @@ describe('buildPhishingAnalysisPrompt', () => {
       expect(prompt).toContain('--- HIGH RISK KEYWORDS ---');
       expect(prompt).toContain('wire transfer');
       expect(prompt).toContain('--- KNOWN MALICIOUS DOMAINS ---');
-      expect(prompt).toContain('testcorp-secure.com');
+      expect(prompt).toContain('testcorp-secure.test');
     });
 
     it('should include recent threats', () => {

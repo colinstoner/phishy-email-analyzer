@@ -14,12 +14,13 @@ import {
 import { EffortLevel, effortForModel } from './model.capabilities';
 import {
   ModelTurn,
+  ProviderAuthError,
   analyzeSingleShot,
   completeSingleShot,
   normalizeModelResponse,
 } from './model.response';
 import { AnalysisResult, ExtractedEmailData } from '../../types';
-import { createLogger } from '../../utils/logger';
+import { contentFacts, createLogger } from '../../utils/logger';
 import { withRetry, isRetryableHttpError } from '../../utils/retry';
 import { EnterpriseProfile } from '../../models/profile.model';
 
@@ -129,7 +130,7 @@ export class AnthropicProvider implements AIProvider {
   ): Promise<AnalysisResult> {
     logger.info('Starting email analysis with Anthropic', {
       model: this.model,
-      subject: emailData.subject.substring(0, 50),
+      subject: contentFacts(emailData.subject),
     });
 
     const essentialHeaders = this.essentialHeadersExtractor(emailData.headers);
@@ -280,7 +281,12 @@ export class AnthropicProvider implements AIProvider {
             }
 
             if (axiosError.response?.status === 401) {
-              throw new Error('Invalid Anthropic API key');
+              throw new ProviderAuthError('Invalid Anthropic API key (status 401); not retried');
+            }
+            if (axiosError.response?.status === 403) {
+              throw new ProviderAuthError(
+                'Anthropic API denied the request (status 403); not retried. Check the API key permissions'
+              );
             }
 
             if (axiosError.response?.status === 400) {
@@ -303,7 +309,7 @@ export class AnthropicProvider implements AIProvider {
         shouldRetry: error => {
           // Don't retry auth errors, bad requests, or malformed responses
           if (
-            error.message.includes('Invalid Anthropic API key') ||
+            error instanceof ProviderAuthError ||
             error.message.includes('bad request') ||
             error.message.includes('Unexpected response format')
           ) {

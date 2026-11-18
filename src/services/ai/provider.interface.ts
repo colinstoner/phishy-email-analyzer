@@ -16,6 +16,10 @@ import {
 import { EnterpriseProfile } from '../../models/profile.model';
 import { ConversationRequest, ConversationResponse } from './conversation.types';
 import { EffortLevel } from './model.capabilities';
+import { createLogger } from '../../utils/logger';
+import { emitVerdictProseDiscardedMetric } from '../../utils/metrics';
+
+const logger = createLogger('model-verdict');
 
 /**
  * Options for AI analysis.
@@ -210,8 +214,91 @@ function sanitizeIOCs(value: unknown): AINominatedIOC[] | undefined {
   return iocs.length > 0 ? iocs : undefined;
 }
 
+/** The outcome of locating the verdict object in a model reply */
+export type VerdictObjectScan =
+  | { kind: 'object'; value: Record<string, unknown>; discardedProseChars: number }
+  | { kind: 'none' | 'truncated' | 'multiple' };
+
+/** Markdown fence markers are framing, not prose, when counting what was discarded */
+const FENCE_MARKER = /```(?:json)?/gi;
+
 /**
- * Parse AI response into structured analysis result
+ * Find the one top-level JSON object in a model reply.
+ *
+ * A brace- and string-aware scan, not a regex: outside an object every
+ * character is prose; inside one, braces in strings and escaped quotes are
+ * honored. A balanced `{...}` span that is not valid JSON is treated as
+ * prose (a model's note can contain braces). The scan is fail-closed:
+ * - an unterminated object anywhere (a truncated reply) → `truncated`
+ * - two or more objects that parse → `multiple` (ambiguous: which is the
+ *   verdict? a trailing note can quote one the email supplied)
+ * - none → `none`
+ */
+export function scanForVerdictObject(text: string): VerdictObjectScan {
+  const objects: Array<{ start: number; end: number; value: Record<string, unknown> }> = [];
+  let i = 0;
+  while (i < text.length) {
+    if (text[i] !== '{') {
+      i++;
+      continue;
+    }
+    const start = i;
+    let depth = 0;
+    let inString = false;
+    let end = -1;
+    for (; i < text.length; i++) {
+      const ch = text[i];
+      if (inString) {
+        if (ch === '\\') i++;
+        else if (ch === '"') inString = false;
+      } else if (ch === '"') {
+        inString = true;
+      } else if (ch === '{') {
+        depth++;
+      } else if (ch === '}') {
+        depth--;
+        if (depth === 0) {
+          end = i + 1;
+          break;
+        }
+      }
+    }
+    if (end < 0) {
+      return { kind: 'truncated' };
+    }
+    try {
+      const value: unknown = JSON.parse(text.slice(start, end));
+      if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+        objects.push({ start, end, value: value as Record<string, unknown> });
+      }
+    } catch {
+      // Balanced but not JSON: prose that happens to contain braces
+    }
+    i = end;
+  }
+
+  if (objects.length === 0) return { kind: 'none' };
+  if (objects.length > 1) return { kind: 'multiple' };
+  const [only] = objects;
+  const outside = (text.slice(0, only.start) + text.slice(only.end)).replace(FENCE_MARKER, '');
+  return { kind: 'object', value: only.value, discardedProseChars: outside.trim().length };
+}
+
+const SCAN_FAILURE_REASONS: Record<'none' | 'truncated' | 'multiple', string> = {
+  none: 'The model response was not valid JSON: it contained no JSON verdict object',
+  truncated: 'The model response contained an incomplete JSON object',
+  multiple: 'The model response contained more than one JSON object, so the verdict is ambiguous',
+};
+
+/**
+ * Parse AI response into structured analysis result.
+ *
+ * Acceptance rule: the reply must contain exactly one complete top-level JSON
+ * object (optionally inside a ```json fence) that carries a recognized
+ * `verdict` or a boolean `isPhishing`. Prose before or after it is discarded
+ * and counted. Anything else — no object, a truncated object, more than one
+ * object, an object without a verdict — is a failed analysis, never a default
+ * verdict. A note appended after a valid verdict therefore cannot suppress it.
  */
 export function parseAnalysisResponse(
   responseText: string,
@@ -219,90 +306,61 @@ export function parseAnalysisResponse(
   model: string,
   processingTimeMs: number
 ): AnalysisResult {
-  try {
-    // Try to extract JSON from response
-    let jsonText = responseText.trim();
-
-    // Handle markdown code blocks
-    if (jsonText.includes('```json')) {
-      const match = jsonText.match(/```json\s*([\s\S]*?)\s*```/);
-      if (match) {
-        jsonText = match[1];
-      }
-    } else if (jsonText.includes('```')) {
-      const match = jsonText.match(/```\s*([\s\S]*?)\s*```/);
-      if (match) {
-        jsonText = match[1];
-      }
-    }
-
-    // Find JSON object in text
-    if (!jsonText.startsWith('{')) {
-      const jsonMatch = jsonText.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        jsonText = jsonMatch[0];
-      }
-    }
-
-    const parsed = JSON.parse(jsonText) as AIAnalysisResponse;
-    const assessment = sanitizeAssessment(parsed);
-
-    // Fail closed: JSON that carries neither a recognized verdict nor a boolean
-    // isPhishing is not a ruling. Defaulting it to isPhishing:false would turn
-    // a malformed reply into "legitimate".
-    if (!assessment && typeof parsed?.isPhishing !== 'boolean') {
-      return createFailedAnalysisResult(
-        'The model response did not contain a recognizable verdict',
-        processingTimeMs,
-        responseText
-      );
-    }
-
-    // Derive the legacy fields from the structured verdict when present, so
-    // every downstream consumer keeps working unchanged.
-    const isPhishing = assessment
-      ? MALICIOUS_VERDICTS.includes(assessment.verdict)
-      : parsed.isPhishing === true;
-    const confidence = assessment
-      ? normalizeConfidence(riskScoreToConfidence(assessment.riskScore))
-      : normalizeConfidence(parsed.confidence);
-
-    return {
-      summary: parsed.summary ?? 'Analysis completed',
-      isPhishing,
-      confidence,
-      assessment,
-      indicators: Array.isArray(parsed.indicators) ? parsed.indicators : [],
-      recommendations: Array.isArray(parsed.recommendations) ? parsed.recommendations : [],
-      iocs: sanitizeIOCs(parsed.iocs),
-      rawResponse: responseText,
+  const scan = scanForVerdictObject(responseText);
+  if (scan.kind !== 'object') {
+    return createFailedAnalysisResult(
+      SCAN_FAILURE_REASONS[scan.kind],
       processingTimeMs,
-      provider,
-      model,
-    };
-  } catch {
-    // Attempt to extract key fields with regex if JSON parsing fails
-    const result = extractFieldsFromText(responseText);
-
-    // Fail closed: text that is not JSON and states no explicit isPhishing
-    // value (a truncated or free-form reply) is an incomplete analysis, not a
-    // "not phishing" ruling.
-    if (!result) {
-      return createFailedAnalysisResult(
-        'The model response was not valid JSON and contained no explicit verdict',
-        processingTimeMs,
-        responseText
-      );
-    }
-
-    return {
-      ...result,
-      rawResponse: responseText,
-      processingTimeMs,
-      provider,
-      model,
-    };
+      responseText
+    );
   }
+
+  const parsed = scan.value as unknown as AIAnalysisResponse;
+  const assessment = sanitizeAssessment(parsed);
+
+  // Fail closed: JSON that carries neither a recognized verdict nor a boolean
+  // isPhishing is not a ruling. Defaulting it to isPhishing:false would turn
+  // a malformed reply into "legitimate".
+  if (!assessment && typeof parsed?.isPhishing !== 'boolean') {
+    return createFailedAnalysisResult(
+      'The model response did not contain a recognizable verdict',
+      processingTimeMs,
+      responseText
+    );
+  }
+
+  if (scan.discardedProseChars > 0) {
+    // Counts only: the prose can quote the suspicious email
+    logger.info('Discarded prose around the model verdict', {
+      provider,
+      model,
+      discardedProseChars: scan.discardedProseChars,
+    });
+    emitVerdictProseDiscardedMetric(provider, model);
+  }
+
+  // Derive the legacy fields from the structured verdict when present, so
+  // every downstream consumer keeps working unchanged.
+  const isPhishing = assessment
+    ? MALICIOUS_VERDICTS.includes(assessment.verdict)
+    : parsed.isPhishing === true;
+  const confidence = assessment
+    ? normalizeConfidence(riskScoreToConfidence(assessment.riskScore))
+    : normalizeConfidence(parsed.confidence);
+
+  return {
+    summary: parsed.summary ?? 'Analysis completed',
+    isPhishing,
+    confidence,
+    assessment,
+    indicators: Array.isArray(parsed.indicators) ? parsed.indicators : [],
+    recommendations: Array.isArray(parsed.recommendations) ? parsed.recommendations : [],
+    iocs: sanitizeIOCs(parsed.iocs),
+    rawResponse: responseText,
+    processingTimeMs,
+    provider,
+    model,
+  };
 }
 
 /**
@@ -336,30 +394,6 @@ export function createFailedAnalysisResult(
     // analysisFailed check. The models involved are named in failureReason.
     provider: 'none',
     model: 'none',
-  };
-}
-
-/**
- * Extract analysis fields from non-JSON text. Returns undefined when the text
- * states no explicit isPhishing value.
- */
-function extractFieldsFromText(
-  text: string
-): Omit<AnalysisResult, 'rawResponse' | 'processingTimeMs' | 'provider' | 'model'> | undefined {
-  const summaryMatch = text.match(/"summary"\s*:\s*"([^"]+)"/i);
-  const isPhishingMatch = text.match(/"isPhishing"\s*:\s*(true|false)/i);
-  const confidenceMatch = text.match(/"confidence"\s*:\s*"([^"]+)"/i);
-
-  if (!isPhishingMatch) {
-    return undefined;
-  }
-
-  return {
-    summary: summaryMatch?.[1] ?? 'Analysis completed - response format unexpected',
-    isPhishing: isPhishingMatch[1].toLowerCase() === 'true',
-    confidence: normalizeConfidence(confidenceMatch?.[1] ?? 'Unknown'),
-    indicators: [],
-    recommendations: ['Review the raw analysis output for details'],
   };
 }
 

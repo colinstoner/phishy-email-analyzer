@@ -588,7 +588,7 @@ export async function runCli(argv: string[], io: EvalIo): Promise<number> {
     summaries: GroupSummary[];
     runs: ScoredRun[];
   } = {
-    harnessVersion: 1,
+    harnessVersion: 2,
     startedAt: startedAt.toISOString(),
     finishedAt: finishedAt.toISOString(),
     options: {

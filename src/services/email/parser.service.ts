@@ -16,7 +16,7 @@ import {
   S3Location,
   RetrievedOriginal,
 } from '../../types';
-import { createLogger } from '../../utils/logger';
+import { contentFacts, createLogger } from '../../utils/logger';
 import {
   extractEmailAddress,
   extractUrls,
@@ -472,7 +472,7 @@ export class EmailParserService {
         .map(a => toAttachmentMeta(a));
 
       logger.info('Parsed message/rfc822 attachment (forward-as-attachment)', {
-        innerSubject: inner.subject?.substring(0, 50),
+        innerSubject: contentFacts(inner.subject),
         innerAttachments: innerAttachments.length,
       });
 

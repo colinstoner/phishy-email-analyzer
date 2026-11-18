@@ -586,7 +586,7 @@ describe('EmailParserService', () => {
     it('should surface attachment metadata without carrying content', async () => {
       const pdfBytes = Buffer.from('%PDF-1.4 fake invoice payload');
       const rawEmail = [
-        'From: sender@example-unknown.net',
+        'From: sender@example-unknown.test',
         'To: victim@example.com',
         'Subject: Invoice attached',
         'MIME-Version: 1.0',
@@ -647,7 +647,7 @@ describe('EmailParserService', () => {
     it('should extract the body of a simple raw email', async () => {
       const parser = makeParser();
       const raw = [
-        'From: alerts@example-notices.com',
+        'From: alerts@example-notices.test',
         'To: user@example.com',
         'Subject: Hello',
         'MIME-Version: 1.0',
@@ -692,7 +692,7 @@ describe('EmailParserService', () => {
       const parser = makeParser();
       const encoded = Buffer.from('Click here to verify your account', 'utf-8').toString('base64');
       const raw = [
-        'From: alerts@example-notices.com',
+        'From: alerts@example-notices.test',
         'To: user@example.com',
         'Subject: Action required',
         'MIME-Version: 1.0',
@@ -739,7 +739,7 @@ describe('EmailParserService', () => {
     it('should fall back to a stripped HTML part when no text/plain part exists', async () => {
       const parser = makeParser();
       const raw = [
-        'From: support@example-portal.net',
+        'From: support@example-portal.test',
         'To: user@example.com',
         'Subject: HTML only',
         'MIME-Version: 1.0',
@@ -809,7 +809,7 @@ describe('EmailParserService', () => {
         html: null,
         headers: { From: 'Forwarder <forwarder@example.com>' },
         to: 'security@example.com',
-        original_sender: 'odd-sender@example-unknown.net',
+        original_sender: 'odd-sender@example-unknown.test',
         ...overrides,
       };
     }
@@ -824,7 +824,7 @@ describe('EmailParserService', () => {
       expect(data.text).toBe('Please check this message.');
       expect(data.html).toBe('');
       expect(data.to).toBe('security@example.com');
-      expect(data.original_sender).toBe('odd-sender@example-unknown.net');
+      expect(data.original_sender).toBe('odd-sender@example-unknown.test');
       expect(data.attachments).toEqual([]);
     });
 
@@ -884,11 +884,11 @@ describe('EmailParserService', () => {
 
     it('should extract links from text when no HTML is present', () => {
       const parser = makeParser();
-      const msg = makeMessage({ text: 'Go to https://login.example-verify.com/account now' });
+      const msg = makeMessage({ text: 'Go to https://login.example-verify.test/account now' });
 
       const data = parser.extractEmailData(msg);
 
-      expect(data.links).toEqual(['https://login.example-verify.com/account']);
+      expect(data.links).toEqual(['https://login.example-verify.test/account']);
     });
 
     it('should use the X-Forwarded-For header as the original forwarder', () => {
@@ -942,7 +942,7 @@ describe('EmailParserService', () => {
     it('should fall back to the to field for safe subdomain matches', () => {
       const parser = makeParser(makeS3(), ['example.com']);
       const msg = makeMessage({
-        headers: { From: 'Stranger <stranger@example-other.net>' },
+        headers: { From: 'Stranger <stranger@example-other.test>' },
         to: 'analyst@mail.example.com',
       });
 
@@ -952,8 +952,8 @@ describe('EmailParserService', () => {
     it('should return empty forwarder when no safe domain matches', () => {
       const parser = makeParser(makeS3(), ['example.com']);
       const msg = makeMessage({
-        headers: { From: 'Stranger <stranger@example-other.net>' },
-        to: 'someone@example-elsewhere.org',
+        headers: { From: 'Stranger <stranger@example-other.test>' },
+        to: 'someone@example-elsewhere.test',
       });
 
       expect(parser.extractEmailData(msg).originalForwarder).toBe('');
@@ -1058,7 +1058,7 @@ describe('EmailParserService', () => {
         '-------- Original Message --------',
         'Subject: Invoice 12345',
         'Date: Tue, 2 Jun 2026 10:30:00 +0000',
-        'From: billing@example-billing.net',
+        'From: billing@example-billing.test',
         'To: user@example.com',
         '',
         'Your invoice is attached.',
@@ -1067,7 +1067,7 @@ describe('EmailParserService', () => {
       const headers = parser.extractForwardedHeaders(text);
 
       expect(headers['Original-Subject']).toBe('Invoice 12345');
-      expect(headers['Original-From']).toBe('billing@example-billing.net');
+      expect(headers['Original-From']).toBe('billing@example-billing.test');
       expect(headers['Original-To']).toBe('user@example.com');
     });
 

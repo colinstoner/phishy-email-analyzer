@@ -3,6 +3,8 @@
  * Provides consistent logging format across all modules
  */
 
+import { createHash } from 'crypto';
+
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
 interface LogEntry {
@@ -103,6 +105,23 @@ class Logger {
 // Default logger instance
 const defaultLevel = (process.env.LOG_LEVEL as LogLevel) ?? 'info';
 export const logger = new Logger(defaultLevel, { service: 'phishy' });
+
+/**
+ * Non-content facts about a value taken from a suspicious email (a subject,
+ * a filename, an untrusted address), for info-level logs: its length and a
+ * short SHA-256 prefix, so log lines about the same email can be correlated
+ * without the email's text ever reaching the log. Invariant 1 in CLAUDE.md.
+ */
+export function contentFacts(value: string | undefined | null): {
+  length: number;
+  sha256: string;
+} {
+  const text = value ?? '';
+  return {
+    length: text.length,
+    sha256: createHash('sha256').update(text, 'utf8').digest('hex').slice(0, 12),
+  };
+}
 
 /**
  * Create a logger for a specific module

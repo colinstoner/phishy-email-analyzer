@@ -17,8 +17,8 @@ const PROFILE: EnterpriseProfile = {
       impersonationRisk: 'critical',
     },
   ],
-  trustedPartners: [{ name: 'Acme Bank', domains: ['acmebank.com'], relationship: 'vendor' }],
-  customPatterns: { knownBadDomains: ['evil-payroll.net'] },
+  trustedPartners: [{ name: 'Acme Bank', domains: ['acmebank.example'], relationship: 'vendor' }],
+  customPatterns: { knownBadDomains: ['evil-payroll.test'] },
 };
 
 function makeDb() {
@@ -153,12 +153,12 @@ describe('AgenticToolExecutor', () => {
 
     it('recognizes trusted partners and known-bad domains', async () => {
       const partner = JSON.parse(
-        (await executor.execute('check_profile', { value: 'billing@acmebank.com' })).content
+        (await executor.execute('check_profile', { value: 'billing@acmebank.example' })).content
       );
       expect(partner.trustedPartner).toEqual({ name: 'Acme Bank', relationship: 'vendor' });
 
       const bad = JSON.parse(
-        (await executor.execute('check_profile', { value: 'evil-payroll.net' })).content
+        (await executor.execute('check_profile', { value: 'evil-payroll.test' })).content
       );
       expect(bad.knownBadDomain).toBe(true);
     });
@@ -187,7 +187,7 @@ describe('examineUrl', () => {
   });
 
   it('flags punycode hosts', () => {
-    const result = examineUrl('https://xn--exmple-cua.com/login') as { redFlags: string[] };
+    const result = examineUrl('https://xn--exmple-cua.example/login') as { redFlags: string[] };
     expect(result.redFlags.join(' ')).toContain('Punycode');
   });
 

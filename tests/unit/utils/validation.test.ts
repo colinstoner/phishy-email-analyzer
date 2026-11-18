@@ -79,8 +79,8 @@ describe('domainMatches', () => {
   });
 
   it('should not match different domains', () => {
-    expect(domainMatches('notexample.com', 'example.com')).toBe(false);
-    expect(domainMatches('examplefake.com', 'example.com')).toBe(false);
+    expect(domainMatches('notexample.test', 'example.test')).toBe(false);
+    expect(domainMatches('examplefake.test', 'example.test')).toBe(false);
   });
 
   it('should be case insensitive', () => {
@@ -105,10 +105,10 @@ describe('isValidUrl', () => {
 
 describe('extractUrls', () => {
   it('should extract URLs from text', () => {
-    const text = 'Visit https://example.com and http://test.org for more.';
+    const text = 'Visit https://example.com and http://test.example for more.';
     const urls = extractUrls(text);
     expect(urls).toContain('https://example.com');
-    expect(urls).toContain('http://test.org');
+    expect(urls).toContain('http://test.example');
   });
 
   it('should clean trailing punctuation', () => {
@@ -131,7 +131,7 @@ describe('extractHrefUrls', () => {
   });
 
   it('should handle multiple links', () => {
-    const html = '<a href="https://example.com">1</a><a href="https://test.org">2</a>';
+    const html = '<a href="https://example.com">1</a><a href="https://test.example">2</a>';
     const urls = extractHrefUrls(html);
     expect(urls).toHaveLength(2);
   });

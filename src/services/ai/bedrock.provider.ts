@@ -14,12 +14,13 @@ import {
 import { EffortLevel, effortForModel } from './model.capabilities';
 import {
   ModelTurn,
+  ProviderAuthError,
   analyzeSingleShot,
   completeSingleShot,
   normalizeModelResponse,
 } from './model.response';
 import { AnalysisResult, ExtractedEmailData } from '../../types';
-import { createLogger } from '../../utils/logger';
+import { contentFacts, createLogger } from '../../utils/logger';
 import { withRetry, isRetryableHttpError } from '../../utils/retry';
 import { EnterpriseProfile } from '../../models/profile.model';
 
@@ -155,6 +156,47 @@ function bedrockErrorDetail(error: unknown): {
   };
 }
 
+/** SDK error names that mean Phishy's own AWS identity was rejected */
+const AUTH_ERROR_NAMES = new Set([
+  'CredentialsProviderError',
+  'TokenProviderError',
+  'ExpiredTokenException',
+  'ExpiredToken',
+  'UnrecognizedClientException',
+  'InvalidClientTokenId',
+  'AccessDeniedException',
+  'InvalidSignatureException',
+  'IncompleteSignatureException',
+  'SignatureDoesNotMatch',
+  'MissingAuthenticationTokenException',
+]);
+
+/** Messages the credential providers use when there is no usable identity */
+const AUTH_ERROR_MESSAGE =
+  /token is expired|security token included in the request is (?:expired|invalid)|could not load credentials|session (?:has )?expired/i;
+
+/**
+ * Whether an error from the Bedrock client is an authentication or
+ * authorization failure: Phishy's credentials are missing, expired or
+ * rejected, or its role may not invoke the model. These fail identically on
+ * every retry. Throttling (429), timeouts and 5xx are not matched here.
+ */
+export function isBedrockAuthError(error: unknown): boolean {
+  if (error instanceof ProviderAuthError) return true;
+  const e = error as {
+    name?: unknown;
+    message?: unknown;
+    $metadata?: { httpStatusCode?: unknown };
+  };
+  const status = e?.$metadata?.httpStatusCode;
+  return (
+    (typeof e?.name === 'string' && AUTH_ERROR_NAMES.has(e.name)) ||
+    status === 401 ||
+    status === 403 ||
+    (typeof e?.message === 'string' && AUTH_ERROR_MESSAGE.test(e.message))
+  );
+}
+
 export interface BedrockConfig {
   region: string;
   modelId?: string;
@@ -213,7 +255,7 @@ export class BedrockProvider implements AIProvider {
   ): Promise<AnalysisResult> {
     logger.info('Starting email analysis with Bedrock', {
       model: this.model,
-      subject: emailData.subject.substring(0, 50),
+      subject: contentFacts(emailData.subject),
     });
 
     const essentialHeaders = this.essentialHeadersExtractor(emailData.headers);
@@ -374,6 +416,14 @@ export class BedrockProvider implements AIProvider {
             ...bedrockErrorDetail(sdkError),
             message: sdkError instanceof Error ? sdkError.message : String(sdkError),
           });
+          if (isBedrockAuthError(sdkError)) {
+            throw new ProviderAuthError(
+              `Bedrock rejected Phishy's AWS credentials or permissions ` +
+                `(${bedrockErrorDetail(sdkError).errorName}); not retried. Refresh the ` +
+                `credentials or check bedrock:InvokeModel access for ${request.model}`,
+              { cause: sdkError }
+            );
+          }
           throw sdkError;
         }
 
@@ -393,6 +443,11 @@ export class BedrockProvider implements AIProvider {
       {
         ...request.retry,
         shouldRetry: error => {
+          // Credentials and permissions fail the same way every time; retrying
+          // would burn the whole backoff budget (over 100s) before failing
+          if (error instanceof ProviderAuthError) {
+            return false;
+          }
           // The SDK puts the exception type in `name`; the message is generic
           const detail = `${error.name} ${error.message}`;
           // Consistent failures — access denied, model not found, a rejected

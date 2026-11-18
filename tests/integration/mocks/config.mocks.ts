@@ -20,8 +20,8 @@ export function createMockConfig(overrides: Partial<PhishyConfig> = {}): PhishyC
       ...overrides.ai,
     },
     email: {
-      safeDomains: ['trusted.com', 'example.com'],
-      safeSenders: ['admin@trusted.com'],
+      safeDomains: ['trusted.example', 'example.com'],
+      safeSenders: ['admin@trusted.example'],
       deleteAfterProcessing: false,
       ...overrides.email,
     },
