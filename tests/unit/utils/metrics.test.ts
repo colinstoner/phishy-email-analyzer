@@ -2,7 +2,11 @@
  * CloudWatch EMF metrics emitter tests
  */
 
-import { emitAIUsageMetric, AIUsageMetric } from '../../../src/utils/metrics';
+import {
+  emitAIUsageMetric,
+  emitUserReportMetric,
+  AIUsageMetric,
+} from '../../../src/utils/metrics';
 
 const SAMPLE: AIUsageMetric = {
   provider: 'bedrock',
@@ -79,6 +83,38 @@ describe('emitAIUsageMetric', () => {
   it('emits nothing when PHISHY_DISABLE_METRICS=true', () => {
     process.env.PHISHY_DISABLE_METRICS = 'true';
     emitAIUsageMetric(SAMPLE);
+    expect(stdoutSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('emitUserReportMetric', () => {
+  let stdoutSpy: jest.SpyInstance;
+  const originalDisable = process.env.PHISHY_DISABLE_METRICS;
+
+  beforeEach(() => {
+    stdoutSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    delete process.env.PHISHY_DISABLE_METRICS;
+  });
+
+  afterEach(() => {
+    stdoutSpy.mockRestore();
+    process.env.PHISHY_DISABLE_METRICS = originalDisable;
+  });
+
+  it('emits a UserReports count dimensioned by what the employee chose', () => {
+    emitUserReportMetric('phishing');
+
+    expect(stdoutSpy).toHaveBeenCalledTimes(1);
+    const doc = JSON.parse(stdoutSpy.mock.calls[0][0] as string);
+    expect(doc._aws.CloudWatchMetrics[0].Namespace).toBe('Phishy');
+    expect(doc._aws.CloudWatchMetrics[0].Dimensions).toEqual([['ReportedAs'], []]);
+    expect(doc.ReportedAs).toBe('phishing');
+    expect(doc.UserReports).toBe(1);
+  });
+
+  it('is silenced by PHISHY_DISABLE_METRICS', () => {
+    process.env.PHISHY_DISABLE_METRICS = 'true';
+    emitUserReportMetric('junk');
     expect(stdoutSpy).not.toHaveBeenCalled();
   });
 });
