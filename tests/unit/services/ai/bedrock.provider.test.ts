@@ -5,7 +5,10 @@
 
 import { BedrockRuntimeClient, InvokeModelCommand } from '@aws-sdk/client-bedrock-runtime';
 import { mockClient } from 'aws-sdk-client-mock';
-import { BedrockProvider } from '../../../../src/services/ai/bedrock.provider';
+import {
+  BedrockProvider,
+  defaultRefusalFallbackModel,
+} from '../../../../src/services/ai/bedrock.provider';
 import {
   ModelRefusalError,
   TruncatedResponseError,
@@ -209,6 +212,27 @@ describe('BedrockProvider', () => {
 
       expect(bedrockMock.commandCalls(InvokeModelCommand)).toHaveLength(1);
       expect(result.analysisFailed).toBe(true);
+    });
+
+    it("keeps the primary model's routing prefix on the default refusal fallback", async () => {
+      bedrockMock
+        .on(InvokeModelCommand)
+        .resolvesOnce(refusalReply(null))
+        .resolvesOnce(verdictReply());
+
+      await makeProvider({ modelId: 'us.anthropic.claude-opus-5-5' }).analyzeEmail(EMAIL);
+
+      expect(sent(0).modelId).toBe('us.anthropic.claude-opus-5-5');
+      expect(sent(1).modelId).toBe('us.anthropic.claude-opus-4-8');
+      expect(defaultRefusalFallbackModel('global.anthropic.claude-opus-5-5')).toBe(
+        'global.anthropic.claude-opus-4-8'
+      );
+      expect(defaultRefusalFallbackModel('eu.anthropic.claude-opus-5-5')).toBe(
+        'eu.anthropic.claude-opus-4-8'
+      );
+      expect(defaultRefusalFallbackModel('some-custom-model')).toBe(
+        'global.anthropic.claude-opus-4-8'
+      );
     });
 
     it('uses a configured refusal fallback model, and none when it is empty', async () => {

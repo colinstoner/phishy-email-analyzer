@@ -41,9 +41,9 @@ When the same setting is defined in multiple places, Phishy uses this priority (
 | `ANTHROPIC_API_KEY` | - | Anthropic API key (required for anthropic provider) |
 | `CLAUDE_MODEL` | `claude-opus-5-5` | Model for Anthropic provider |
 | `PHISHY_BEDROCK_REGION` | `us-east-1` | AWS region for Bedrock |
-| `PHISHY_BEDROCK_MODEL` | `global.anthropic.claude-opus-5-5` | Bedrock model ID (an inference-profile ID) |
+| `PHISHY_BEDROCK_MODEL` | `global.anthropic.claude-opus-5-5` | Bedrock model ID (an inference-profile ID). In the SAM template, set it with the `BedrockModelId` parameter (empty = this default) |
 | `PHISHY_AI_EFFORT` | `medium` | How much the model thinks: `low`, `medium`, `high`, `xhigh`, or `max` (`ai.effort`) |
-| `PHISHY_AI_REFUSAL_FALLBACK_MODEL` | `claude-opus-4-8` / `global.anthropic.claude-opus-4-8` | Model a declined request is retried on once (`ai.refusalFallbackModel`). Set to an empty string to disable the retry |
+| `PHISHY_AI_REFUSAL_FALLBACK_MODEL` | `claude-opus-4-8` / `global.anthropic.claude-opus-4-8` | Model a declined request is retried on once (`ai.refusalFallbackModel`). On Bedrock the default keeps the primary model's routing prefix (a `us.` primary retries on `us.anthropic.claude-opus-4-8`). Set to an empty string to disable the retry |
 
 > Max tokens and request timeout are file-config only (`ai.anthropic.maxTokens` / `ai.bedrock.timeout`, etc.) — see the example configuration below. Both providers default to `maxTokens: 16000` and `timeout: 60000`.
 
