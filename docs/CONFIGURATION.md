@@ -266,6 +266,8 @@ Phishy only ever contacts these two hosts for Graph: the client's base URL is fi
 
 With `PHISHY_GRAPH_MODE=broker` the main function makes no Graph request. It invokes a second Lambda function, the Graph broker, which holds the read certificate and runs the lookups. The main function then needs no tenant ID, client ID or certificate (any it is given are dropped when configuration is loaded, and inline certificate material logs a warning), no route to Microsoft, and no access to the certificate secret. The design and its trust rules are in [ARCHITECTURE.md](ARCHITECTURE.md#graph-broker).
 
+The SAM template sets all of the following up when you deploy with `GraphEnabled=true` (the broker function, its role, the main function's settings and permission, and the Lambda VPC endpoint): see [AWS.md](../AWS.md#optional-microsoft-graph-the-graph-broker-function). The rest of this section is the reference for what it configures, and for deployments that do not use the template.
+
 **Main function**
 
 | Variable | Value |
