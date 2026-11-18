@@ -2,7 +2,11 @@
  * CloudWatch EMF metrics emitter tests
  */
 
-import { emitAIUsageMetric, AIUsageMetric } from '../../../src/utils/metrics';
+import {
+  emitAIUsageMetric,
+  emitOriginalFetchMetric,
+  AIUsageMetric,
+} from '../../../src/utils/metrics';
 
 const SAMPLE: AIUsageMetric = {
   provider: 'bedrock',
@@ -79,6 +83,52 @@ describe('emitAIUsageMetric', () => {
   it('emits nothing when PHISHY_DISABLE_METRICS=true', () => {
     process.env.PHISHY_DISABLE_METRICS = 'true';
     emitAIUsageMetric(SAMPLE);
+    expect(stdoutSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('emitOriginalFetchMetric', () => {
+  let stdoutSpy: jest.SpyInstance;
+  const originalDisable = process.env.PHISHY_DISABLE_METRICS;
+
+  beforeEach(() => {
+    stdoutSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    delete process.env.PHISHY_DISABLE_METRICS;
+  });
+
+  afterEach(() => {
+    stdoutSpy.mockRestore();
+    process.env.PHISHY_DISABLE_METRICS = originalDisable;
+  });
+
+  it.each(['found', 'not_found', 'ambiguous', 'error', 'skipped'] as const)(
+    'writes one EMF line dimensioned by outcome for %s',
+    outcome => {
+      emitOriginalFetchMetric(outcome, 412);
+
+      expect(stdoutSpy).toHaveBeenCalledTimes(1);
+      const line = stdoutSpy.mock.calls[0][0] as string;
+      expect(line.endsWith('\n')).toBe(true);
+
+      const doc = JSON.parse(line);
+      // _aws must sit at the JSON root for CloudWatch to extract the metrics
+      expect(doc._aws.CloudWatchMetrics[0]).toEqual({
+        Namespace: 'Phishy',
+        Dimensions: [['Outcome']],
+        Metrics: [
+          { Name: 'OriginalFetchCount', Unit: 'Count' },
+          { Name: 'OriginalFetchDurationMs', Unit: 'Milliseconds' },
+        ],
+      });
+      expect(doc.Outcome).toBe(outcome);
+      expect(doc.OriginalFetchCount).toBe(1);
+      expect(doc.OriginalFetchDurationMs).toBe(412);
+    }
+  );
+
+  it('emits nothing when PHISHY_DISABLE_METRICS=true', () => {
+    process.env.PHISHY_DISABLE_METRICS = 'true';
+    emitOriginalFetchMetric('found', 1);
     expect(stdoutSpy).not.toHaveBeenCalled();
   });
 });

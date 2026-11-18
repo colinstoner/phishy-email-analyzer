@@ -14,6 +14,7 @@ import {
   SESEvent,
   EmailEvent,
   S3Location,
+  RetrievedOriginal,
 } from '../../types';
 import { createLogger } from '../../utils/logger';
 import {
@@ -30,6 +31,11 @@ const logger = createLogger('email-parser');
 
 /** Cap on attachment metadata entries carried per message */
 const MAX_ATTACHMENTS = 20;
+
+/** An RFC 5322 header field name: printable ASCII without the colon */
+const HEADER_NAME_PATTERN = /^[\x21-\x39\x3B-\x7E]{1,100}$/;
+/** Control characters and Unicode line breaks: folding and any attempt to start a new line */
+const HEADER_LINE_BREAKS_AND_CONTROLS = /[\p{Cc}\p{Zl}\p{Zp}]+/gu;
 
 /**
  * Schema for events arriving from outside SES (API Gateway, tests).
@@ -552,6 +558,45 @@ export class EmailParserService {
     emailData.contentFlags = [...flags, ...findAnchorMismatches(emailData.html)];
 
     return emailData;
+  }
+
+  /**
+   * Add the original message's headers, as Phishy read them from the
+   * reporter's mailbox, to the email facts.
+   *
+   * Provenance: the retrieval is Phishy's own act, so that it happened —
+   * and where and when the mailbox says the message arrived — is a fact.
+   * The header names and values are not: the sender and every server on the
+   * route wrote them. They are stored as hostile data and the prompt
+   * builder presents them fenced under CLAIMED, never as VERIFIED.
+   *
+   * Each header is reduced to a single line (unfolded, control characters
+   * removed) so a value cannot start a line of its own in the prompt, and
+   * entries whose name is not a header field name are dropped. With no
+   * usable header left, nothing is attached.
+   */
+  attachRetrievedOriginal(emailData: ExtractedEmailData, original: RetrievedOriginal): void {
+    const headers = original.headers
+      .map(header => ({
+        name: header.name.trim(),
+        value: header.value
+          .replace(HEADER_LINE_BREAKS_AND_CONTROLS, ' ')
+          .replace(/\s+/g, ' ')
+          .trim(),
+      }))
+      .filter(header => HEADER_NAME_PATTERN.test(header.name));
+
+    if (headers.length === 0) {
+      return;
+    }
+
+    const receivedAt = original.receivedAt ? Date.parse(original.receivedAt) : NaN;
+    emailData.retrievedOriginal = {
+      location: original.location === 'recoverable_items' ? 'recoverable_items' : 'mailbox',
+      receivedAt: Number.isNaN(receivedAt) ? undefined : new Date(receivedAt).toISOString(),
+      headers,
+      headersTruncated: original.headersTruncated,
+    };
   }
 
   /**

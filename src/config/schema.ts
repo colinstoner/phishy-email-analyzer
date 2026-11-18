@@ -149,6 +149,15 @@ const GraphCredentialConfigSchema = z.object({
   certificate: z.string().optional(),
 });
 
+/**
+ * Original-message fetch: before analysis, look up the original of a
+ * forwarded email in the reporter's own mailbox and read its Internet
+ * headers. Has effect only when `graph.enabled` is also true.
+ */
+const GraphOriginalFetchConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+});
+
 const GraphConfigSchema = z
   .object({
     enabled: z.boolean().default(false),
@@ -156,6 +165,8 @@ const GraphConfigSchema = z
     tenantId: z.string().optional(),
     /** App registration holding read-only application permissions */
     read: GraphCredentialConfigSchema.optional(),
+    /** Fetch the original message's headers from the reporter's mailbox */
+    originalFetch: GraphOriginalFetchConfigSchema.optional(),
   })
   .superRefine((data, ctx) => {
     if (!data.enabled) {

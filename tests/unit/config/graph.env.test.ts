@@ -13,6 +13,7 @@ const GRAPH_VARS = [
   'PHISHY_GRAPH_TENANT_ID',
   'PHISHY_GRAPH_READ_CLIENT_ID',
   'PHISHY_GRAPH_READ_CERTIFICATE',
+  'PHISHY_GRAPH_ORIGINAL_FETCH_ENABLED',
 ];
 
 describe('Graph environment variables', () => {
@@ -56,6 +57,26 @@ describe('Graph environment variables', () => {
       tenantId: TENANT_ID,
       read: { clientId: CLIENT_ID, certificate: SECRET_ARN },
     });
+  });
+
+  it('leaves the original-message lookup off unless its own flag is set', async () => {
+    process.env.PHISHY_GRAPH_ENABLED = 'true';
+    process.env.PHISHY_GRAPH_TENANT_ID = TENANT_ID;
+    process.env.PHISHY_GRAPH_READ_CLIENT_ID = CLIENT_ID;
+    process.env.PHISHY_GRAPH_READ_CERTIFICATE = SECRET_ARN;
+
+    expect((await loadConfig()).graph?.originalFetch?.enabled ?? false).toBe(false);
+
+    process.env.PHISHY_GRAPH_ORIGINAL_FETCH_ENABLED = 'true';
+    expect((await loadConfig()).graph?.originalFetch).toEqual({ enabled: true });
+  });
+
+  it('accepts the original-message flag while Graph itself is off', async () => {
+    // It has no effect then, but must not break configuration
+    process.env.PHISHY_GRAPH_ORIGINAL_FETCH_ENABLED = 'true';
+    const config = await loadConfig();
+    expect(config.graph?.enabled).toBe(false);
+    expect(config.graph?.originalFetch).toEqual({ enabled: true });
   });
 
   it('fails configuration when enabled without its settings', async () => {
