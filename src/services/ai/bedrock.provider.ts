@@ -4,14 +4,20 @@
  */
 
 import { BedrockRuntimeClient, InvokeModelCommand } from '@aws-sdk/client-bedrock-runtime';
-import {
-  AIProvider,
-  AnalysisOptions,
-  ProviderHealth,
-  parseAnalysisResponse,
-} from './provider.interface';
+import { AIProvider, AnalysisOptions, ProviderHealth } from './provider.interface';
 import { buildPhishingAnalysisPrompt } from './prompt.builder';
-import { ConversationRequest, ConversationResponse, ContentBlock } from './conversation.types';
+import {
+  ConversationMessage,
+  ConversationRequest,
+  ConversationResponse,
+} from './conversation.types';
+import { EffortLevel, effortForModel } from './model.capabilities';
+import {
+  ModelTurn,
+  analyzeSingleShot,
+  completeSingleShot,
+  normalizeModelResponse,
+} from './model.response';
 import { AnalysisResult, ExtractedEmailData } from '../../types';
 import { createLogger } from '../../utils/logger';
 import { withRetry, isRetryableHttpError } from '../../utils/retry';
@@ -23,31 +29,56 @@ const logger = createLogger('bedrock-provider');
  * Supported Bedrock Claude models
  *
  * Primary recommendations:
- * - CLAUDE_OPUS_4_8: Most capable model — best detection quality (default)
- * - CLAUDE_SONNET_4_6: Best balance of quality, speed, and cost
- * - CLAUDE_HAIKU_4_5: Fastest option for high-volume or quick-scan scenarios
+ * - CLAUDE_OPUS_5_5: current Opus — best detection quality per dollar (default)
+ * - CLAUDE_SONNET_5_5: balance of quality, speed, and cost
+ * - CLAUDE_HAIKU_5_5: fastest and cheapest, for high-volume or quick-scan scenarios
+ * - CLAUDE_FABLE_5_2: highest capability tier, at twice the Opus 5.5 price
  *
  * ID formats: on-demand invocation requires an INFERENCE PROFILE ID, not the
  * bare `anthropic.` model ID (Bedrock rejects the bare form with a
  * ValidationException — verified empirically). `global.` profiles route
  * dynamically at baseline pricing; swap to a regional prefix (`us.`, `eu.`,
- * ...) for data-residency requirements, at a 10% pricing premium.
+ * ...) for data-residency requirements, at a 10% pricing premium. The 5.x
+ * profiles below were confirmed ACTIVE in 2026-11; each also exists with a
+ * `us.` prefix.
  */
 export const BEDROCK_CLAUDE_MODELS = {
   // Current models (recommended)
+  CLAUDE_OPUS_5_5: 'global.anthropic.claude-opus-5-5',
+  CLAUDE_SONNET_5_5: 'global.anthropic.claude-sonnet-5-5',
+  CLAUDE_HAIKU_5_5: 'global.anthropic.claude-haiku-5-5',
+  CLAUDE_FABLE_5_2: 'global.anthropic.claude-fable-5-2',
+  // Previous releases (still active)
+  CLAUDE_OPUS_5: 'global.anthropic.claude-opus-5',
+  CLAUDE_SONNET_5: 'global.anthropic.claude-sonnet-5',
+  CLAUDE_FABLE_5_1: 'global.anthropic.claude-fable-5-1',
+  CLAUDE_FABLE_5: 'global.anthropic.claude-fable-5',
   CLAUDE_OPUS_4_8: 'global.anthropic.claude-opus-4-8',
   CLAUDE_OPUS_4_6: 'global.anthropic.claude-opus-4-6-v1',
   CLAUDE_SONNET_4_6: 'global.anthropic.claude-sonnet-4-6',
   CLAUDE_HAIKU_4_5: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
-  // Previous generation (still active)
   CLAUDE_SONNET_4_5: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
   // Deprecated on Bedrock (avoid for new deployments)
   CLAUDE_SONNET_4: 'us.anthropic.claude-sonnet-4-20250514-v1:0',
 } as const;
 
-const DEFAULT_MODEL = BEDROCK_CLAUDE_MODELS.CLAUDE_OPUS_4_8;
-const DEFAULT_MAX_TOKENS = 4096;
+const DEFAULT_MODEL = BEDROCK_CLAUDE_MODELS.CLAUDE_OPUS_5_5;
+/** Where a refused request is retried once. Opus 4.8 runs a narrower classifier set. */
+const DEFAULT_REFUSAL_FALLBACK_MODEL = BEDROCK_CLAUDE_MODELS.CLAUDE_OPUS_4_8;
+/**
+ * Thinking is always on for Opus 5.5 and counts toward max_tokens, so the
+ * limit has to hold the thinking as well as the JSON verdict.
+ */
+const DEFAULT_MAX_TOKENS = 16000;
 const DEFAULT_TIMEOUT_MS = 60000;
+const DEFAULT_EFFORT: EffortLevel = 'medium';
+
+/** Health probe budget: room to think briefly; any successful invoke counts as healthy. */
+const HEALTH_CHECK_MAX_TOKENS = 1024;
+
+/** System prompt for single-shot requests */
+const SINGLE_SHOT_SYSTEM_PROMPT =
+  'You are a security analyst helping to identify phishing emails. Always provide your analysis in the requested JSON format.';
 
 /**
  * Retry budget for the email-analysis call. Phishy is an async, email-latency
@@ -63,6 +94,31 @@ const DEFAULT_TIMEOUT_MS = 60000;
 const ANALYSIS_MAX_RETRIES = 4;
 const ANALYSIS_BASE_DELAY_MS = 15000;
 const ANALYSIS_MAX_DELAY_MS = 60000;
+
+/**
+ * Attempts for the one refusal-fallback call. It runs AFTER the primary call
+ * has already spent its share of the Lambda timeout, so it gets a single retry
+ * (one ~15s wait) rather than a second full ANALYSIS_* budget: worst-case
+ * waiting is 105s + 15s = 120s, still inside the 180s function timeout.
+ */
+const REFUSAL_FALLBACK_MAX_RETRIES = 2;
+
+interface RetryBudget {
+  maxRetries: number;
+  baseDelayMs: number;
+  maxDelayMs?: number;
+}
+
+const ANALYSIS_RETRY_BUDGET: RetryBudget = {
+  maxRetries: ANALYSIS_MAX_RETRIES,
+  baseDelayMs: ANALYSIS_BASE_DELAY_MS,
+  maxDelayMs: ANALYSIS_MAX_DELAY_MS,
+};
+const REFUSAL_FALLBACK_RETRY_BUDGET: RetryBudget = {
+  ...ANALYSIS_RETRY_BUDGET,
+  maxRetries: REFUSAL_FALLBACK_MAX_RETRIES,
+};
+const CONVERSATION_RETRY_BUDGET: RetryBudget = { maxRetries: 3, baseDelayMs: 1000 };
 
 /**
  * Pull the diagnostic detail out of an AWS SDK error. Bedrock surfaces a
@@ -88,6 +144,20 @@ export interface BedrockConfig {
   modelId?: string;
   maxTokens?: number;
   timeout?: number;
+  /** Sent as output_config.effort to models that accept it */
+  effort?: EffortLevel;
+  /** Model a refused request is retried on once. Empty string disables the retry. */
+  refusalFallbackModel?: string;
+}
+
+interface InvokeRequest {
+  model: string;
+  messages: ConversationMessage[];
+  maxTokens: number;
+  effort: EffortLevel;
+  retry: RetryBudget;
+  system?: string;
+  tools?: ConversationRequest['tools'];
 }
 
 export class BedrockProvider implements AIProvider {
@@ -97,6 +167,8 @@ export class BedrockProvider implements AIProvider {
   private client: BedrockRuntimeClient;
   private maxTokens: number;
   private timeout: number;
+  private effort: EffortLevel;
+  private refusalFallbackModel: string;
   private profile?: EnterpriseProfile;
   private essentialHeadersExtractor: (headers: Record<string, string>) => Record<string, string>;
 
@@ -109,6 +181,8 @@ export class BedrockProvider implements AIProvider {
     this.model = config.modelId ?? DEFAULT_MODEL;
     this.maxTokens = config.maxTokens ?? DEFAULT_MAX_TOKENS;
     this.timeout = config.timeout ?? DEFAULT_TIMEOUT_MS;
+    this.effort = config.effort ?? DEFAULT_EFFORT;
+    this.refusalFallbackModel = config.refusalFallbackModel ?? DEFAULT_REFUSAL_FALLBACK_MODEL;
     this.profile = profile;
     this.essentialHeadersExtractor = essentialHeadersExtractor;
   }
@@ -120,8 +194,6 @@ export class BedrockProvider implements AIProvider {
     emailData: ExtractedEmailData,
     options?: AnalysisOptions
   ): Promise<AnalysisResult> {
-    const startTime = Date.now();
-
     logger.info('Starting email analysis with Bedrock', {
       model: this.model,
       subject: emailData.subject.substring(0, 50),
@@ -130,20 +202,20 @@ export class BedrockProvider implements AIProvider {
     const essentialHeaders = this.essentialHeadersExtractor(emailData.headers);
     const prompt = buildPhishingAnalysisPrompt(emailData, essentialHeaders, this.profile);
 
-    const { text: responseText, usage } = await this.sendPromptWithUsage(prompt, options);
-    const processingTimeMs = Date.now() - startTime;
-
-    const result = parseAnalysisResponse(responseText, this.name, this.model, processingTimeMs);
-
-    // Add token usage to result for cost tracking
-    if (usage) {
-      result.tokenUsage = usage;
-    }
+    const result = await analyzeSingleShot({
+      provider: this.name,
+      model: this.model,
+      refusalFallbackModel: this.refusalFallbackModel,
+      invoke: (model, isRefusalFallback) =>
+        this.sendSingleShot(model, prompt, options, isRefusalFallback),
+    });
 
     logger.info('Email analysis completed', {
+      analysisFailed: result.analysisFailed ?? false,
       isPhishing: result.isPhishing,
       confidence: result.confidence,
-      processingTimeMs,
+      model: result.model,
+      processingTimeMs: result.processingTimeMs,
     });
 
     return result;
@@ -152,116 +224,60 @@ export class BedrockProvider implements AIProvider {
   /**
    * Run one turn of a tool-capable conversation via InvokeModel. The request
    * body is the Anthropic Messages format, which Bedrock passes through.
+   * A refusal or a truncated turn is returned (see `stopReason`), not thrown:
+   * the caller decides what it means for the conversation.
    */
   async converse(
     request: ConversationRequest,
     options?: AnalysisOptions
   ): Promise<ConversationResponse> {
-    const maxTokens = request.maxTokens ?? options?.maxTokens ?? this.maxTokens;
-
     logger.info('Bedrock conversation turn', {
       model: this.model,
       messages: request.messages.length,
       tools: request.tools?.length ?? 0,
     });
 
-    return withRetry(
-      async () => {
-        const requestBody: Record<string, unknown> = {
-          anthropic_version: 'bedrock-2023-05-31',
-          max_tokens: maxTokens,
-          messages: request.messages,
-        };
-        if (request.system) {
-          requestBody.system = request.system;
-        }
-        if (request.tools?.length) {
-          requestBody.tools = request.tools;
-        }
+    const turn = await this.invokeModel({
+      model: this.model,
+      messages: request.messages,
+      maxTokens: request.maxTokens ?? options?.maxTokens ?? this.maxTokens,
+      effort: options?.effort ?? this.effort,
+      retry: CONVERSATION_RETRY_BUDGET,
+      system: request.system,
+      tools: request.tools,
+    });
 
-        const command = new InvokeModelCommand({
-          modelId: this.model,
-          contentType: 'application/json',
-          accept: 'application/json',
-          body: JSON.stringify(requestBody),
-        });
-
-        const response = await this.client.send(command);
-        if (!response.body) {
-          throw new Error('Empty response from Bedrock');
-        }
-
-        const parsed = JSON.parse(new TextDecoder().decode(response.body)) as BedrockResponse;
-        if (parsed.error) {
-          throw new Error(`Bedrock error: ${parsed.error.message ?? 'Unknown error'}`);
-        }
-        if (parsed.stop_reason === 'refusal') {
-          throw new Error('Claude refused to respond');
-        }
-
-        const content: ContentBlock[] = [];
-        for (const block of parsed.content ?? []) {
-          if (block.type === 'text' && block.text) {
-            content.push({ type: 'text', text: block.text });
-          } else if (block.type === 'tool_use' && block.id && block.name) {
-            content.push({
-              type: 'tool_use',
-              id: block.id,
-              name: block.name,
-              input: block.input ?? {},
-            });
-          }
-        }
-
-        return {
-          content,
-          stopReason: parsed.stop_reason,
-          usage: parsed.usage
-            ? {
-                inputTokens: parsed.usage.input_tokens,
-                outputTokens: parsed.usage.output_tokens,
-                totalTokens: parsed.usage.input_tokens + parsed.usage.output_tokens,
-              }
-            : undefined,
-        };
-      },
-      {
-        maxRetries: 3,
-        baseDelayMs: 1000,
-        shouldRetry: error => {
-          const message = error.message || '';
-          if (
-            message.includes('AccessDeniedException') ||
-            message.includes('ResourceNotFoundException') ||
-            message.includes('Bedrock error:') ||
-            message.includes('refused to respond')
-          ) {
-            return false;
-          }
-          return isRetryableHttpError(error);
-        },
-      }
-    );
+    return {
+      content: turn.content,
+      rawContent: turn.rawContent,
+      stopReason: turn.stopReason,
+      refusalCategory: turn.refusalCategory,
+      usage: turn.usage,
+    };
   }
 
   /**
-   * Send a raw prompt to Bedrock
+   * Send a raw prompt to Bedrock. Throws ModelRefusalError when the model
+   * (and the refusal-fallback model) declines, and TruncatedResponseError
+   * when the reply hits max_tokens.
    */
   async sendPrompt(prompt: string, options?: AnalysisOptions): Promise<string> {
-    const result = await this.sendPromptWithUsage(prompt, options);
-    return result.text;
+    const completion = await completeSingleShot({
+      provider: this.name,
+      model: this.model,
+      refusalFallbackModel: this.refusalFallbackModel,
+      invoke: (model, isRefusalFallback) =>
+        this.sendSingleShot(model, prompt, options, isRefusalFallback),
+    });
+    return completion.text;
   }
 
-  /**
-   * Send a raw prompt to Bedrock and return both text and usage data
-   */
-  private async sendPromptWithUsage(
+  private sendSingleShot(
+    model: string,
     prompt: string,
-    options?: AnalysisOptions
-  ): Promise<{
-    text: string;
-    usage?: { inputTokens: number; outputTokens: number; totalTokens: number };
-  }> {
+    options?: AnalysisOptions,
+    isRefusalFallback = false
+  ): Promise<ModelTurn> {
     const maxTokens = options?.maxTokens ?? this.maxTokens;
     // Note: timeout is handled by SDK defaults, not directly configurable per-request
     // Future enhancement: add AbortController support for per-request timeout
@@ -269,7 +285,7 @@ export class BedrockProvider implements AIProvider {
 
     // Log at INFO level for visibility during debugging
     logger.info('Sending prompt to Bedrock', {
-      model: this.model,
+      model,
       promptLength: prompt.length,
       promptSizeKB: Math.round(prompt.length / 1024),
       maxTokens,
@@ -281,26 +297,51 @@ export class BedrockProvider implements AIProvider {
       prompt: prompt,
     });
 
+    return this.invokeModel({
+      model,
+      messages: [{ role: 'user', content: prompt }],
+      maxTokens,
+      effort: options?.effort ?? this.effort,
+      // Wait generously to ride out transient Bedrock blips — see the
+      // ANALYSIS_* constants. Only retryable (transient) errors actually wait.
+      retry: isRefusalFallback ? REFUSAL_FALLBACK_RETRY_BUDGET : ANALYSIS_RETRY_BUDGET,
+      system: SINGLE_SHOT_SYSTEM_PROMPT,
+    });
+  }
+
+  /**
+   * Send one InvokeModel request, with retries for transient failures.
+   *
+   * No `thinking` field is sent: Opus 5.5 always thinks and rejects
+   * `disabled` with a ValidationException, and omitting the field is valid on
+   * every model. No sampling parameters and no `tool_choice` are sent either —
+   * current models reject non-default values.
+   */
+  private invokeModel(request: InvokeRequest): Promise<ModelTurn> {
+    const requestBody: Record<string, unknown> = {
+      anthropic_version: 'bedrock-2023-05-31',
+      max_tokens: request.maxTokens,
+      messages: request.messages,
+    };
+    if (request.system) {
+      requestBody.system = request.system;
+    }
+    if (request.tools?.length) {
+      requestBody.tools = request.tools;
+    }
+    const effort = effortForModel(request.model, request.effort);
+    if (effort) {
+      requestBody.output_config = { effort };
+    }
+    const serializedBody = JSON.stringify(requestBody);
+
     return withRetry(
       async () => {
-        const requestBody = {
-          anthropic_version: 'bedrock-2023-05-31',
-          max_tokens: maxTokens,
-          system:
-            'You are a security analyst helping to identify phishing emails. Always provide your analysis in the requested JSON format.',
-          messages: [
-            {
-              role: 'user',
-              content: prompt,
-            },
-          ],
-        };
-
         const command = new InvokeModelCommand({
-          modelId: this.model,
+          modelId: request.model,
           contentType: 'application/json',
           accept: 'application/json',
-          body: JSON.stringify(requestBody),
+          body: serializedBody,
         });
 
         let response;
@@ -309,10 +350,10 @@ export class BedrockProvider implements AIProvider {
         } catch (sdkError) {
           // Enrich the log with the SDK's exception name / HTTP status / request
           // id — the message alone ("Bedrock is unable to process your request.")
-          // is too generic to triage. Rethrow the original so retry semantics,
-          // which key off the message, are unchanged.
+          // is too generic to triage. Rethrow the original so retry semantics
+          // are unchanged.
           logger.warn('Bedrock invocation error', {
-            model: this.model,
+            model: request.model,
             ...bedrockErrorDetail(sdkError),
             message: sdkError instanceof Error ? sdkError.message : String(sdkError),
           });
@@ -323,52 +364,31 @@ export class BedrockProvider implements AIProvider {
           throw new Error('Empty response from Bedrock');
         }
 
-        const rawResponse = new TextDecoder().decode(response.body);
-        const parsedResponse = parseBedrockResponse(rawResponse);
-
-        // Log token usage for cost tracking
-        let usage: { inputTokens: number; outputTokens: number; totalTokens: number } | undefined;
-        if (parsedResponse.usage) {
-          usage = {
-            inputTokens: parsedResponse.usage.input_tokens,
-            outputTokens: parsedResponse.usage.output_tokens,
-            totalTokens: parsedResponse.usage.input_tokens + parsedResponse.usage.output_tokens,
-          };
-          logger.info('Bedrock token usage', {
-            ...usage,
-            model: this.model,
-          });
+        const turn = normalizeModelResponse(
+          parseBedrockBody(new TextDecoder().decode(response.body)),
+          { provider: this.name, model: request.model }
+        );
+        if (turn.usage) {
+          logger.info('Bedrock token usage', { ...turn.usage, model: request.model });
         }
-
-        logger.debug('Received response from Bedrock', {
-          responseLength: parsedResponse.text.length,
-        });
-
-        return { text: parsedResponse.text, usage };
+        return turn;
       },
       {
-        // Wait generously to ride out transient Bedrock blips — see the
-        // ANALYSIS_* constants. Only retryable (transient) errors actually wait;
-        // the non-retryable cases below throw immediately, no backoff.
-        maxRetries: ANALYSIS_MAX_RETRIES,
-        baseDelayMs: ANALYSIS_BASE_DELAY_MS,
-        maxDelayMs: ANALYSIS_MAX_DELAY_MS,
+        ...request.retry,
         shouldRetry: error => {
-          const message = error.message || '';
-          // Don't retry access denied errors
-          if (message.includes('AccessDeniedException')) {
-            return false;
-          }
-          // Don't retry model not found errors
-          if (message.includes('ResourceNotFoundException')) {
-            return false;
-          }
-          // Don't retry Bedrock API errors (these are consistent failures)
-          if (message.includes('Bedrock error:')) {
-            return false;
-          }
-          // Don't retry invalid JSON (malformed response)
-          if (message.includes('Invalid JSON response')) {
+          // The SDK puts the exception type in `name`; the message is generic
+          const detail = `${error.name} ${error.message}`;
+          // Consistent failures — access denied, model not found, a rejected
+          // request, a Bedrock API error, a malformed response — fail the same
+          // way on a retry
+          if (
+            detail.includes('AccessDeniedException') ||
+            detail.includes('ResourceNotFoundException') ||
+            detail.includes('ValidationException') ||
+            detail.includes('Bedrock error:') ||
+            detail.includes('Invalid JSON response') ||
+            detail.includes('Unexpected response format')
+          ) {
             return false;
           }
           return isRetryableHttpError(error);
@@ -382,7 +402,7 @@ export class BedrockProvider implements AIProvider {
    */
   async isAvailable(): Promise<boolean> {
     try {
-      await this.sendPrompt('Reply with "ok"', { maxTokens: 10, timeout: 10000 });
+      await this.ping();
       return true;
     } catch {
       return false;
@@ -396,7 +416,7 @@ export class BedrockProvider implements AIProvider {
     const startTime = Date.now();
 
     try {
-      await this.sendPrompt('Reply with "ok"', { maxTokens: 10, timeout: 10000 });
+      await this.ping();
 
       return {
         available: true,
@@ -414,6 +434,21 @@ export class BedrockProvider implements AIProvider {
   }
 
   /**
+   * Minimal round trip. Any successful invoke means the provider is reachable
+   * — the reply's text is not read, since a thinking model may spend a small
+   * max_tokens budget before writing any.
+   */
+  private async ping(): Promise<void> {
+    await this.invokeModel({
+      model: this.model,
+      messages: [{ role: 'user', content: 'Reply with "ok"' }],
+      maxTokens: HEALTH_CHECK_MAX_TOKENS,
+      effort: 'low',
+      retry: CONVERSATION_RETRY_BUDGET,
+    });
+  }
+
+  /**
    * Set or clear the enterprise profile
    */
   setProfile(profile?: EnterpriseProfile): void {
@@ -422,62 +457,24 @@ export class BedrockProvider implements AIProvider {
 }
 
 /**
- * Bedrock response structure
+ * Decode an InvokeModel response body. Bedrock can return an `error` object
+ * with HTTP 200; that is a failure, not a model reply.
  */
-interface BedrockResponse {
-  id?: string;
-  type?: string;
-  role?: string;
-  content?: Array<{
-    type: string;
-    text?: string;
-    id?: string;
-    name?: string;
-    input?: Record<string, unknown>;
-  }>;
-  model?: string;
-  stop_reason?: string;
-  stop_sequence?: string | null;
-  usage?: {
-    input_tokens: number;
-    output_tokens: number;
-  };
-  error?: {
-    type?: string;
-    message?: string;
-  };
-}
-
-/**
- * Parsed response with text and usage data
- */
-interface ParsedBedrockResponse {
-  text: string;
-  usage?: {
-    input_tokens: number;
-    output_tokens: number;
-  };
-}
-
-/**
- * Parse Bedrock response with robust error handling
- * Extracts text content and usage data from various response formats
- */
-function parseBedrockResponse(rawResponse: string): ParsedBedrockResponse {
-  let parsed: BedrockResponse;
+function parseBedrockBody(rawResponse: string): unknown {
+  let parsed: { error?: { type?: string; message?: string } } | null;
 
   try {
-    parsed = JSON.parse(rawResponse) as BedrockResponse;
+    parsed = JSON.parse(rawResponse) as typeof parsed;
   } catch (parseError) {
+    // Length only: the body can hold model output derived from the reported email
     logger.error('Failed to parse Bedrock response as JSON', {
-      rawResponse: rawResponse.substring(0, 500),
+      responseLength: rawResponse.length,
       error: parseError instanceof Error ? parseError.message : String(parseError),
     });
     throw new Error('Invalid JSON response from Bedrock');
   }
 
-  // Check for error response
-  if (parsed.error) {
+  if (parsed?.error) {
     logger.error('Bedrock returned an error', {
       errorType: parsed.error.type,
       errorMessage: parsed.error.message,
@@ -485,47 +482,5 @@ function parseBedrockResponse(rawResponse: string): ParsedBedrockResponse {
     throw new Error(`Bedrock error: ${parsed.error.message ?? 'Unknown error'}`);
   }
 
-  // Check for refusal - Claude declined to respond
-  if (parsed.stop_reason === 'refusal') {
-    logger.error('Claude refused to analyze - logging full response for debugging', {
-      stopReason: parsed.stop_reason,
-      fullResponse: JSON.stringify(parsed),
-    });
-    throw new Error('Claude refused to respond - check logs for full prompt');
-  }
-
-  // Extract text from content array
-  if (parsed.content && Array.isArray(parsed.content)) {
-    const textParts: string[] = [];
-
-    for (const block of parsed.content) {
-      if (block.type === 'text' && block.text) {
-        textParts.push(block.text);
-      }
-    }
-
-    if (textParts.length > 0) {
-      return {
-        text: textParts.join('\n'),
-        usage: parsed.usage,
-      };
-    }
-
-    // Content array exists but no text blocks found
-    logger.warn('Bedrock response has content but no text blocks', {
-      contentTypes: parsed.content.map(b => b.type),
-      stopReason: parsed.stop_reason,
-    });
-  }
-
-  // Log detailed info for debugging
-  logger.error('Could not extract text from Bedrock response', {
-    rawResponse: rawResponse.substring(0, 1000),
-    hasContent: !!parsed.content,
-    contentLength: parsed.content?.length,
-    stopReason: parsed.stop_reason,
-    responseType: parsed.type,
-  });
-
-  throw new Error('No text content in Bedrock response');
+  return parsed;
 }

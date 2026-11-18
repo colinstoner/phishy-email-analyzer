@@ -34,7 +34,8 @@ import { FAKE_BASE, collection, fakeGraph, jsonResponse } from '../../../mocks/g
 const MAILBOX = 'reporter@example.com';
 const MESSAGE_ID = '<abc.123@mail.example.net>';
 const GRAPH_ID = 'AAMkAGraphId-0001=';
-const SUMMARY_SELECT = 'id,internetMessageId,subject,from,receivedDateTime,parentFolderId,hasAttachments';
+const SUMMARY_SELECT =
+  'id,internetMessageId,subject,from,receivedDateTime,parentFolderId,hasAttachments,isRead';
 
 const rawMessage = {
   id: GRAPH_ID,
@@ -91,7 +92,9 @@ describe('mail operations', () => {
       immutableIds: true,
       maxItems: 3,
     });
-    expect(graph.requests[0].path).toBe('/users/reporter%40example.com/mailFolders/junkemail/messages');
+    expect(graph.requests[0].path).toBe(
+      '/users/reporter%40example.com/mailFolders/junkemail/messages'
+    );
     expect(graph.requests[0].query.$top).toBe('3');
     expect(graph.requests[0].headers.Prefer).toBe('IdType="ImmutableId"');
   });
@@ -155,9 +158,9 @@ describe('mail operations', () => {
     expect(result.items).toHaveLength(250);
     expect(result.truncated).toBe(true);
 
-    await expect(listRecentMessages(graph.client, { mailbox: MAILBOX, maxItems: 0 })).rejects.toThrow(
-      'maxItems'
-    );
+    await expect(
+      listRecentMessages(graph.client, { mailbox: MAILBOX, maxItems: 0 })
+    ).rejects.toThrow('maxItems');
     await expect(
       listRecentMessages(graph.client, { mailbox: MAILBOX, maxItems: 1001 })
     ).rejects.toThrow('maxItems');
@@ -271,7 +274,9 @@ describe('mail operations', () => {
     const headers = Array.from({ length: 501 }, (_, i) => ({ name: `X-H-${i}`, value: `v${i}` }));
     const graph = fakeGraph([() => jsonResponse({ internetMessageHeaders: headers })]);
     const result = await getMessageHeaders(graph.client, { mailbox: MAILBOX, messageId: GRAPH_ID });
-    expect(graph.requests[0].path).toBe(`/users/reporter%40example.com/messages/${GRAPH_ID.replace('=', '%3D')}`);
+    expect(graph.requests[0].path).toBe(
+      `/users/reporter%40example.com/messages/${encodeURIComponent(GRAPH_ID)}`
+    );
     expect(graph.requests[0].query).toEqual({ $select: 'internetMessageHeaders' });
     expect(result.items).toHaveLength(500);
     expect(result.truncated).toBe(true);
@@ -301,7 +306,11 @@ describe('mail operations', () => {
       getMessageMime(graph.client, { mailbox: MAILBOX, messageId: 'm1', maxBytes: 0 })
     ).rejects.toThrow('maxBytes');
     await expect(
-      getMessageMime(graph.client, { mailbox: MAILBOX, messageId: 'm1', maxBytes: 41 * 1024 * 1024 })
+      getMessageMime(graph.client, {
+        mailbox: MAILBOX,
+        messageId: 'm1',
+        maxBytes: 41 * 1024 * 1024,
+      })
     ).rejects.toThrow('maxBytes');
   });
 
@@ -415,12 +424,21 @@ describe('trace operations', () => {
       receivedTo: new Date('2026-11-17T00:00:00Z'),
       now: NOW,
     };
-    const window = 'receivedDateTime ge 2026-11-15T00:00:00Z and receivedDateTime le 2026-11-17T00:00:00Z';
+    const window =
+      'receivedDateTime ge 2026-11-15T00:00:00Z and receivedDateTime le 2026-11-17T00:00:00Z';
 
     await listMessageTracesBySender(graph.client, args);
     await listMessageTracesBySender(graph.client, { ...args, subject: "it's due" });
-    await listMessageTracesBySender(graph.client, { ...args, subject: 'RE:', subjectMatch: 'startsWith' });
-    await listMessageTracesBySender(graph.client, { ...args, subject: '!', subjectMatch: 'endsWith' });
+    await listMessageTracesBySender(graph.client, {
+      ...args,
+      subject: 'RE:',
+      subjectMatch: 'startsWith',
+    });
+    await listMessageTracesBySender(graph.client, {
+      ...args,
+      subject: '!',
+      subjectMatch: 'endsWith',
+    });
 
     expect(graph.requests.map(request => request.query.$filter)).toEqual([
       `${window} and senderAddress eq 'sender@example.org'`,
@@ -444,13 +462,19 @@ describe('trace operations', () => {
     const graph = fakeGraph([]);
     expect(() =>
       assertTraceWindow(
-        { receivedFrom: new Date('2026-11-01T00:00:00Z'), receivedTo: new Date('2026-11-11T00:00:01Z') },
+        {
+          receivedFrom: new Date('2026-11-01T00:00:00Z'),
+          receivedTo: new Date('2026-11-11T00:00:01Z'),
+        },
         NOW
       )
     ).toThrow('10 days');
     expect(() =>
       assertTraceWindow(
-        { receivedFrom: new Date('2026-08-01T00:00:00Z'), receivedTo: new Date('2026-08-02T00:00:00Z') },
+        {
+          receivedFrom: new Date('2026-08-01T00:00:00Z'),
+          receivedTo: new Date('2026-08-02T00:00:00Z'),
+        },
         NOW
       )
     ).toThrow('90 days');

@@ -38,7 +38,15 @@ function facts(
     history: { messages: exact(12), recipients: exact(3), firstSeen: '2026-10-20' },
     twoWay: { messages: exact(5), internalSenders: exact(2) },
     burst: { messages: exact(41), recipients: exact(40), newRecipients: exact(38) },
-    sendingIps: { burst: 2, seenInHistory: 0, historyComplete: true },
+    sendingIps: {
+      burst: 2,
+      seenInHistory: 0,
+      historyComplete: true,
+      burstIps: [
+        { ip: '198.51.100.7', seenInHistory: false },
+        { ip: '203.0.113.9', seenInHistory: false },
+      ],
+    },
     domain: { messages: exact(30), recipients: exact(6), firstSeen: '2026-10-19' },
     truncated: false,
     ...overrides,
@@ -166,6 +174,22 @@ describe('prompt: SENDER RELATIONSHIP block', () => {
     expect(prompt).toContain('A relationship NEVER lowers risk');
   });
 
+  it('never carries a sending IP, even though the facts hold them for the security copy', () => {
+    const history = facts('established_with_anomalous_fanout');
+    expect(history.sendingIps.burstIps).toHaveLength(2);
+    const prompt = buildPhishingAnalysisPrompt(emailData(history), {});
+    expect(prompt).toContain('Sending IPs in the burst window: 2 distinct; 0 of them');
+    expect(prompt).not.toContain('198.51.100.7');
+    expect(prompt).not.toContain('203.0.113.9');
+    expect(prompt).not.toContain('security team only');
+    const block = prompt.slice(
+      prompt.indexOf('--- SENDER RELATIONSHIP'),
+      prompt.indexOf('=== OPERATOR')
+    );
+    expect(block).not.toContain('@');
+    expect(block).not.toMatch(/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/);
+  });
+
   it('carries numbers only: the claimed address stays in the CLAIMED section', () => {
     const prompt = buildPhishingAnalysisPrompt(emailData(TRUNCATED), {});
     const start = prompt.indexOf('--- SENDER RELATIONSHIP');
@@ -278,6 +302,132 @@ describe('risk fusion: a relationship never lowers risk', () => {
     });
     expect(decision.verdict).toBe('legitimate');
     expect(decision.riskScore).toBe(0);
+  });
+});
+
+describe('formatSenderHistoryLines: burst IPs', () => {
+  const text = (history: SenderHistoryFacts, includeBurstIps: boolean): string =>
+    formatSenderHistoryLines(history, { includeBurstIps })
+      .map(line => line.join(': '))
+      .join('\n');
+
+  it('lists them only when asked', () => {
+    const history = facts('established');
+    expect(text(history, false)).not.toContain('198.51.100.7');
+    expect(formatSenderHistoryLines(history)).toEqual(
+      formatSenderHistoryLines(history, { includeBurstIps: false })
+    );
+    expect(text(history, true)).toContain(
+      'Burst sending IPs (security team only): 198.51.100.7 (not seen in the history period); 203.0.113.9 (not seen in the history period)'
+    );
+  });
+
+  it('says how many were left out by the cap', () => {
+    const history = facts('established', {
+      sendingIps: {
+        burst: 23,
+        seenInHistory: 1,
+        historyComplete: true,
+        burstIps: [
+          { ip: '198.51.100.7', seenInHistory: false },
+          { ip: '192.0.2.10', seenInHistory: true },
+        ],
+        burstIpsOmitted: 21,
+      },
+    });
+    expect(text(history, true)).toContain(
+      '198.51.100.7 (not seen in the history period); 192.0.2.10 (seen in the history period); and 21 more'
+    );
+  });
+
+  it('does not claim "not seen" against a history that was cut short', () => {
+    const history = facts('established', {
+      sendingIps: {
+        burst: 1,
+        seenInHistory: 0,
+        historyComplete: false,
+        burstIps: [{ ip: '198.51.100.7', seenInHistory: false }],
+      },
+    });
+    expect(text(history, true)).toContain('198.51.100.7 (not in the history rows read)');
+  });
+
+  it('adds no line when there is nothing to list', () => {
+    const history = facts('established', {
+      sendingIps: { burst: 0, seenInHistory: 0, historyComplete: true },
+    });
+    expect(text(history, true)).not.toContain('security team only');
+    const unlisted = facts('established', {
+      sendingIps: { burst: 2, seenInHistory: 0, historyComplete: true, burstIpsOmitted: 2 },
+    });
+    expect(text(unlisted, true)).toContain('Burst sending IPs (security team only): 2 not listed');
+  });
+});
+
+describe('report: sender-relationship detail by audience', () => {
+  const history = facts('established_with_anomalous_fanout');
+  const risk = fuseRisk(analysis('phishing', 90), { senderHistory: history });
+  const render = (audience?: 'reporter' | 'security'): { html: string; text: string } => {
+    const options = { risk, ...(audience ? { audience } : {}) };
+    return {
+      html: buildEmailHtml(analysis('phishing', 90), emailData(history), options),
+      text: buildPlainTextReport(analysis('phishing', 90), emailData(history), options),
+    };
+  };
+
+  it('security-only copy: counts, classification and the burst IPs', () => {
+    const { html, text } = render('security');
+    for (const body of [html, text]) {
+      expect(body).toContain(
+        'Sender Relationship (organization mail-flow records; security team only)'
+      );
+      expect(body).toContain('established_with_anomalous_fanout');
+      expect(body).toContain('198.51.100.7 (not seen in the history period)');
+      expect(body).toContain('203.0.113.9 (not seen in the history period)');
+      expect(body).toContain('A known sender is not evidence of safety');
+    }
+    expect(html.indexOf('198.51.100.7')).toBeGreaterThan(
+      html.indexOf('Original Email for IT Review')
+    );
+  });
+
+  it('combined email (reporter with the team in Cc): counts, no IPs', () => {
+    const { html, text } = render();
+    for (const body of [html, text]) {
+      expect(body).toContain('Sender Relationship (organization mail-flow records)');
+      expect(body).toContain('2 distinct; 0 of them also seen in the history period');
+      expect(body).not.toContain('198.51.100.7');
+      expect(body).not.toContain('203.0.113.9');
+      expect(body).not.toContain('security team only');
+    }
+  });
+
+  it('reporter copy: one plain sentence, no block, never an IP', () => {
+    const { html, text } = render('reporter');
+    for (const body of [html, text]) {
+      expect(body).not.toContain('Sender Relationship');
+      expect(body).not.toContain('established');
+      expect(body).not.toContain('198.51.100.7');
+      expect(body).not.toContain('203.0.113.9');
+      expect(body.match(/far more people than usual/g)).toHaveLength(1);
+    }
+  });
+
+  it('escapes the IP list in HTML', () => {
+    const hostile = facts('established', {
+      sendingIps: {
+        burst: 1,
+        seenInHistory: 0,
+        historyComplete: true,
+        // The service never lets this shape through; the template must not rely on that
+        burstIps: [{ ip: '<img src=x onerror=1>', seenInHistory: false }],
+      },
+    });
+    const html = buildEmailHtml(analysis('phishing', 90), emailData(hostile), {
+      audience: 'security',
+    });
+    expect(html).not.toContain('<img src=x');
+    expect(html).toContain('&lt;img src=x onerror=1&gt;');
   });
 });
 

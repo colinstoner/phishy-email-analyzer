@@ -11,6 +11,7 @@ import {
   FORBIDDEN_RETRY_DELAY_MS,
   GraphAccessTokenProvider,
   GraphClient,
+  MAX_REPORTED_BURST_IPS,
   MessageTrace,
   REQUEST_ALLOWANCE_PER_5_MIN,
   SenderHistoryService,
@@ -266,7 +267,60 @@ describe('computeSenderHistoryFacts', () => {
     expect(facts.classification).toBe('established_with_anomalous_fanout');
     expect(facts.burst.recipients).toEqual({ count: 40, atLeast: false });
     expect(facts.burst.newRecipients).toEqual({ count: 38, atLeast: false });
-    expect(facts.sendingIps).toEqual({ burst: 1, seenInHistory: 0, historyComplete: true });
+    expect(facts.sendingIps).toEqual({
+      burst: 1,
+      seenInHistory: 0,
+      historyComplete: true,
+      burstIps: [{ ip: '198.51.100.7', seenInHistory: false }],
+    });
+  });
+
+  it('carries the burst IPs for the security copy: unseen first, capped, shape-checked', () => {
+    const history = [
+      inboundRow(NOW - 5 * DAY, 'a@example.com', { fromIP: '192.0.2.10' }),
+      inboundRow(NOW - 6 * DAY, 'a@example.com', { fromIP: '2001:db8::10' }),
+    ];
+    const burst = [
+      inboundRow(NOW - HOUR, 'a@example.com', { fromIP: '192.0.2.10' }),
+      inboundRow(NOW - HOUR, 'a@example.com', { fromIP: '2001:db8::10' }),
+      inboundRow(NOW - HOUR, 'a@example.com', { fromIP: '203.0.113.9' }),
+      inboundRow(NOW - HOUR, 'a@example.com', { fromIP: '<img src=x onerror=1>' }),
+      inboundRow(NOW - HOUR, 'a@example.com', { fromIP: 'not an ip' }),
+    ];
+    const facts = computeSenderHistoryFacts({
+      ...BASE,
+      inbound: rows([...history, ...burst]),
+      outbound: rows([]),
+    });
+    expect(facts.sendingIps).toEqual({
+      burst: 5,
+      seenInHistory: 2,
+      historyComplete: true,
+      burstIps: [
+        { ip: '203.0.113.9', seenInHistory: false },
+        { ip: '192.0.2.10', seenInHistory: true },
+        { ip: '2001:db8::10', seenInHistory: true },
+      ],
+      // Counted, but never carried as text: they are not shaped like an IP
+      burstIpsOmitted: 2,
+    });
+
+    const many = Array.from({ length: MAX_REPORTED_BURST_IPS + 7 }, (_, i) =>
+      inboundRow(NOW - HOUR, 'a@example.com', { fromIP: `198.51.100.${i + 1}` })
+    );
+    const capped = computeSenderHistoryFacts({ ...BASE, inbound: rows(many), outbound: rows([]) });
+    expect(capped.sendingIps.burst).toBe(MAX_REPORTED_BURST_IPS + 7);
+    expect(capped.sendingIps.burstIps).toHaveLength(MAX_REPORTED_BURST_IPS);
+    expect(capped.sendingIps.burstIpsOmitted).toBe(7);
+  });
+
+  it('carries no IP list when the burst recorded none', () => {
+    const facts = computeSenderHistoryFacts({
+      ...BASE,
+      inbound: rows([inboundRow(NOW - HOUR, 'a@example.com', { fromIP: undefined })]),
+      outbound: rows([]),
+    });
+    expect(facts.sendingIps).toEqual({ burst: 0, seenInHistory: 0, historyComplete: true });
   });
 
   it('does not flag fan-out that reaches the sender’s usual recipients', () => {
@@ -578,10 +632,12 @@ describe('SenderHistoryService', () => {
       outcome: 'ok',
       classification: 'established_with_anomalous_fanout',
     });
-    // Counts and an enum only: no address or IP anywhere in the result
-    const serialized = JSON.stringify(facts);
-    expect(serialized).not.toContain('@');
-    expect(serialized).not.toContain('192.0.2');
+    // No address anywhere in the result; IPs only in the list kept for the
+    // security team's copy of the report
+    expect(JSON.stringify(facts)).not.toContain('@');
+    expect(facts?.sendingIps.burstIps).toEqual([{ ip: '192.0.2.10', seenInHistory: true }]);
+    const withoutIpList = { ...facts, sendingIps: { ...facts?.sendingIps, burstIps: undefined } };
+    expect(JSON.stringify(withoutIpList)).not.toContain('192.0.2');
   });
 
   it('widens the burst window back to a late report’s claimed date', async () => {
@@ -826,7 +882,7 @@ describe('SenderHistoryService', () => {
     expect(await service.lookupForEmail(email('later@supplier.example.net'))).toBeDefined();
   });
 
-  it('never logs the sender address, at any level', async () => {
+  it('never logs the sender address or a sending IP, at any level', async () => {
     const written: string[] = [];
     const capture = (...args: unknown[]): void => {
       written.push(args.map(String).join(' '));
@@ -847,6 +903,7 @@ describe('SenderHistoryService', () => {
     expect(all).not.toContain(SENDER);
     expect(all).not.toContain('supplier.example.net');
     expect(all).not.toContain('person0@example.com');
+    expect(all).not.toContain('192.0.2.10');
   });
 });
 

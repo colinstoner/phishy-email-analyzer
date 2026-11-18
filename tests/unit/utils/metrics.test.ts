@@ -2,7 +2,13 @@
  * CloudWatch EMF metrics emitter tests
  */
 
-import { emitAIUsageMetric, AIUsageMetric } from '../../../src/utils/metrics';
+import {
+  emitAIUsageMetric,
+  emitAnalysisRefusalMetric,
+  emitUserReportMetric,
+  emitOriginalFetchMetric,
+  AIUsageMetric,
+} from '../../../src/utils/metrics';
 
 const SAMPLE: AIUsageMetric = {
   provider: 'bedrock',
@@ -79,6 +85,156 @@ describe('emitAIUsageMetric', () => {
   it('emits nothing when PHISHY_DISABLE_METRICS=true', () => {
     process.env.PHISHY_DISABLE_METRICS = 'true';
     emitAIUsageMetric(SAMPLE);
+    expect(stdoutSpy).not.toHaveBeenCalled();
+  });
+
+  it('adds ThinkingTokens as a property, not a metric, when reported', () => {
+    emitAIUsageMetric({ ...SAMPLE, thinkingTokens: 450 });
+
+    const doc = JSON.parse(stdoutSpy.mock.calls[0][0] as string);
+    expect(doc.ThinkingTokens).toBe(450);
+    // Thinking is already inside OutputTokens
+    expect(doc.OutputTokens).toBe(800);
+    const metricNames = doc._aws.CloudWatchMetrics[0].Metrics.map((m: { Name: string }) => m.Name);
+    expect(metricNames).not.toContain('ThinkingTokens');
+  });
+
+  it('omits ThinkingTokens when the API did not report it', () => {
+    emitAIUsageMetric(SAMPLE);
+
+    const doc = JSON.parse(stdoutSpy.mock.calls[0][0] as string);
+    expect(doc).not.toHaveProperty('ThinkingTokens');
+  });
+});
+
+describe('emitAnalysisRefusalMetric', () => {
+  let stdoutSpy: jest.SpyInstance;
+  const originalDisable = process.env.PHISHY_DISABLE_METRICS;
+
+  beforeEach(() => {
+    stdoutSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    delete process.env.PHISHY_DISABLE_METRICS;
+  });
+
+  afterEach(() => {
+    stdoutSpy.mockRestore();
+    process.env.PHISHY_DISABLE_METRICS = originalDisable;
+  });
+
+  it('writes one raw EMF line with _aws at the JSON root', () => {
+    emitAnalysisRefusalMetric('bedrock', 'global.anthropic.claude-opus-5-5', 'cyber');
+
+    expect(stdoutSpy).toHaveBeenCalledTimes(1);
+    const line = stdoutSpy.mock.calls[0][0] as string;
+    expect(line.endsWith('\n')).toBe(true);
+
+    const doc = JSON.parse(line);
+    expect(doc._aws.CloudWatchMetrics[0].Namespace).toBe('Phishy');
+    expect(doc._aws.CloudWatchMetrics[0].Dimensions).toEqual([['Provider', 'Model'], ['Provider']]);
+    expect(doc._aws.CloudWatchMetrics[0].Metrics).toEqual([
+      { Name: 'AnalysisRefusalCount', Unit: 'Count' },
+    ]);
+    expect(doc.Provider).toBe('bedrock');
+    expect(doc.Model).toBe('global.anthropic.claude-opus-5-5');
+    expect(doc.AnalysisRefusalCount).toBe(1);
+  });
+
+  it('carries the category as a property, not a dimension', () => {
+    emitAnalysisRefusalMetric('anthropic', 'claude-opus-5-5', 'reasoning_extraction');
+
+    const doc = JSON.parse(stdoutSpy.mock.calls[0][0] as string);
+    expect(doc.RefusalCategory).toBe('reasoning_extraction');
+    expect(doc._aws.CloudWatchMetrics[0].Dimensions.flat()).not.toContain('RefusalCategory');
+  });
+
+  it('labels a null category as unspecified', () => {
+    emitAnalysisRefusalMetric('anthropic', 'claude-opus-5-5', null);
+
+    const doc = JSON.parse(stdoutSpy.mock.calls[0][0] as string);
+    expect(doc.RefusalCategory).toBe('unspecified');
+  });
+
+  it('emits nothing when PHISHY_DISABLE_METRICS=true', () => {
+    process.env.PHISHY_DISABLE_METRICS = 'true';
+    emitAnalysisRefusalMetric('bedrock', 'global.anthropic.claude-opus-5-5', 'bio');
+    expect(stdoutSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('emitUserReportMetric', () => {
+  let stdoutSpy: jest.SpyInstance;
+  const originalDisable = process.env.PHISHY_DISABLE_METRICS;
+
+  beforeEach(() => {
+    stdoutSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    delete process.env.PHISHY_DISABLE_METRICS;
+  });
+
+  afterEach(() => {
+    stdoutSpy.mockRestore();
+    process.env.PHISHY_DISABLE_METRICS = originalDisable;
+  });
+
+  it('emits a UserReports count dimensioned by what the employee chose', () => {
+    emitUserReportMetric('phishing');
+
+    expect(stdoutSpy).toHaveBeenCalledTimes(1);
+    const doc = JSON.parse(stdoutSpy.mock.calls[0][0] as string);
+    expect(doc._aws.CloudWatchMetrics[0].Namespace).toBe('Phishy');
+    expect(doc._aws.CloudWatchMetrics[0].Dimensions).toEqual([['ReportedAs'], []]);
+    expect(doc.ReportedAs).toBe('phishing');
+    expect(doc.UserReports).toBe(1);
+  });
+
+  it('is silenced by PHISHY_DISABLE_METRICS', () => {
+    process.env.PHISHY_DISABLE_METRICS = 'true';
+    emitUserReportMetric('junk');
+    expect(stdoutSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('emitOriginalFetchMetric', () => {
+  let stdoutSpy: jest.SpyInstance;
+  const originalDisable = process.env.PHISHY_DISABLE_METRICS;
+
+  beforeEach(() => {
+    stdoutSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    delete process.env.PHISHY_DISABLE_METRICS;
+  });
+
+  afterEach(() => {
+    stdoutSpy.mockRestore();
+    process.env.PHISHY_DISABLE_METRICS = originalDisable;
+  });
+
+  it.each(['found', 'not_found', 'ambiguous', 'error', 'skipped'] as const)(
+    'writes one EMF line dimensioned by outcome for %s',
+    outcome => {
+      emitOriginalFetchMetric(outcome, 412);
+
+      expect(stdoutSpy).toHaveBeenCalledTimes(1);
+      const line = stdoutSpy.mock.calls[0][0] as string;
+      expect(line.endsWith('\n')).toBe(true);
+
+      const doc = JSON.parse(line);
+      // _aws must sit at the JSON root for CloudWatch to extract the metrics
+      expect(doc._aws.CloudWatchMetrics[0]).toEqual({
+        Namespace: 'Phishy',
+        Dimensions: [['Outcome']],
+        Metrics: [
+          { Name: 'OriginalFetchCount', Unit: 'Count' },
+          { Name: 'OriginalFetchDurationMs', Unit: 'Milliseconds' },
+        ],
+      });
+      expect(doc.Outcome).toBe(outcome);
+      expect(doc.OriginalFetchCount).toBe(1);
+      expect(doc.OriginalFetchDurationMs).toBe(412);
+    }
+  );
+
+  it('emits nothing when PHISHY_DISABLE_METRICS=true', () => {
+    process.env.PHISHY_DISABLE_METRICS = 'true';
+    emitOriginalFetchMetric('found', 1);
     expect(stdoutSpy).not.toHaveBeenCalled();
   });
 });

@@ -15,8 +15,10 @@
  * - The sender address comes from the suspicious email and is hostile: its
  *   shape is validated before use, it reaches Graph only through
  *   `odataFilter`, and it is never logged (a hash prefix, at debug level).
- * - The result is numbers and an enum. No recipient address, sender address
- *   or IP leaves this file.
+ * - The result is numbers and an enum. No recipient or sender address
+ *   leaves this file. The burst's sending IPs do (capped, shape-checked),
+ *   for one consumer only: a report copy addressed to the security team
+ *   alone. They never reach the prompt, the reporter or an info-level log.
  * - Work is bounded: a fixed number of trace windows, a page cap per window,
  *   one overall deadline. A count cut short by a cap is reported as
  *   "at least N", never as exact (invariant 5).
@@ -31,6 +33,7 @@ import { PhishyConfig } from '../../config/schema';
 import {
   BoundedCount,
   ExtractedEmailData,
+  SenderBurstIp,
   SenderHistoryFacts,
   SenderRelationshipClass,
 } from '../../types';
@@ -113,6 +116,11 @@ const CACHE_MAX_ENTRIES = 200;
 export const MAX_CLAIMED_AGE_MS = 7 * DAY_MS;
 /** Margin inside the service's 90-day horizon */
 const TRACE_AGE_MARGIN_MS = HOUR_MS;
+
+/** Most burst sending IPs carried for the security team's copy of the report */
+export const MAX_REPORTED_BURST_IPS = 20;
+/** IPv4 or IPv6 text and nothing else: the value comes from mail flow */
+const IP_SHAPE = /^(?=.*[.:])[0-9A-Fa-f:.]{2,45}$/;
 
 const MAX_HEADER_LENGTH = 1000;
 const MAX_ADDRESS_LENGTH = 254;
@@ -376,11 +384,21 @@ export function computeSenderHistoryFacts(input: SenderHistoryInput): SenderHist
   }
 
   let seenIps = 0;
+  const reportableIps: SenderBurstIp[] = [];
   for (const ip of inbound.burst.ips) {
-    if (inbound.history.ips.has(ip)) {
+    const seenInHistory = inbound.history.ips.has(ip);
+    if (seenInHistory) {
       seenIps++;
     }
+    if (IP_SHAPE.test(ip)) {
+      reportableIps.push({ ip, seenInHistory });
+    }
   }
+  // Unseen IPs first: they are what the security team will want to look at
+  reportableIps.sort(
+    (a, b) => Number(a.seenInHistory) - Number(b.seenInHistory) || a.ip.localeCompare(b.ip)
+  );
+  const burstIps = reportableIps.slice(0, MAX_REPORTED_BURST_IPS);
 
   let domain: SenderHistoryFacts['domain'];
   if (input.domain) {
@@ -425,6 +443,10 @@ export function computeSenderHistoryFacts(input: SenderHistoryInput): SenderHist
       burst: inbound.burst.ips.size,
       seenInHistory: seenIps,
       historyComplete: !historyTruncated,
+      ...(burstIps.length > 0 ? { burstIps } : {}),
+      ...(inbound.burst.ips.size > burstIps.length
+        ? { burstIpsOmitted: inbound.burst.ips.size - burstIps.length }
+        : {}),
     },
     domain,
     truncated:

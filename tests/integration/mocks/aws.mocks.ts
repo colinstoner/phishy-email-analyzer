@@ -81,11 +81,16 @@ export function mockBedrockInvoke(response: {
   recommendations?: string[];
 }): void {
   const responseBody = {
+    // Blocks are read by type; a thinking block precedes the text, as it
+    // does on models that always think
     content: [
+      { type: 'thinking', thinking: '', signature: 'sig-mock' },
       {
+        type: 'text',
         text: JSON.stringify(response),
       },
     ],
+    stop_reason: 'end_turn',
   };
 
   // Create a Uint8Array that includes the required methods

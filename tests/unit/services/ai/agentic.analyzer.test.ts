@@ -9,6 +9,10 @@ import {
   ConversationResponse,
 } from '../../../../src/services/ai/conversation.types';
 import { AIProvider } from '../../../../src/services/ai/provider.interface';
+import {
+  ModelRefusalError,
+  TruncatedResponseError,
+} from '../../../../src/services/ai/model.response';
 import { ExtractedEmailData } from '../../../../src/types';
 
 const VERDICT_JSON = JSON.stringify({
@@ -171,6 +175,177 @@ describe('AgenticAnalyzer', () => {
     await expect(analyzer.analyze(provider, EMAIL)).rejects.toThrow('tool budget');
     // initial + 2 tool rounds = 3 calls
     expect(provider.converse).toHaveBeenCalledTimes(3);
+  });
+
+  describe('thinking blocks and conversation history', () => {
+    const THINKING_1 = { type: 'thinking', thinking: '', signature: 'sig-round-1' };
+    const THINKING_2 = { type: 'thinking', thinking: '', signature: 'sig-round-2' };
+    const toolUse = (
+      id: string
+    ): { type: 'tool_use'; id: string; name: string; input: object } => ({
+      type: 'tool_use',
+      id,
+      name: 'examine_url',
+      input: { url: 'https://bad-domain.test/pay' },
+    });
+
+    function threeRoundProvider(): ReturnType<typeof makeProvider> {
+      return makeProvider([
+        {
+          content: [toolUse('tu_1')],
+          rawContent: [THINKING_1, toolUse('tu_1')],
+          stopReason: 'tool_use',
+          usage: { inputTokens: 1000, outputTokens: 300, totalTokens: 1300, thinkingTokens: 200 },
+        },
+        {
+          content: [toolUse('tu_2')],
+          rawContent: [THINKING_2, toolUse('tu_2')],
+          stopReason: 'tool_use',
+          usage: { inputTokens: 1400, outputTokens: 250, totalTokens: 1650, thinkingTokens: 150 },
+        },
+        {
+          content: [{ type: 'text', text: VERDICT_JSON }],
+          rawContent: [THINKING_2, { type: 'text', text: VERDICT_JSON }],
+          stopReason: 'end_turn',
+          usage: { inputTokens: 1800, outputTokens: 400, totalTokens: 2200 },
+        },
+      ] as never);
+    }
+
+    it('reads the verdict when a thinking block precedes the text', async () => {
+      const provider = makeProvider([
+        {
+          content: [{ type: 'text', text: VERDICT_JSON }],
+          rawContent: [THINKING_1, { type: 'text', text: VERDICT_JSON }],
+          stopReason: 'end_turn',
+        },
+      ] as never);
+      const { analyzer } = makeAnalyzer();
+
+      const result = await analyzer.analyze(provider, EMAIL);
+
+      expect(result.isPhishing).toBe(true);
+    });
+
+    it('passes each assistant turn back verbatim, thinking blocks included', async () => {
+      const provider = threeRoundProvider();
+      const { analyzer } = makeAnalyzer();
+
+      await analyzer.analyze(provider, EMAIL);
+
+      const lastRequest = provider.converse.mock.calls[2][0];
+      expect(lastRequest.messages[1]).toEqual({
+        role: 'assistant',
+        content: [THINKING_1, toolUse('tu_1')],
+      });
+      expect(lastRequest.messages[3]).toEqual({
+        role: 'assistant',
+        content: [THINKING_2, toolUse('tu_2')],
+      });
+      // The very same block objects, not copies or filtered views
+      expect((lastRequest.messages[1].content as unknown[])[0]).toBe(THINKING_1);
+    });
+
+    it('keeps system, tools, and earlier messages identical across rounds (append-only)', async () => {
+      const provider = makeProvider([]);
+      const snapshots: string[] = [];
+      const turns = threeRoundProvider();
+      // Snapshot each request as it is sent: the analyzer reuses one messages
+      // array, so comparing the recorded call arguments afterwards would not
+      // catch an in-place edit.
+      provider.converse.mockImplementation(request => {
+        snapshots.push(JSON.stringify(request));
+        return turns.converse(request);
+      });
+      const { analyzer } = makeAnalyzer();
+
+      await analyzer.analyze(provider, EMAIL);
+
+      const requests = snapshots.map(s => JSON.parse(s) as ConversationRequest);
+      expect(requests).toHaveLength(3);
+      for (let round = 1; round < requests.length; round++) {
+        const previous = requests[round - 1];
+        const current = requests[round];
+        expect(current.system).toBe(previous.system);
+        expect(JSON.stringify(current.tools)).toBe(JSON.stringify(previous.tools));
+        // Two messages appended per round; everything before them is unchanged
+        expect(current.messages).toHaveLength(previous.messages.length + 2);
+        expect(JSON.stringify(current.messages.slice(0, previous.messages.length))).toBe(
+          JSON.stringify(previous.messages)
+        );
+      }
+    });
+
+    it('sums thinking tokens across rounds when the provider reports them', async () => {
+      const { analyzer } = makeAnalyzer();
+
+      const result = await analyzer.analyze(threeRoundProvider(), EMAIL);
+
+      expect(result.tokenUsage).toEqual({
+        inputTokens: 4200,
+        outputTokens: 950,
+        totalTokens: 5150,
+        thinkingTokens: 350,
+      });
+    });
+  });
+
+  describe('fail-closed stop reasons', () => {
+    it('abandons the loop on a refusal mid-conversation', async () => {
+      const provider = makeProvider([
+        {
+          content: [
+            { type: 'tool_use', id: 'tu_1', name: 'examine_url', input: { url: 'https://x.test' } },
+          ],
+          stopReason: 'tool_use',
+        },
+        { content: [], rawContent: [], stopReason: 'refusal', refusalCategory: 'cyber' },
+      ]);
+      const { analyzer } = makeAnalyzer();
+
+      const error = await analyzer.analyze(provider, EMAIL).catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(ModelRefusalError);
+      expect((error as ModelRefusalError).category).toBe('cyber');
+      // No further turns after the refusal
+      expect(provider.converse).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not parse partial text from a refused turn as a verdict', async () => {
+      const provider = makeProvider([
+        {
+          content: [{ type: 'text', text: VERDICT_JSON }],
+          stopReason: 'refusal',
+          refusalCategory: null,
+        },
+      ]);
+      const { analyzer } = makeAnalyzer();
+
+      await expect(analyzer.analyze(provider, EMAIL)).rejects.toBeInstanceOf(ModelRefusalError);
+    });
+
+    it('throws on a turn truncated at max_tokens instead of parsing it', async () => {
+      const provider = makeProvider([
+        {
+          content: [{ type: 'text', text: '{"summary": "Fine", "isPhishing": false' }],
+          stopReason: 'max_tokens',
+        },
+      ]);
+      const { analyzer } = makeAnalyzer();
+
+      await expect(analyzer.analyze(provider, EMAIL)).rejects.toBeInstanceOf(
+        TruncatedResponseError
+      );
+    });
+
+    it('throws when the final text carries no recognizable verdict', async () => {
+      const provider = makeProvider([
+        { content: [{ type: 'text', text: 'I could not decide.' }], stopReason: 'end_turn' },
+      ]);
+      const { analyzer } = makeAnalyzer();
+
+      await expect(analyzer.analyze(provider, EMAIL)).rejects.toThrow('no usable verdict');
+    });
   });
 
   it('reports support based on the provider conversation capability', () => {

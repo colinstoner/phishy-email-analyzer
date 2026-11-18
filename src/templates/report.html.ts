@@ -5,6 +5,10 @@
 
 import { AnalysisResult, ExtractedEmailData, EmailAttachment } from '../types';
 import { normalizeConfidence } from '../services/ai/provider.interface';
+import type {
+  BlastRadiusRecipient,
+  BlastRadiusReport,
+} from '../services/graph/blast-radius.service';
 import { formatSenderHistoryLines } from '../utils/sender-history.format';
 
 /** Maximum length for email body display */
@@ -55,6 +59,34 @@ export interface ReportOptions {
     riskLevel: string;
     reasons: string[];
   };
+  /**
+   * Who reads this particular email, when it is not the usual combined one
+   * (reporter with the security team in Cc). It decides how much of the
+   * sender-relationship result is shown: `reporter` gets none of the detail
+   * (at most the one plain sentence that arrives through `risk.reasons`);
+   * `security` — an email addressed to the security team alone — gets all of
+   * it, including the burst's sending IPs. Unset means the combined email:
+   * counts and the classification, no IPs.
+   */
+  audience?: 'reporter' | 'security';
+  /**
+   * Who else received the email and what they did with it. **Security-team
+   * copy only**: the caller must never set this on the reporter's copy.
+   */
+  blastRadius?: BlastRadiusReport;
+  /**
+   * Set when the analysis came from an Outlook Report-button submission and
+   * is being sent to the security team only. Replaces the reporter thank-you
+   * with a line saying who reported it and that they were not notified.
+   */
+  silentReport?: {
+    reporter: string;
+  };
+}
+
+/** Lead line for a report sent to the security team about a silent button report */
+function silentReportNotice(reporter: string): string {
+  return `Reported by ${reporter} with the Outlook Report button. The reporter was not sent this analysis.`;
 }
 
 /** Shown with the sender-relationship counts so they are not read as a clearance */
@@ -380,12 +412,13 @@ export function buildEmailHtml(
             <div class="analysis">
                 ${analysisHtml}
             </div>
+            ${options?.blastRadius ? buildBlastRadiusHtml(options.blastRadius) : ''}
             <div class="metadata">
                 <p><strong>Analyzed Email Subject:</strong> ${escapeHtml(originalSubject)}</p>
                 <p><strong>From:</strong> ${escapeHtml(emailData.from_email)}</p>
                 ${options?.analysisId ? `<p class="ref-line">Reference: ${escapeHtml(options.analysisId)}</p>` : ''}
             </div>
-            ${buildOriginalEmailSection(emailData)}
+            ${buildOriginalEmailSection(emailData, options?.audience)}
             <div class="footer">
                 <p>This analysis was performed by Phishy powered by Anthropic's Claude AI.</p>
                 <p>Delivered via Amazon SES | Report time: ${timestamp}</p>
@@ -410,7 +443,9 @@ function buildAnalysisSection(analysis: AnalysisResult, options?: ReportOptions)
     tone === 'safe'
       ? 'Thanks for checking — flagging anything that looks off is exactly the right habit.'
       : 'Good catch, and thanks for reporting. Sending this to Phishy helped protect you and your colleagues.';
-  html += `<p class="thanks">${thanks}</p>`;
+  html += options?.silentReport
+    ? `<p class="thanks">${escapeHtml(silentReportNotice(options.silentReport.reporter))}</p>`
+    : `<p class="thanks">${thanks}</p>`;
 
   // Verdict banner: label + plain-language gloss + the prominent score/level
   // employees engage with.
@@ -518,11 +553,14 @@ export function buildPlainTextReport(
   const display = options?.risk ? VERDICT_DISPLAY[options.risk.verdict] : undefined;
   const tone: VerdictTone = display?.tone ?? (analysis.isPhishing ? 'danger' : 'safe');
 
-  // Thank the reporter
+  // Thank the reporter — or, for a silent button report, tell the security
+  // team who reported it and that the reporter was not notified
   lines.push(
-    tone === 'safe'
-      ? 'Thanks for checking — flagging anything that looks off is exactly the right habit.'
-      : 'Good catch, and thanks for reporting. Sending this to Phishy helped protect you and your colleagues.'
+    options?.silentReport
+      ? silentReportNotice(options.silentReport.reporter)
+      : tone === 'safe'
+        ? 'Thanks for checking — flagging anything that looks off is exactly the right habit.'
+        : 'Good catch, and thanks for reporting. Sending this to Phishy helped protect you and your colleagues.'
   );
   lines.push('');
 
@@ -586,6 +624,10 @@ export function buildPlainTextReport(
     lines.push('');
   }
 
+  if (options?.blastRadius) {
+    lines.push(...buildBlastRadiusText(options.blastRadius), '');
+  }
+
   // Metadata
   lines.push(divider);
   lines.push('Email Details:');
@@ -599,13 +641,186 @@ export function buildPlainTextReport(
   lines.push('');
 
   // Original email section
-  lines.push(buildOriginalEmailTextSection(emailData));
+  lines.push(buildOriginalEmailTextSection(emailData, options?.audience));
 
   lines.push(divider);
   lines.push("This analysis was performed by Phishy powered by Anthropic's Claude AI.");
   lines.push(`Report generated: ${new Date().toLocaleString()}`);
 
   return lines.join('\n');
+}
+
+const BLAST_FOLDER_LABEL: Record<string, string> = {
+  inbox: 'Inbox',
+  junk: 'Junk',
+  deleted: 'Deleted Items',
+  recoverable: 'Purged (Recoverable Items)',
+  other: 'Other folder',
+  unknown: 'Unknown',
+};
+
+const BLAST_COLUMNS = ['Recipient', 'Delivery', 'Location', 'Read', 'Replied / forwarded'];
+
+/** The cells of one recipient row, as plain (unescaped) text */
+function blastRadiusRow(recipient: BlastRadiusRecipient, reporter?: string): string[] {
+  const address =
+    recipient.address + (reporter && recipient.address === reporter ? ' (reporter)' : '');
+  let location: string;
+  let read = '-';
+  let response = '-';
+  if (recipient.mailbox === 'found') {
+    location = BLAST_FOLDER_LABEL[recipient.folder ?? 'unknown'] ?? 'Unknown';
+    if (recipient.copies) {
+      location += ` (${recipient.copies} copies)`;
+    }
+    read = recipient.isRead === undefined ? 'Unknown' : recipient.isRead ? 'Read' : 'Unread';
+    if (recipient.response === 'replied') {
+      response = 'REPLIED';
+    } else if (recipient.response === 'forwarded') {
+      response = 'FORWARDED';
+    } else if (recipient.response === 'none') {
+      response = 'None recorded';
+    } else {
+      response =
+        recipient.lastVerbCode === undefined
+          ? 'Unknown'
+          : `Unknown (last-verb code ${recipient.lastVerbCode})`;
+    }
+  } else if (recipient.mailbox === 'not_delivered') {
+    location = 'Not delivered';
+  } else {
+    location = recipient.mailbox === 'not_found' ? 'Not in mailbox' : 'Mailbox not checked';
+  }
+  return [address, recipient.deliveryStatus ?? '-', location, read, response];
+}
+
+/** Recipients counted in the totals but left out of the (capped) listing */
+function blastRadiusUnlisted(report: BlastRadiusReport): number {
+  const listed = report.recipients?.length ?? 0;
+  const total = (report.totals?.recipients ?? listed) + (report.totals?.notDelivered ?? 0);
+  return total - listed;
+}
+
+/**
+ * The statements of a blast-radius result, shared by both formats. Values
+ * taken from the suspicious email (sender, subject) are returned unescaped:
+ * the HTML builder escapes every line.
+ */
+function blastRadiusLines(report: BlastRadiusReport): string[] {
+  const lines: string[] = [];
+  const totals = report.totals ?? { recipients: 0, read: 0, replied: 0, forwarded: 0 };
+  const coverage = report.coverage;
+
+  lines.push(
+    report.route === 'trace'
+      ? `Message trace shows ${totals.recipients} recipient(s) in the organization.`
+      : `Found in ${totals.recipients} mailbox(es).`
+  );
+  if (totals.notDelivered) {
+    lines.push(`Delivery failed for ${totals.notDelivered} more recipient(s).`);
+  }
+  lines.push(
+    `Marked read by ${totals.read}; replied to by ${totals.replied}; forwarded by ${totals.forwarded}.`
+  );
+  if (coverage) {
+    const eligible = `${coverage.eligibleIsLowerBound ? 'at least ' : ''}${coverage.mailboxesEligible}`;
+    const unit = report.route === 'trace' ? 'recipient mailboxes' : 'mailboxes';
+    lines.push(
+      report.status === 'partial'
+        ? `PARTIAL COVERAGE: checked ${coverage.mailboxesChecked} of ${eligible} ${unit}. Recipients or details may be missing.`
+        : `Coverage: checked ${coverage.mailboxesChecked} of ${eligible} ${unit}.`
+    );
+  }
+  if (report.criteria) {
+    const window = `between ${report.criteria.receivedFrom} and ${report.criteria.receivedTo}`;
+    if (report.matchedBy === 'messageId') {
+      lines.push('Matched on: the original Message-ID.');
+    } else if (report.matchedBy === 'senderSubject') {
+      lines.push(
+        `Matched on: sender ${report.criteria.senderAddress ?? ''} and subject "${report.criteria.subject ?? ''}", received ${window}.`
+      );
+    } else {
+      lines.push(`Matched on: sender ${report.criteria.senderAddress ?? ''}, received ${window}.`);
+    }
+  }
+  const reporter = report.reporterAddress;
+  if (
+    reporter &&
+    report.recipients?.some(row => row.address === reporter && row.response === 'forwarded')
+  ) {
+    lines.push('The reporter forwarding the email to Phishy counts as a forward.');
+  }
+  return lines;
+}
+
+/**
+ * Blast-radius section (HTML) for the security team's copy. Recipient
+ * addresses are the organization's own, but they and the sender/subject
+ * come from mail flow: everything is escaped.
+ */
+function buildBlastRadiusHtml(report: BlastRadiusReport): string {
+  if (report.status === 'unavailable') {
+    return `
+            <div class="analysis blast-radius">
+                <p><strong>Security team only:</strong> ${escapeHtml(report.note ?? 'Blast radius lookup could not be completed.')}</p>
+            </div>`;
+  }
+
+  const recipients = report.recipients ?? [];
+  const cell = 'padding: 4px 8px; border-bottom: 1px solid #e9ecef; text-align: left;';
+  let table = '';
+  if (recipients.length) {
+    table += '<table style="width: 100%; border-collapse: collapse; font-size: 13px;">';
+    table += `<tr>${BLAST_COLUMNS.map(name => `<th style="${cell}">${name}</th>`).join('')}</tr>`;
+    for (const recipient of recipients) {
+      const cells = blastRadiusRow(recipient, report.reporterAddress);
+      table += `<tr>${cells.map(text => `<td style="${cell}">${escapeHtml(text)}</td>`).join('')}</tr>`;
+    }
+    table += '</table>';
+    const unlisted = blastRadiusUnlisted(report);
+    if (unlisted > 0) {
+      table += `<p class="no-items">${unlisted} more recipient(s) not listed.</p>`;
+    }
+  }
+
+  const statements = blastRadiusLines(report)
+    .map(line => `<p>${escapeHtml(line)}</p>`)
+    .join('');
+  const caveats = (report.caveats ?? []).map(text => `<li>${escapeHtml(text)}</li>`).join('');
+
+  return `
+            <div class="analysis blast-radius">
+                <h2>Blast radius (security team only)</h2>
+                ${statements}
+                ${table}
+                ${caveats ? `<ul style="font-size: 13px; color: #6c757d;">${caveats}</ul>` : ''}
+                <p class="ref-line">Looked up ${escapeHtml(report.lookedUpAt)}. This section is not in the reporter's copy.</p>
+            </div>`;
+}
+
+/** Blast-radius section (plain text) for the security team's copy */
+function buildBlastRadiusText(report: BlastRadiusReport): string[] {
+  if (report.status === 'unavailable') {
+    return [`Security team only: ${report.note ?? 'Blast radius lookup could not be completed.'}`];
+  }
+
+  const lines = ['BLAST RADIUS (security team only)', '-'.repeat(40), ...blastRadiusLines(report)];
+  const recipients = report.recipients ?? [];
+  if (recipients.length) {
+    lines.push(`  ${BLAST_COLUMNS.join(' | ')}`);
+    for (const recipient of recipients) {
+      lines.push(`  ${blastRadiusRow(recipient, report.reporterAddress).join(' | ')}`);
+    }
+    const unlisted = blastRadiusUnlisted(report);
+    if (unlisted > 0) {
+      lines.push(`  ${unlisted} more recipient(s) not listed.`);
+    }
+  }
+  for (const caveat of report.caveats ?? []) {
+    lines.push(`  Note: ${caveat}`);
+  }
+  lines.push(`Looked up ${report.lookedUpAt}. This section is not in the reporter's copy.`);
+  return lines;
 }
 
 /**
@@ -648,7 +863,10 @@ function stripHtmlForDisplay(html: string): string {
 /**
  * Build the original email section for HTML report
  */
-function buildOriginalEmailSection(emailData: ExtractedEmailData): string {
+function buildOriginalEmailSection(
+  emailData: ExtractedEmailData,
+  audience?: ReportOptions['audience']
+): string {
   const forwardedHeadersHtml = formatForwardedHeadersForDisplay(emailData.forwardedHeaders);
   const headersHtml = formatHeadersForDisplay(emailData.headers);
   const linksHtml = formatLinksForDisplay(emailData.links);
@@ -676,7 +894,7 @@ function buildOriginalEmailSection(emailData: ExtractedEmailData): string {
             <div class="original-email">
                 <h2>Original Email for IT Review</h2>
                 ${forwardedHeadersSection}
-                ${buildSenderHistorySection(emailData)}
+                ${buildSenderHistorySection(emailData, audience)}
 
                 <div class="email-section email-content">
                     <h3>Original Email Content</h3>
@@ -702,22 +920,53 @@ function buildOriginalEmailSection(emailData: ExtractedEmailData): string {
             </div>`;
 }
 
+/** Heading of the sender-relationship block, by who reads the email */
+function senderHistoryHeading(audience: ReportOptions['audience']): string {
+  return audience === 'security'
+    ? 'Sender Relationship (organization mail-flow records; security team only)'
+    : 'Sender Relationship (organization mail-flow records)';
+}
+
 /**
- * Sender-relationship counts for the IT-review part of the report. Counts,
- * dates and the classification only — no recipient addresses and no IPs,
- * because the reporter receives this same email.
+ * The sender-relationship lines for one copy of the report, or none.
+ * - reporter's own copy: nothing (the reporter is never told a sender is
+ *   "known"; the one plain sentence on anomalous fan-out is a risk reason);
+ * - combined email (reporter + security team in Cc): counts, dates and the
+ *   classification — no IPs, because the reporter reads it too;
+ * - security-team-only copy: the same plus the burst's sending IPs.
+ * No copy ever shows a recipient address.
  */
-function buildSenderHistorySection(emailData: ExtractedEmailData): string {
-  if (!emailData.senderHistory) {
+function senderHistoryReportLines(
+  emailData: ExtractedEmailData,
+  audience: ReportOptions['audience']
+): Array<[string, string]> | undefined {
+  if (!emailData.senderHistory || audience === 'reporter') {
+    return undefined;
+  }
+  return formatSenderHistoryLines(emailData.senderHistory, {
+    includeBurstIps: audience === 'security',
+  });
+}
+
+/**
+ * Sender-relationship block for the IT-review part of the report (HTML).
+ * Every value is escaped: the IPs come from mail flow.
+ */
+function buildSenderHistorySection(
+  emailData: ExtractedEmailData,
+  audience: ReportOptions['audience']
+): string {
+  const lines = senderHistoryReportLines(emailData, audience);
+  if (!lines) {
     return '';
   }
   let rows = '';
-  for (const [label, value] of formatSenderHistoryLines(emailData.senderHistory)) {
+  for (const [label, value] of lines) {
     rows += `<tr><td>${escapeHtml(label)}</td><td>${escapeHtml(value)}</td></tr>`;
   }
   return `
                 <div class="email-section email-headers email-sender-history">
-                    <h3>Sender Relationship (organization mail-flow records)</h3>
+                    <h3>${escapeHtml(senderHistoryHeading(audience))}</h3>
                     <table>${rows}</table>
                     <p class="no-items">${escapeHtml(SENDER_HISTORY_CAVEAT)}</p>
                 </div>`;
@@ -726,7 +975,10 @@ function buildSenderHistorySection(emailData: ExtractedEmailData): string {
 /**
  * Build the original email section for plain text report
  */
-function buildOriginalEmailTextSection(emailData: ExtractedEmailData): string {
+function buildOriginalEmailTextSection(
+  emailData: ExtractedEmailData,
+  audience?: ReportOptions['audience']
+): string {
   const lines: string[] = [];
   const divider = '='.repeat(50);
   const subDivider = '-'.repeat(40);
@@ -736,11 +988,12 @@ function buildOriginalEmailTextSection(emailData: ExtractedEmailData): string {
   lines.push(divider);
   lines.push('');
 
-  // Sender relationship (counts only)
-  if (emailData.senderHistory) {
-    lines.push('Sender Relationship (organization mail-flow records):');
+  // Sender relationship (how much depends on who reads this copy)
+  const senderHistoryLines = senderHistoryReportLines(emailData, audience);
+  if (senderHistoryLines) {
+    lines.push(`${senderHistoryHeading(audience)}:`);
     lines.push(subDivider);
-    for (const [label, value] of formatSenderHistoryLines(emailData.senderHistory)) {
+    for (const [label, value] of senderHistoryLines) {
       lines.push(`  ${label}: ${value}`);
     }
     lines.push(`  Note: ${SENDER_HISTORY_CAVEAT}`);

@@ -3,6 +3,7 @@
  */
 
 import { fuseRisk, scoreToLevel } from '../../../../src/services/intelligence/risk.fusion';
+import { createFailedAnalysisResult } from '../../../../src/services/ai/provider.interface';
 import { AnalysisResult, ThreatAssessment } from '../../../../src/types';
 import {
   ThreatIndicatorRecord,
@@ -146,6 +147,20 @@ describe('fuseRisk', () => {
     // The danger was the report calling an un-analyzed email "legitimate".
     expect(decision.verdict).not.toBe('legitimate');
     expect(decision.reasons.join(' ')).toMatch(/could not be completed/i);
+  });
+
+  it('routes a model refusal to undetermined, never legitimate', () => {
+    const refused = createFailedAnalysisResult(
+      'The model declined to analyze this email: claude-opus-5-5 declined the request (category: cyber)'
+    );
+
+    const decision = fuseRisk(refused, { isSafeSender: true });
+
+    expect(decision.verdict).toBe('undetermined');
+    expect(decision.verdict).not.toBe('legitimate');
+    expect(refused.summary).toMatch(/NOT checked/);
+    // Operator detail stays out of the employee-facing summary
+    expect(refused.summary).not.toContain('claude-opus-5-5');
   });
 
   it('does NOT let a safe-sender allowlist talk a failed analysis down to safe', () => {

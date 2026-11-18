@@ -19,6 +19,7 @@ import {
   EmailMessage,
   ExtractedEmailData,
   AnalysisResult,
+  EmailSendResult,
 } from '../types';
 import { createLogger } from '../utils/logger';
 import { extractEmailAddress, domainMatches } from '../utils/validation';
@@ -27,7 +28,10 @@ import {
   emitAIUsageMetric,
   emitAnalysisFailureMetric,
   emitCampaignCacheHitMetric,
+  emitSecurityCopyFailureMetric,
+  emitUserReportMetric,
 } from '../utils/metrics';
+import { shouldNotifySecurityTeam } from '../services/email/user.report';
 import { ReportOptions } from '../templates/report.html';
 import { EmailCommandService } from '../services/commands/email.command.service';
 import { AgenticAnalyzer } from '../services/ai/agentic/agentic.analyzer';
@@ -42,6 +46,18 @@ import {
 } from '../services/intelligence';
 import { extractIOCs, IOCSourceContext } from '../services/intelligence/ioc.extractor';
 import { ThreatIndicatorRecord } from '../services/intelligence/database.service';
+import {
+  GraphClient,
+  ORIGINAL_FETCH_CLIENT_OPTIONS,
+  ORIGINAL_FETCH_TOKEN_OPTIONS,
+  createGraphReadClient,
+  enrichWithOriginalMessage,
+} from '../services/graph';
+import {
+  BlastRadiusReport,
+  BlastRadiusService,
+  createBlastRadiusService,
+} from '../services/graph/blast-radius.service';
 import { SenderHistoryService, createSenderHistoryService } from '../services/graph/sender.history';
 
 const logger = createLogger('lambda-handler');
@@ -71,6 +87,10 @@ let cachedServices: {
   campaignService?: CampaignAlertService;
   intelligenceDb?: IntelligenceDatabaseService;
   commandService?: EmailCommandService;
+  /** Read-only Graph client for the original-message lookup, when that feature is on */
+  originalFetchClient?: GraphClient;
+  /** Who-else-received-it lookup for malicious verdicts, when that feature is on */
+  blastRadius?: BlastRadiusService;
   senderHistory?: SenderHistoryService;
 } | null = null;
 
@@ -108,7 +128,9 @@ export async function handler(event: SESEvent, _context: Context): Promise<APIGa
       }
 
       try {
-        const result = await processEmailEvent(emailEvent.msg, config, services);
+        const result = await processEmailEvent(emailEvent.msg, config, services, () =>
+          _context?.getRemainingTimeInMillis?.()
+        );
         processingResults.push(result);
       } catch (eventError) {
         logger.error('Error processing event', {
@@ -174,7 +196,8 @@ async function initializeServices(): Promise<{
   const emailParser = new EmailParserService(
     s3Service,
     config.email.safeDomains,
-    config.storage.s3Bucket
+    config.storage.s3Bucket,
+    { detectUserReports: !!config.reportButton?.enabled }
   );
 
   // Create AI provider(s)
@@ -182,9 +205,15 @@ async function initializeServices(): Promise<{
   let fallbackProvider: AIProvider | undefined;
 
   if (config.ai.fallbackProvider) {
+    // ai.refusalFallbackModel is a model ID in the PRIMARY provider's format,
+    // so the fallback provider keeps its own built-in default instead
     const fallbackConfig = {
       ...config,
-      ai: { ...config.ai, provider: config.ai.fallbackProvider },
+      ai: {
+        ...config.ai,
+        provider: config.ai.fallbackProvider,
+        refusalFallbackModel: undefined,
+      },
     };
     fallbackProvider = createAIProvider(fallbackConfig, emailParser, cachedProfile);
   }
@@ -263,6 +292,22 @@ async function initializeServices(): Promise<{
     });
   }
 
+  // Original-message lookup: read a forwarded email's real headers from the
+  // reporter's own mailbox before analysis. Code-driven and read-only; the
+  // client is built here but contacts nothing until the first lookup.
+  let originalFetchClient: GraphClient | undefined;
+  if (config.graph?.originalFetch?.enabled) {
+    if (config.graph.enabled) {
+      originalFetchClient = createGraphReadClient(config.graph, {
+        clientOptions: ORIGINAL_FETCH_CLIENT_OPTIONS,
+        tokenOptions: ORIGINAL_FETCH_TOKEN_OPTIONS,
+      });
+      logger.info('Original-message lookup enabled');
+    } else {
+      logger.warn('graph.originalFetch.enabled has no effect while graph.enabled is false');
+    }
+  }
+
   // Sender-relationship check (optional): message trace facts about the
   // claimed sender. A misconfiguration here must not stop email analysis.
   let senderHistory: SenderHistoryService | undefined;
@@ -282,6 +327,9 @@ async function initializeServices(): Promise<{
     intelligenceDb,
     campaignService,
     commandService,
+    originalFetchClient,
+    // Who-else-received-it lookup for malicious verdicts (off by default)
+    blastRadius: createBlastRadiusService(config.graph),
     senderHistory,
   };
 
@@ -321,6 +369,8 @@ function createAIProvider(
         modelId: config.ai.bedrock.modelId,
         maxTokens: config.ai.bedrock.maxTokens,
         timeout: config.ai.bedrock.timeout,
+        effort: config.ai.effort,
+        refusalFallbackModel: config.ai.refusalFallbackModel,
       },
       extractHeaders,
       profile
@@ -337,6 +387,8 @@ function createAIProvider(
       model: config.ai.anthropic.model,
       maxTokens: config.ai.anthropic.maxTokens,
       timeout: config.ai.anthropic.timeout,
+      effort: config.ai.effort,
+      refusalFallbackModel: config.ai.refusalFallbackModel,
     },
     extractHeaders,
     profile
@@ -375,7 +427,8 @@ async function loadProfile(profilePath: string, region: string): Promise<Enterpr
 async function processEmailEvent(
   msg: EmailMessage,
   config: PhishyConfig,
-  services: NonNullable<typeof cachedServices>
+  services: NonNullable<typeof cachedServices>,
+  getRemainingMs?: () => number | undefined
 ): Promise<ProcessingResult> {
   // Extract and normalize email data
   const emailData = services.emailParser.extractEmailData(msg);
@@ -409,6 +462,26 @@ async function processEmailEvent(
   const validationResult = validateEmail(emailData, config);
   if (validationResult.status !== 'processed') {
     return validationResult;
+  }
+
+  // Outlook Report-button submissions: nobody is waiting for an answer, so
+  // these are handled without emailing the reporter. Junk / not-junk reports
+  // are mailbox hygiene, not a question for Phishy — count them and stop.
+  const userReport = emailData.userReport;
+  if (userReport) {
+    emitUserReportMetric(userReport.reportedAs);
+    if (userReport.reportedAs !== 'phishing') {
+      logger.info('Report-button submission is not a phishing report — skipping analysis', {
+        reporter: emailData.from_email,
+        reportedAs: userReport.reportedAs,
+      });
+      await cleanupStoredEmail(msg, config, services);
+      return { status: 'skipped', reason: `user_report_${userReport.reportedAs}` };
+    }
+    logger.info('Report-button phishing submission — analyzing silently', {
+      reporter: emailData.from_email,
+      networkMessageId: userReport.networkMessageId,
+    });
   }
 
   // Check if sender is a safelist user (not enterprise domain)
@@ -456,14 +529,29 @@ async function processEmailEvent(
     }
   }
 
-  // Sender-relationship facts for the prompt, risk fusion and the report.
-  // Never throws; undefined on any failure, and analysis proceeds as usual.
-  if (!analysis && services.senderHistory && !isSafelistUser) {
-    emailData.senderHistory = await services.senderHistory.lookupForEmail(emailData);
+  // Analyze with AI (cache miss or cache disabled). When the original-message
+  // lookup is on, first try to add the original's real headers to the email
+  // facts; it never throws and any outcome but a unique match changes nothing.
+  // Safelist users are outside the organization, so there is no mailbox to read.
+  // A Report-button submission already carries the original with its headers.
+  if (!analysis) {
+    // Sender-relationship facts for the prompt, risk fusion and the report
+    // (forwards and Report-button submissions alike). Never throws; undefined
+    // on any failure, and analysis proceeds as usual.
+    if (services.senderHistory && !isSafelistUser) {
+      emailData.senderHistory = await services.senderHistory.lookupForEmail(emailData);
+    }
+    if (services.originalFetchClient && !isSafelistUser && !userReport) {
+      await enrichWithOriginalMessage(
+        services.originalFetchClient,
+        services.emailParser,
+        msg,
+        emailData,
+        config.email.safeDomains
+      );
+    }
+    analysis = await services.analysisService.analyzeEmail(emailData);
   }
-
-  // Analyze with AI (cache miss or cache disabled)
-  analysis ??= await services.analysisService.analyzeEmail(emailData);
 
   // The model never produced a verdict (provider unreachable after retries).
   // The reporter still gets an honest "analysis unavailable" report below, but
@@ -498,6 +586,7 @@ async function processEmailEvent(
       estimatedCostUsd,
       processingTimeMs: analysis.processingTimeMs ?? 0,
       isPhishing: analysis.isPhishing,
+      thinkingTokens: analysis.tokenUsage.thinkingTokens,
     });
   }
 
@@ -647,6 +736,35 @@ async function processEmailEvent(
     }
   }
 
+  // Blast radius: for a malicious verdict, who else received this and what
+  // they did with it. Code-driven, after the verdict; the result goes only
+  // into an email addressed to the security team and never to the model or
+  // the reporter. Decided here, run just before that email is sent.
+  const blastRadiusService =
+    riskDecision.isPhishing && !analysis.analysisFailed && !isSafelistUser
+      ? services.blastRadius
+      : undefined;
+  const lookupBlastRadius = blastRadiusService
+    ? (reporterAddress?: string): Promise<BlastRadiusReport> =>
+        blastRadiusService.lookup(emailData, { remainingMs: getRemainingMs?.(), reporterAddress })
+    : undefined;
+
+  // Report-button submissions never produce a reply to the reporter. The
+  // security team is told only when the outcome warrants their attention.
+  if (userReport) {
+    return finishSilentUserReport(msg, emailData, analysis, config, services, {
+      storedAnalysisId,
+      risk: {
+        verdict: riskDecision.verdict,
+        riskScore: riskDecision.riskScore,
+        riskLevel: riskDecision.riskLevel,
+        reasons: riskDecision.reasons,
+      },
+      isPhishing: riskDecision.isPhishing,
+      lookupBlastRadius,
+    });
+  }
+
   // Determine recipient
   const recipient = determineRecipient(emailData);
 
@@ -667,18 +785,25 @@ async function processEmailEvent(
       },
     };
 
-    const emailResult = await services.sesNotifier.sendAnalysisReport(
-      recipient,
-      analysis,
-      emailData,
-      ccOverride,
-      reportOptions
+    // With blast radius, the lookup runs inside sendReports, after the
+    // reporter's copy has gone; its result is in the security team's copy only.
+    const securityTeam = config.notification.securityTeamDistribution;
+    const { reporterResult: emailResult, commandReplyMessageId } = await sendReports(
+      services.sesNotifier,
+      { recipient, analysis, emailData, ccOverride, reportOptions },
+      lookupBlastRadius && securityTeam.length > 0
+        ? {
+            securityTeam,
+            lookup: (): Promise<BlastRadiusReport> => lookupBlastRadius(recipient),
+          }
+        : undefined
     );
 
-    // Remember the outbound message ID so In-Reply-To matching works
-    if (storedAnalysisId && emailResult.messageId && services.intelligenceDb) {
+    // Remember the outbound message ID so In-Reply-To matching works (the
+    // security team's copy when it was sent separately: they send commands)
+    if (storedAnalysisId && commandReplyMessageId && services.intelligenceDb) {
       try {
-        await services.intelligenceDb.setReportMessageId(storedAnalysisId, emailResult.messageId);
+        await services.intelligenceDb.setReportMessageId(storedAnalysisId, commandReplyMessageId);
       } catch (linkError) {
         logger.warn('Failed to store report message ID', {
           error: linkError instanceof Error ? linkError.message : String(linkError),
@@ -686,11 +811,7 @@ async function processEmailEvent(
       }
     }
 
-    // Delete from S3 if configured
-    if (config.email.deleteAfterProcessing && msg.s3Location) {
-      logger.info('Cleaning up S3 object');
-      await services.s3Service.deleteObject(msg.s3Location.bucket, msg.s3Location.key);
-    }
+    await cleanupStoredEmail(msg, config, services);
 
     return {
       status: 'processed',
@@ -701,6 +822,212 @@ async function processEmailEvent(
 
   logger.warn('Cannot send analysis - invalid recipient', { recipient });
   return { status: 'incomplete', reason: 'invalid_recipient' };
+}
+
+/**
+ * Run a blast-radius lookup for an email to the security team. `lookup()`
+ * does not throw; if it ever does, the email still goes out, with a note.
+ */
+async function resolveBlastRadius(
+  lookup: () => Promise<BlastRadiusReport>
+): Promise<BlastRadiusReport> {
+  try {
+    return await lookup();
+  } catch (error) {
+    logger.error('Blast radius lookup threw', {
+      error: error instanceof Error ? error.name : 'unknown',
+    });
+    return {
+      status: 'unavailable',
+      note: 'Blast radius lookup could not be completed.',
+      lookedUpAt: new Date().toISOString(),
+    };
+  }
+}
+
+/**
+ * Send the analysis report.
+ *
+ * Without `blastRadius` (the feature is off, or the verdict is not
+ * malicious): one email to the reporter with the security team in Cc.
+ *
+ * With it, two emails, in this order:
+ * 1. the reporter's copy, at once and without the section — their warning
+ *    never waits on the lookup;
+ * 2. the lookup (bounded by its own budget and the remaining Lambda time);
+ * 3. the security team's own copy, with the section, or with a one-line
+ *    note when the lookup produced nothing. It is always sent.
+ *
+ * A reporter who is on the security team gets only the security copy. The
+ * security copy's message ID is the one command replies are matched to.
+ *
+ * Each of the two emails is marked with its `audience`, which decides how
+ * much sender-relationship detail it shows: none for the reporter, all of it
+ * (sending IPs included) for the security team. The single combined email
+ * carries no mark and shows counts only.
+ */
+export async function sendReports(
+  notifier: SESNotifier,
+  report: {
+    recipient: string;
+    analysis: AnalysisResult;
+    emailData: ExtractedEmailData;
+    ccOverride?: string[];
+    reportOptions: ReportOptions;
+  },
+  blastRadius?: { securityTeam: string[]; lookup: () => Promise<BlastRadiusReport> }
+): Promise<{ reporterResult: EmailSendResult; commandReplyMessageId?: string }> {
+  const { recipient, analysis, emailData, ccOverride, reportOptions } = report;
+
+  if (!blastRadius) {
+    const reporterResult = await notifier.sendAnalysisReport(
+      recipient,
+      analysis,
+      emailData,
+      ccOverride,
+      reportOptions
+    );
+    return { reporterResult, commandReplyMessageId: reporterResult.messageId };
+  }
+
+  const reporter = recipient.trim().toLowerCase();
+  const reporterIsSecurityTeam = blastRadius.securityTeam.some(
+    member => member.trim().toLowerCase() === reporter
+  );
+  const reporterResult = reporterIsSecurityTeam
+    ? undefined
+    : await notifier.sendAnalysisReport(recipient, analysis, emailData, [], {
+        ...reportOptions,
+        audience: 'reporter',
+      });
+
+  const section = await resolveBlastRadius(blastRadius.lookup);
+
+  const [first, ...rest] = blastRadius.securityTeam;
+  const securityResult = await notifier.sendAnalysisReport(first, analysis, emailData, rest, {
+    ...reportOptions,
+    audience: 'security',
+    blastRadius: section,
+  });
+  if (!securityResult.success) {
+    // The reporter already has theirs: nothing is re-sent, but this must be seen
+    logger.error('Security-team copy of a malicious report was not sent', {
+      error: securityResult.error,
+    });
+    emitSecurityCopyFailureMetric();
+  }
+
+  return {
+    reporterResult: reporterResult ?? securityResult,
+    commandReplyMessageId: securityResult.messageId,
+  };
+}
+
+/**
+ * Delete the raw email from S3 when configured to
+ */
+async function cleanupStoredEmail(
+  msg: EmailMessage,
+  config: PhishyConfig,
+  services: NonNullable<typeof cachedServices>
+): Promise<void> {
+  if (config.email.deleteAfterProcessing && msg.s3Location) {
+    logger.info('Cleaning up S3 object');
+    await services.s3Service.deleteObject(msg.s3Location.bucket, msg.s3Location.key);
+  }
+}
+
+/**
+ * Finish an Outlook Report-button phishing submission. The reporter is never
+ * emailed; the analysis has already been stored and counted toward campaign
+ * detection. The security team — operator-configured addresses, never anything
+ * derived from the message — gets the report when the verdict is malicious or
+ * suspicious, or when the analysis could not be completed.
+ *
+ * With blast radius on and a malicious verdict (`lookupBlastRadius` is set),
+ * the lookup runs first and that same single email carries its section, or
+ * a one-line note when the lookup produced nothing. Nobody is waiting on
+ * this path, so there is no second email and no ordering to preserve.
+ */
+async function finishSilentUserReport(
+  msg: EmailMessage,
+  emailData: ExtractedEmailData,
+  analysis: AnalysisResult,
+  config: PhishyConfig,
+  services: NonNullable<typeof cachedServices>,
+  outcome: {
+    storedAnalysisId?: string;
+    risk: NonNullable<ReportOptions['risk']>;
+    isPhishing: boolean;
+    lookupBlastRadius?: () => Promise<BlastRadiusReport>;
+  }
+): Promise<ProcessingResult> {
+  const securityTeam = config.notification.securityTeamDistribution;
+  const notify = shouldNotifySecurityTeam({
+    isPhishing: outcome.isPhishing,
+    verdict: outcome.risk.verdict,
+    analysisFailed: analysis.analysisFailed,
+  });
+
+  if (!notify || securityTeam.length === 0) {
+    logger.info('Report-button submission recorded — no notification sent', {
+      reporter: emailData.from_email,
+      verdict: outcome.risk.verdict,
+      hasSecurityTeam: securityTeam.length > 0,
+    });
+    await cleanupStoredEmail(msg, config, services);
+    return { status: 'processed', reason: 'user_report_recorded' };
+  }
+
+  const blastRadius = outcome.lookupBlastRadius
+    ? await resolveBlastRadius(outcome.lookupBlastRadius)
+    : undefined;
+
+  const [primary, ...others] = securityTeam;
+  const emailResult = await services.sesNotifier.sendAnalysisReport(
+    primary,
+    analysis,
+    emailData,
+    others,
+    {
+      ...(outcome.storedAnalysisId ? { analysisId: outcome.storedAnalysisId } : {}),
+      risk: outcome.risk,
+      silentReport: { reporter: emailData.from_email },
+      // Addressed to the security team alone: full sender-relationship detail
+      audience: 'security',
+      ...(blastRadius ? { blastRadius } : {}),
+    }
+  );
+  if (blastRadius && !emailResult.success) {
+    // Same signal as a failed security copy on the forward path
+    logger.error('Security-team email for a malicious button report was not sent', {
+      error: emailResult.error,
+    });
+    emitSecurityCopyFailureMetric();
+  }
+
+  // Remember the outbound message ID so security-team replies (commands)
+  // can be matched back to this analysis
+  if (outcome.storedAnalysisId && emailResult.messageId && services.intelligenceDb) {
+    try {
+      await services.intelligenceDb.setReportMessageId(
+        outcome.storedAnalysisId,
+        emailResult.messageId
+      );
+    } catch (linkError) {
+      logger.warn('Failed to store report message ID', {
+        error: linkError instanceof Error ? linkError.message : String(linkError),
+      });
+    }
+  }
+
+  await cleanupStoredEmail(msg, config, services);
+  return {
+    status: 'processed',
+    recipient: primary,
+    messageId: emailResult.messageId,
+    reason: 'user_report_security_notified',
+  };
 }
 
 /**

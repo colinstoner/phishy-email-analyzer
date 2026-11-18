@@ -25,6 +25,26 @@ export interface EmailMessage {
     dkim?: string;
     dmarc?: string;
   };
+  /**
+   * Set when the message is an Outlook Report-button submission rather than a
+   * forward. Derived only from SES-delivered mail by the parser — the external
+   * payload schema strips it.
+   */
+  userReport?: UserReport;
+}
+
+/** What the employee chose in Outlook's Report menu */
+export type UserReportKind = 'phishing' | 'junk' | 'not_junk';
+
+/**
+ * An Outlook Report-button submission: the reporter clicked a button and is
+ * not waiting for an answer, so these are handled without replying to them.
+ */
+export interface UserReport {
+  source: 'outlook-report-button';
+  reportedAs: UserReportKind;
+  /** Exchange network message ID of the reported (original) message */
+  networkMessageId: string;
 }
 
 /**
@@ -70,12 +90,46 @@ export interface ExtractedEmailData {
   canonicalText?: string;
   /** Obfuscation indicators found during canonicalization — themselves signals */
   contentFlags?: string[];
+  /** Present when this is an Outlook Report-button submission (handled silently) */
+  userReport?: UserReport;
+  /**
+   * Internet headers of the original message, read by Phishy from the
+   * reporter's own mailbox (optional Graph feature). Absent whenever the
+   * lookup is off, failed, or did not find exactly one match.
+   */
+  retrievedOriginal?: RetrievedOriginal;
   /**
    * Sender-relationship facts computed by Phishy from the organization's own
-   * mail-flow records (optional Graph feature). Numbers and an enum only —
-   * never an address. Absent when the check is off, skipped or failed.
+   * mail-flow records (optional Graph feature). Counts and an enum, plus the
+   * burst's sending IPs for a security-team-only report; never an address.
+   * Absent when the check is off, skipped or failed.
    */
   senderHistory?: SenderHistoryFacts;
+}
+
+/** One Internet header of a retrieved original. Name and value are hostile data. */
+export interface RetrievedHeader {
+  name: string;
+  value: string;
+}
+
+/**
+ * The original of a forwarded message as Phishy itself found it in the
+ * reporter's mailbox. What is verified is the retrieval (Phishy read this
+ * from the stored copy; nothing here was pasted by the forwarder) and the
+ * two fields the mailbox system stamps: `location` and `receivedAt`. The
+ * header contents are written by the sender and by every server the message
+ * passed through, so they stay hostile data.
+ */
+export interface RetrievedOriginal {
+  /** `recoverable_items`: the reporter deleted the message after forwarding it */
+  location: 'mailbox' | 'recoverable_items';
+  /** When the mailbox received the message (ISO 8601), stamped by the mail system */
+  receivedAt?: string;
+  /** Headers in stored order, top of the message first */
+  headers: RetrievedHeader[];
+  /** True when the stored copy had more headers than were read */
+  headersTruncated: boolean;
 }
 
 /** A count that may have been cut short by a row cap: `atLeast` means "N or more" */
@@ -92,9 +146,18 @@ export interface BoundedCount {
 export type SenderRelationshipClass =
   'no_history' | 'limited_history' | 'established' | 'established_with_anomalous_fanout';
 
+/** One sending IP seen in the burst window, as message trace recorded it */
+export interface SenderBurstIp {
+  ip: string;
+  /** Also recorded for this sender in the history period */
+  seenInHistory: boolean;
+}
+
 /**
  * What the organization's message trace says about one external sender
- * address. Counts only: no recipient address, sender address or IP is kept.
+ * address. Counts and an enum; no recipient or sender address is kept. The
+ * one exception to "counts only" is `sendingIps.burstIps`, which exists for
+ * a report addressed to the security team alone.
  */
 export interface SenderHistoryFacts {
   classification: SenderRelationshipClass;
@@ -128,6 +191,14 @@ export interface SenderHistoryFacts {
     seenInHistory: number;
     /** False when history was cut short, so `seenInHistory` is a minimum */
     historyComplete: boolean;
+    /**
+     * The burst's sending IPs themselves, capped. **Security-team-only
+     * report copies only**: never the prompt, the reporter's copy, the
+     * combined report, or a log line at info level.
+     */
+    burstIps?: SenderBurstIp[];
+    /** Burst IPs left out of `burstIps` by the cap (or not shaped like an IP) */
+    burstIpsOmitted?: number;
   };
   /** The same history for every address on the sender's domain; absent for free-mail domains */
   domain?: {
@@ -154,8 +225,15 @@ export interface LinkFact {
  */
 export interface TokenUsage {
   inputTokens: number;
+  /** Billed output tokens. Includes thinking tokens on models that think. */
   outputTokens: number;
   totalTokens: number;
+  /**
+   * The share of outputTokens spent on thinking, when the API reports it
+   * (`usage.output_tokens_details.thinking_tokens`). Already counted in
+   * outputTokens — never add it on top.
+   */
+  thinkingTokens?: number;
 }
 
 /**

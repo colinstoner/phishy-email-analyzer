@@ -5,7 +5,10 @@
  * All addresses/domains/names are invented (example.com style).
  */
 
-import { EmailParserService } from '../../../../src/services/email/parser.service';
+import {
+  EmailParserService,
+  EmailParserOptions,
+} from '../../../../src/services/email/parser.service';
 import type { S3Service } from '../../../../src/services/storage/s3.service';
 import { EmailMessage, SESRecord } from '../../../../src/types';
 
@@ -25,9 +28,10 @@ function makeS3(impl?: (bucket: string, key: string) => Promise<string>): MockS3
 function makeParser(
   s3: MockS3 = makeS3(),
   safeDomains: string[] = ['example.com'],
-  bucket = 'test-bucket'
+  bucket = 'test-bucket',
+  options: EmailParserOptions = {}
 ): EmailParserService {
-  return new EmailParserService(s3 as unknown as S3Service, safeDomains, bucket);
+  return new EmailParserService(s3 as unknown as S3Service, safeDomains, bucket, options);
 }
 
 interface RecordOverrides {
@@ -426,6 +430,105 @@ describe('EmailParserService', () => {
       expect(forwarded['Original-From']).toContain('billing@examp1e-secure.test');
       expect(forwarded['Original-Subject']).toBe('Your account is suspended');
       expect(forwarded['Original-Reply-To']).toContain('collect@example-evil.test');
+    });
+
+    describe('Outlook Report-button submissions', () => {
+      const NMID = '11111111-2222-4333-8444-555555555555';
+      const reportSubject = `Phishing:${NMID}|billing@examp1e-secure.test|(Your account is suspended) 06/01/2026 14:02:11`;
+
+      const innerEmail = [
+        'From: "Example Billing" <billing@examp1e-secure.test>',
+        'To: employee@example.com',
+        'Subject: Your account is suspended',
+        'Authentication-Results: spf=fail smtp.mailfrom=examp1e-secure.test',
+        'Content-Type: text/plain; charset=utf-8',
+        '',
+        'Click https://examp1e-secure.test/verify within 24 hours.',
+      ].join(CRLF);
+
+      const reportEmail = [
+        'From: Employee <employee@example.com>',
+        'To: phishy@example.com',
+        `Subject: ${reportSubject}`,
+        'MIME-Version: 1.0',
+        'Content-Type: multipart/mixed; boundary="report-boundary"',
+        '',
+        '--report-boundary',
+        'Content-Type: text/plain; charset=utf-8',
+        '',
+        '# Questionable URLs detected in message:',
+        'None',
+        '',
+        'Received: from mail.examp1e-secure.test by mx.example.com',
+        '--report-boundary',
+        'Content-Type: message/rfc822',
+        '',
+        innerEmail,
+        '--report-boundary--',
+        '',
+      ].join(CRLF);
+
+      const reportRecord = (): SESRecord =>
+        makeSESRecord({
+          content: reportEmail,
+          mail: {
+            source: 'employee@example.com',
+            commonHeaders: { from: ['Employee <employee@example.com>'], subject: reportSubject },
+          },
+        });
+
+      it('marks the message, drops the machine-generated wrapper body, and uses the original subject', async () => {
+        const parser = makeParser(undefined, undefined, undefined, { detectUserReports: true });
+
+        const events = await parser.parseSESRecords([reportRecord()]);
+        const msg = events[0].msg;
+
+        expect(msg.userReport).toEqual({
+          source: 'outlook-report-button',
+          reportedAs: 'phishing',
+          networkMessageId: NMID,
+        });
+        expect(msg.text).not.toContain('Questionable URLs detected');
+        expect(msg.text.startsWith('---------- Forwarded message ---------')).toBe(true);
+        expect(msg.text).toContain('Click https://examp1e-secure.test/verify');
+
+        const data = parser.extractEmailData(msg);
+        expect(data.userReport?.reportedAs).toBe('phishing');
+        expect(data.subject).toBe('Your account is suspended');
+        expect(data.forwardedHeaders['Original-From']).toContain('billing@examp1e-secure.test');
+      });
+
+      it('is treated as an ordinary forward when detection is off (the default)', async () => {
+        const parser = makeParser();
+
+        const events = await parser.parseSESRecords([reportRecord()]);
+        const msg = events[0].msg;
+
+        expect(msg.userReport).toBeUndefined();
+        expect(msg.text).toContain('Questionable URLs detected');
+        expect(parser.extractEmailData(msg).subject).toBe(reportSubject);
+      });
+
+      it('cannot be claimed by an external (API) payload', async () => {
+        const parser = makeParser(undefined, undefined, undefined, { detectUserReports: true });
+
+        const events = await parser.parseEmailEvents([
+          {
+            msg: {
+              from_email: 'employee@example.com',
+              subject: reportSubject,
+              text: 'body',
+              userReport: {
+                source: 'outlook-report-button',
+                reportedAs: 'junk',
+                networkMessageId: NMID,
+              },
+            },
+          },
+        ]);
+
+        expect(events[0].msg.userReport).toBeUndefined();
+      });
     });
 
     it('should surface attachment metadata without carrying content', async () => {

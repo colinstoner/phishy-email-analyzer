@@ -21,6 +21,9 @@ import { AIProvider } from '../ai/provider.interface';
 
 const logger = createLogger('email-commands');
 
+/** Output budget for AI command parsing: brief thinking plus a one-line JSON answer */
+const COMMAND_PARSE_MAX_TOKENS = 2048;
+
 export interface CommandResult {
   /** True when this email was handled as a command (skip the analysis pipeline) */
   handled: boolean;
@@ -161,7 +164,15 @@ export class EmailCommandService {
     ].join('\n');
 
     try {
-      const response = await this.aiParser.sendPrompt(prompt, { maxTokens: 50, timeout: 15000 });
+      // max_tokens covers thinking as well as the one-line answer: a limit
+      // sized for the answer alone truncates on models that always think.
+      // Low effort — this is a three-way classification. A refusal or a
+      // truncated reply throws, and lands in the "no verdict" branch below.
+      const response = await this.aiParser.sendPrompt(prompt, {
+        maxTokens: COMMAND_PARSE_MAX_TOKENS,
+        effort: 'low',
+        timeout: 15000,
+      });
       const match = response.match(/\{[^}]*\}/);
       if (!match) {
         return null;

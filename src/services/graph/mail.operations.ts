@@ -44,6 +44,7 @@ const MESSAGE_SUMMARY_SELECT = [
   'receivedDateTime',
   'parentFolderId',
   'hasAttachments',
+  'isRead',
 ];
 
 const DEFAULT_MAX_MESSAGES = 25;
@@ -65,6 +66,7 @@ const MessageSummarySchema = z.object({
   receivedDateTime: z.string().nullish(),
   parentFolderId: z.string().nullish(),
   hasAttachments: z.boolean().nullish(),
+  isRead: z.boolean().nullish(),
 });
 
 /** Message metadata. Every string here originates in a mailbox: hostile data. */
@@ -77,6 +79,8 @@ export interface MessageSummary {
   receivedDateTime?: string;
   parentFolderId?: string;
   hasAttachments?: boolean;
+  /** Whether the message is marked read in its mailbox */
+  isRead?: boolean;
 }
 
 function toSummary(raw: z.infer<typeof MessageSummarySchema>): MessageSummary {
@@ -88,6 +92,7 @@ function toSummary(raw: z.infer<typeof MessageSummarySchema>): MessageSummary {
     receivedDateTime: raw.receivedDateTime ?? undefined,
     parentFolderId: raw.parentFolderId ?? undefined,
     hasAttachments: raw.hasAttachments ?? undefined,
+    isRead: raw.isRead ?? undefined,
   };
 }
 

@@ -38,9 +38,16 @@ export interface ToolResultBlock {
 export type ContentBlock = TextBlock | ToolUseBlock;
 export type ContentBlockParam = TextBlock | ToolUseBlock | ToolResultBlock;
 
+/**
+ * A content block exactly as the API returned it. Assistant turns are replayed
+ * from these, never from the typed view: `thinking` blocks carry a signature
+ * bound to the conversation, so they must go back byte-for-byte or not at all.
+ */
+export type RawContentBlock = { type: string } & Record<string, unknown>;
+
 export interface ConversationMessage {
   role: 'user' | 'assistant';
-  content: string | ContentBlockParam[];
+  content: string | Array<ContentBlockParam | RawContentBlock>;
 }
 
 export interface ConversationRequest {
@@ -51,10 +58,17 @@ export interface ConversationRequest {
 }
 
 export interface ConversationResponse {
-  /** Text and tool_use blocks, in model order */
+  /** Text and tool_use blocks, in model order (thinking blocks are not here) */
   content: ContentBlock[];
-  /** 'end_turn', 'tool_use', 'max_tokens', ... */
+  /**
+   * Every block of the assistant turn, unmodified, thinking included. Append
+   * this — not `content` — when sending the turn back in a tool loop.
+   */
+  rawContent?: RawContentBlock[];
+  /** 'end_turn', 'tool_use', 'max_tokens', 'refusal', ... */
   stopReason?: string;
+  /** `stop_details.category` of a refusal. Informational; may be null. */
+  refusalCategory?: string | null;
   usage?: TokenUsage;
 }
 
