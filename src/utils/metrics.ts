@@ -138,7 +138,7 @@ export type SenderHistoryOutcome =
   | 'cache_hit'
   | 'skipped' // no single external sender address of an ordinary shape
   | 'timeout'
-  | 'forbidden' // message trace answered 403
+  | 'forbidden' // every message trace request answered 403, retries included
   | 'cooldown' // a recent 403; the API is being left alone
   | 'rate_limited' // this instance's own trace allowance is used up
   | 'error';
@@ -149,6 +149,8 @@ export interface SenderHistoryMetric {
   /** Code-computed classification (an enum, never an address) */
   classification?: string;
   truncated?: boolean;
+  /** Retries made because a trace request answered 403 (the service does so intermittently) */
+  forbiddenRetries?: number;
 }
 
 /**
@@ -172,6 +174,7 @@ export function emitSenderHistoryMetric(metric: SenderHistoryMetric): void {
             { Name: 'SenderHistoryDurationMs', Unit: 'Milliseconds' },
             { Name: 'SenderHistoryAnomalousFanout', Unit: 'Count' },
             { Name: 'SenderHistoryTruncated', Unit: 'Count' },
+            { Name: 'SenderHistoryForbiddenRetries', Unit: 'Count' },
           ],
         },
       ],
@@ -183,6 +186,7 @@ export function emitSenderHistoryMetric(metric: SenderHistoryMetric): void {
     SenderHistoryAnomalousFanout:
       metric.classification === 'established_with_anomalous_fanout' ? 1 : 0,
     SenderHistoryTruncated: metric.truncated ? 1 : 0,
+    SenderHistoryForbiddenRetries: metric.forbiddenRetries ?? 0,
   };
 
   process.stdout.write(`${JSON.stringify(emf)}\n`);

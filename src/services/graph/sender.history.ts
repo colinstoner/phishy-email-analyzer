@@ -87,7 +87,20 @@ const MAX_CONCURRENT_REQUESTS = 6;
  */
 export const REQUEST_ALLOWANCE_PER_5_MIN = 60;
 const REQUEST_ALLOWANCE_WINDOW_MS = 5 * 60 * 1000;
-/** After a 403 the trace API is left alone for this long */
+/**
+ * Message trace can answer 403 intermittently (for hours after its service
+ * principal is created, identical requests alternate between 200 and 403),
+ * so one 403 says little. A request that gets one is retried this many
+ * times, waiting `FORBIDDEN_RETRY_DELAY_MS` x the attempt number in between,
+ * inside the lookup's deadline and the instance's request allowance.
+ */
+export const FORBIDDEN_RETRIES = 3;
+export const FORBIDDEN_RETRY_DELAY_MS = 250;
+/**
+ * When a lookup ends on a 403 and no request in it ever succeeded, the
+ * problem is permission or provisioning: the trace API is left alone for
+ * this long
+ */
 export const FORBIDDEN_COOLDOWN_MS = 5 * 60 * 1000;
 /** Results are reused per sender address for this long (a campaign produces many reports of one sender) */
 export const CACHE_TTL_MS = 5 * 60 * 1000;
@@ -451,6 +464,32 @@ interface CacheEntry {
 export interface SenderHistoryDeps {
   /** Injected for tests; defaults to `Date.now` */
   now?: () => number;
+  /** Injected for tests; defaults to a timer that ends early when the signal aborts */
+  sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
+}
+
+/** What one lookup's trace requests met, for classifying a failure and for the metric */
+interface LookupStats {
+  /** Trace operations that returned rows */
+  succeeded: number;
+  /** Retries made after a 403 */
+  forbiddenRetries: number;
+}
+
+function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise(resolve => {
+    if (signal.aborted) {
+      resolve();
+      return;
+    }
+    const done = (): void => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener('abort', done, { once: true });
+  });
 }
 
 export class SenderHistoryService {
@@ -460,6 +499,7 @@ export class SenderHistoryService {
   private requestLog: number[] = [];
   private forbiddenUntil = 0;
   private readonly now: () => number;
+  private readonly sleep: (ms: number, signal: AbortSignal) => Promise<void>;
 
   constructor(
     private readonly client: GraphClient,
@@ -467,6 +507,7 @@ export class SenderHistoryService {
     deps: SenderHistoryDeps = {}
   ) {
     this.now = deps.now ?? Date.now;
+    this.sleep = deps.sleep ?? abortableSleep;
     this.freeMail = new Set(
       [...FREE_MAIL_DOMAINS, ...settings.freeMailDomains].map(domain => domain.toLowerCase())
     );
@@ -492,6 +533,7 @@ export class SenderHistoryService {
 
   private async lookup(emailData: ExtractedEmailData): Promise<SenderHistoryFacts | undefined> {
     const startedAt = this.now();
+    const stats: LookupStats = { succeeded: 0, forbiddenRetries: 0 };
     const finish = (
       outcome: SenderHistoryOutcome,
       facts?: SenderHistoryFacts
@@ -501,6 +543,7 @@ export class SenderHistoryService {
         durationMs: Math.max(0, this.now() - startedAt),
         classification: facts?.classification,
         truncated: facts?.truncated,
+        forbiddenRetries: stats.forbiddenRetries,
       });
       return facts;
     };
@@ -558,6 +601,7 @@ export class SenderHistoryService {
         burstStartMs,
         nowMs,
         signal: controller.signal,
+        stats,
       });
       // The deadline wins even if a request ignores cancellation
       collected.catch(() => undefined);
@@ -582,12 +626,13 @@ export class SenderHistoryService {
         truncated: facts.truncated,
         windows: windows.length,
         queryTypes,
+        forbiddenRetries: stats.forbiddenRetries,
       });
       logger.debug('Sender history subject', { senderHash: key.slice(0, 12) });
       return finish('ok', facts);
     } catch (error) {
       controller.abort();
-      return finish(this.classifyFailure(error));
+      return finish(this.classifyFailure(error, stats));
     } finally {
       clearTimeout(timer);
     }
@@ -631,7 +676,7 @@ export class SenderHistoryService {
     address: string,
     domain: string | undefined,
     windows: TraceWindow[],
-    context: { burstStartMs: number; nowMs: number; signal: AbortSignal }
+    context: { burstStartMs: number; nowMs: number; signal: AbortSignal; stats: LookupStats }
   ): Promise<Pick<SenderHistoryInput, 'inbound' | 'outbound' | 'domain'>> {
     const options: TraceOptions = {
       maxItems: TRACE_ROWS_PER_WINDOW,
@@ -648,7 +693,8 @@ export class SenderHistoryService {
     const into =
       (target: TraceRows, window: TraceWindow, run: () => Promise<BoundedResult<MessageTrace>>) =>
       async (): Promise<void> => {
-        const result = await run();
+        const result = await this.retryingForbidden(run, context.signal, context.stats);
+        context.stats.succeeded++;
         target.rows.push(...result.items);
         // A second page was requested when more than one page of rows came back
         if (result.truncated || result.items.length > TRACE_ROWS_PER_WINDOW / 2) {
@@ -691,8 +737,35 @@ export class SenderHistoryService {
     return { inbound, outbound, domain: domainRows };
   }
 
+  /**
+   * Run one trace operation, retrying it when it answers 403. Each retry is
+   * one more request against the instance's allowance; when the allowance or
+   * the retries run out, or the deadline has passed, the 403 stands.
+   */
+  private async retryingForbidden<T>(
+    run: () => Promise<T>,
+    signal: AbortSignal,
+    stats: LookupStats
+  ): Promise<T> {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await run();
+      } catch (error) {
+        const forbidden = error instanceof GraphError && error.status === 403;
+        if (!forbidden || attempt > FORBIDDEN_RETRIES || signal.aborted) {
+          throw error;
+        }
+        await this.sleep(FORBIDDEN_RETRY_DELAY_MS * attempt, signal);
+        if (signal.aborted || !this.reserveRequests(1, this.now())) {
+          throw error;
+        }
+        stats.forbiddenRetries++;
+      }
+    }
+  }
+
   /** Map a failure to a metric outcome and log it without any request data */
-  private classifyFailure(error: unknown): SenderHistoryOutcome {
+  private classifyFailure(error: unknown, stats: LookupStats): SenderHistoryOutcome {
     if (error instanceof BudgetExceededError) {
       logger.warn('Sender history skipped: time budget exceeded', {
         budgetMs: this.settings.budgetMs,
@@ -700,13 +773,23 @@ export class SenderHistoryService {
       return 'timeout';
     }
     if (error instanceof GraphError) {
+      if (error.status === 403 && stats.succeeded > 0) {
+        // Other requests in this lookup worked: the service is flapping, not
+        // refusing. No cooldown, so the next report tries again.
+        logger.warn('Sender history skipped: message trace kept answering 403 intermittently', {
+          code: error.code,
+          requestId: error.requestId,
+          forbiddenRetries: stats.forbiddenRetries,
+        });
+        return 'error';
+      }
       if (error.status === 403) {
         this.forbiddenUntil = this.now() + FORBIDDEN_COOLDOWN_MS;
         logger.warn(
           'Sender history skipped: message trace returned 403. Check that the read app has ' +
             'ExchangeMessageTrace.Read.All with admin consent and that the message trace service ' +
             'principal exists in the tenant; not retrying for a few minutes',
-          { code: error.code, requestId: error.requestId }
+          { code: error.code, requestId: error.requestId, forbiddenRetries: stats.forbiddenRetries }
         );
         return 'forbidden';
       }

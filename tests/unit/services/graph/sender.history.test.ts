@@ -7,9 +7,12 @@
 import {
   CACHE_TTL_MS,
   FORBIDDEN_COOLDOWN_MS,
+  FORBIDDEN_RETRIES,
+  FORBIDDEN_RETRY_DELAY_MS,
   GraphAccessTokenProvider,
   GraphClient,
   MessageTrace,
+  REQUEST_ALLOWANCE_PER_5_MIN,
   SenderHistoryService,
   SenderHistorySettings,
   TRACE_MAX_WINDOW_MS,
@@ -642,22 +645,131 @@ describe('SenderHistoryService', () => {
     expect(outcomes()).toEqual(['ok', 'cache_hit', 'ok']);
   });
 
-  it('returns nothing on a 403 and leaves the API alone for a while', async () => {
-    const graph = fakeGraph([() => graphErrorResponse(403, 'Forbidden', `denied for ${SENDER}`)]);
-    const service = new SenderHistoryService(graph.client, SETTINGS, { now });
+  describe('intermittent 403 from message trace', () => {
+    const NEWEST = 'receivedDateTime le 2026-11-17T12:00:00Z';
+    let delays: number[];
+    const sleep = (ms: number): Promise<void> => {
+      delays.push(ms);
+      return Promise.resolve();
+    };
+    const denied = (): Response =>
+      graphErrorResponse(403, 'Forbidden', `service principal not found for ${SENDER}`);
+    const retriesReported = (): number[] =>
+      metricSpy.mock.calls.map(
+        call => (call[0] as metrics.SenderHistoryMetric).forbiddenRetries ?? -1
+      );
 
-    expect(await service.lookupForEmail(email(SENDER))).toBeUndefined();
-    const afterFirst = graph.requests.length;
-    expect(afterFirst).toBeGreaterThan(0);
-    expect(afterFirst).toBeLessThanOrEqual(9);
+    beforeEach(() => {
+      delays = [];
+    });
 
-    expect(await service.lookupForEmail(email('other@supplier.example.net'))).toBeUndefined();
-    expect(graph.requests).toHaveLength(afterFirst);
+    it('retries a request that got a 403 and still returns facts', async () => {
+      let calls = 0;
+      const data = traceResponder({ inbound: blast(3) });
+      const graph = fakeGraph([request => (calls++ % 4 === 0 ? denied() : data(request))]);
+      const service = new SenderHistoryService(graph.client, SETTINGS, { now, sleep });
 
-    clock += FORBIDDEN_COOLDOWN_MS + 1000;
-    await service.lookupForEmail(email('other@supplier.example.net'));
-    expect(graph.requests.length).toBeGreaterThan(afterFirst);
-    expect(outcomes()).toEqual(['forbidden', 'cooldown', 'forbidden']);
+      const facts = await service.lookupForEmail(email(SENDER));
+
+      expect(facts?.burst.recipients.count).toBe(3);
+      expect(outcomes()).toEqual(['ok']);
+      const [retries] = retriesReported();
+      expect(retries).toBeGreaterThanOrEqual(2);
+      expect(graph.requests).toHaveLength(9 + retries);
+      expect(delays).toHaveLength(retries);
+      expect(delays.every(ms => ms === FORBIDDEN_RETRY_DELAY_MS)).toBe(true);
+      expect(graph.requests.every(r => r.method === 'GET' && r.path === TRACE_PATH)).toBe(true);
+    });
+
+    it('backs off a little more on each retry of the same request', async () => {
+      const attempts = new Map<string, number>();
+      const graph = fakeGraph([
+        request => {
+          const seen = (attempts.get(request.query.$filter) ?? 0) + 1;
+          attempts.set(request.query.$filter, seen);
+          return seen <= FORBIDDEN_RETRIES ? denied() : collection([]);
+        },
+      ]);
+      const service = new SenderHistoryService(
+        graph.client,
+        { ...SETTINGS, lookbackDays: 14, includeDomain: false },
+        { now, sleep }
+      );
+
+      expect(await service.lookupForEmail(email(SENDER))).toBeDefined();
+      // 4 requests, each succeeding on its last allowed attempt
+      expect(graph.requests).toHaveLength(4 * (FORBIDDEN_RETRIES + 1));
+      expect(retriesReported()).toEqual([4 * FORBIDDEN_RETRIES]);
+      expect(new Set(delays)).toEqual(new Set([250, 500, 750]));
+    });
+
+    it('is forbidden, with a cooldown, only when nothing in the lookup succeeded', async () => {
+      const graph = fakeGraph([denied]);
+      const service = new SenderHistoryService(graph.client, SETTINGS, { now, sleep });
+
+      expect(await service.lookupForEmail(email(SENDER))).toBeUndefined();
+      const afterFirst = graph.requests.length;
+      // Every request that started was tried once and retried three times
+      expect(afterFirst).toBeGreaterThanOrEqual(FORBIDDEN_RETRIES + 1);
+      expect(afterFirst).toBeLessThanOrEqual(9 * (FORBIDDEN_RETRIES + 1));
+
+      expect(await service.lookupForEmail(email('other@supplier.example.net'))).toBeUndefined();
+      expect(graph.requests).toHaveLength(afterFirst);
+
+      clock += FORBIDDEN_COOLDOWN_MS + 1000;
+      await service.lookupForEmail(email('other@supplier.example.net'));
+      expect(graph.requests.length).toBeGreaterThan(afterFirst);
+      expect(outcomes()).toEqual(['forbidden', 'cooldown', 'forbidden']);
+      expect(retriesReported()[0]).toBeGreaterThanOrEqual(FORBIDDEN_RETRIES);
+    });
+
+    it('is an ordinary error, with no cooldown, when one request stays 403 while others work', async () => {
+      const stuck = (request: RecordedRequest): boolean =>
+        request.query.$filter.includes('recipientAddress eq') &&
+        request.query.$filter.includes(NEWEST);
+      const graph = fakeGraph([request => (stuck(request) ? denied() : collection([]))]);
+      const service = new SenderHistoryService(graph.client, SETTINGS, { now, sleep });
+
+      // All-or-nothing: eight good windows are not turned into partial counts
+      expect(await service.lookupForEmail(email(SENDER))).toBeUndefined();
+      expect(graph.requests.filter(stuck)).toHaveLength(FORBIDDEN_RETRIES + 1);
+      const afterFirst = graph.requests.length;
+
+      expect(await service.lookupForEmail(email('other@supplier.example.net'))).toBeUndefined();
+      expect(graph.requests.length).toBeGreaterThan(afterFirst);
+      expect(outcomes()).toEqual(['error', 'error']);
+      expect(retriesReported()).toEqual([FORBIDDEN_RETRIES, FORBIDDEN_RETRIES]);
+    });
+
+    it('stops retrying at the deadline', async () => {
+      const graph = fakeGraph([denied]);
+      // Real timers: the 250 ms retry delay outlasts the 60 ms budget
+      const service = new SenderHistoryService(graph.client, { ...SETTINGS, budgetMs: 60 }, { now });
+
+      expect(await service.lookupForEmail(email(SENDER))).toBeUndefined();
+      const atDeadline = graph.requests.length;
+      expect(atDeadline).toBeLessThanOrEqual(6); // one attempt per request in flight
+
+      await new Promise(resolve => setTimeout(resolve, 400));
+      expect(graph.requests).toHaveLength(atDeadline);
+      expect(outcomes()).toEqual(['timeout']);
+      expect(retriesReported()).toEqual([0]);
+
+      // Not a verdict on permissions: the next report tries again
+      await service.lookupForEmail(email('other@supplier.example.net'));
+      expect(graph.requests.length).toBeGreaterThan(atDeadline);
+    });
+
+    it('stops retrying when the instance allowance is used up', async () => {
+      const graph = fakeGraph([denied]);
+      const service = new SenderHistoryService(graph.client, SETTINGS, { now, sleep });
+      for (let i = 0; i < 4; i++) {
+        clock += FORBIDDEN_COOLDOWN_MS / 10; // stay inside one 5-minute allowance window
+        (service as unknown as { forbiddenUntil: number }).forbiddenUntil = 0;
+        await service.lookupForEmail(email(`sender${i}@supplier.example.net`));
+      }
+      expect(graph.requests.length).toBeLessThanOrEqual(REQUEST_ALLOWANCE_PER_5_MIN);
+    });
   });
 
   it('returns nothing when any window fails, rather than partial counts', async () => {

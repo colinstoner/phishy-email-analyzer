@@ -225,7 +225,7 @@ When a known external contact's mailbox is taken over, the attacker's mail comes
 
 File configuration uses `graph.senderHistory.*` with the same names (`enabled`, `lookbackDays`, `burstWindowHours`, `budgetMs`, `includeDomain`, `freeMailDomains`, `fanoutMinRecipients`, `fanoutMultiplier`).
 
-**Permission.** Add the Microsoft Graph application permission `ExchangeMessageTrace.Read.All` to the read app registration and grant admin consent. Message trace also depends on a Microsoft-owned service principal existing in the tenant; `npm run graph:probe` ([GRAPH_PROBE.md](GRAPH_PROBE.md)) tells you whether trace calls work before you turn this on. Until they do, the endpoint answers 403: Phishy then analyzes exactly as it would with the check off, emits `Outcome=forbidden`, and leaves the API alone for five minutes.
+**Permission.** Add the Microsoft Graph application permission `ExchangeMessageTrace.Read.All` to the read app registration and grant admin consent. Message trace also depends on a Microsoft-owned service principal existing in the tenant; `npm run graph:probe` ([GRAPH_PROBE.md](GRAPH_PROBE.md)) tells you whether trace calls work before you turn this on. Message trace can answer 403 *intermittently* — for some hours after that service principal is created, identical requests alternate between 200 and 403 — so a request that gets a 403 is retried up to 3 times (250, 500, 750 ms apart) inside the lookup's deadline and request allowance; `SenderHistoryForbiddenRetries` counts those retries. Only when a lookup ends on a 403 and **no** request in it succeeded does Phishy treat it as a permission or provisioning problem: it emits `Outcome=forbidden` and leaves the API alone for five minutes. A request that still gets 403 after its retries while others succeeded is an ordinary `Outcome=error` with no pause. Either way the email is analyzed exactly as it would be with the check off.
 
 **What is computed.** The lookback is split into a *burst window* and a *history period*. The burst window starts `burstWindowHours` before the email's own date and always ends at lookup time (the email's date is claimed text, so it can only move the start back, by at most 7 days; if it does not parse, "now" is used). Everything in the lookback before that is history.
 
@@ -250,13 +250,13 @@ File configuration uses `graph.senderHistory.*` with the same names (`enabled`, 
 
 **Bounds and honesty.**
 
-- One trace query covers at most 10 days, so a lookup makes one request per 10-day window per query type (mail from the address, mail to the address, mail from the domain): **9 requests** at the defaults, 6 without domain history, 27 at a 90-day lookback. They run in parallel, at most 6 at a time, under the single `budgetMs` deadline; requests still in flight at the deadline are cancelled.
+- One trace query covers at most 10 days, so a lookup makes one request per 10-day window per query type (mail from the address, mail to the address, mail from the domain): **9 requests** at the defaults, 6 without domain history, 27 at a 90-day lookback (each may be retried up to 3 times on a 403, counted against the allowance below). They run in parallel, at most 6 at a time, under the single `budgetMs` deadline; requests still in flight at the deadline are cancelled.
 - Each window keeps at most 2000 rows (at most two requests). When a sender exceeds that, the affected counts are reported as **"at least N"** to the model and in the report, the number of new recipients is reported as undeterminable, and fan-out is not judged.
 - Message trace allows 100 requests per 5 minutes per tenant. Each Lambda instance spends at most 60 of them per 5 minutes on this check, then skips it (`Outcome=rate_limited`). Results are reused per sender address for 5 minutes within an instance.
 - Any failure — timeout, 403, a failed window — means no facts at all rather than partial counts, and the analysis proceeds exactly as it would with the check off.
 - The sender address is taken from the forwarded message's `From:` line and must be a single, plain ASCII address on a domain outside `SAFE_DOMAINS`; anything else is not looked up. It is never logged, and it is not repeated in the facts given to the model. Recipient addresses and IPs are never shown to the model, logged, stored or put in the report — counts only. Nothing is written to the database.
 
-**Metrics** (namespace `Phishy`, dimension `Outcome` = `ok`, `cache_hit`, `skipped`, `timeout`, `forbidden`, `cooldown`, `rate_limited`, `error`): `SenderHistoryLookups`, `SenderHistoryDurationMs`, `SenderHistoryAnomalousFanout`, `SenderHistoryTruncated`.
+**Metrics** (namespace `Phishy`, dimension `Outcome` = `ok`, `cache_hit`, `skipped`, `timeout`, `forbidden`, `cooldown`, `rate_limited`, `error`): `SenderHistoryLookups`, `SenderHistoryDurationMs`, `SenderHistoryAnomalousFanout`, `SenderHistoryTruncated`, `SenderHistoryForbiddenRetries`.
 
 ### AWS Secrets Manager Integration
 

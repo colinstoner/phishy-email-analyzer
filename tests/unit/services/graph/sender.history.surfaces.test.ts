@@ -350,6 +350,7 @@ describe('emitSenderHistoryMetric', () => {
       durationMs: 1800,
       classification: 'established_with_anomalous_fanout',
       truncated: true,
+      forbiddenRetries: 2,
     });
     expect(stdoutSpy).toHaveBeenCalledTimes(1);
     const doc = JSON.parse(stdoutSpy.mock.calls[0][0] as string);
@@ -362,6 +363,7 @@ describe('emitSenderHistoryMetric', () => {
       SenderHistoryDurationMs: 1800,
       SenderHistoryAnomalousFanout: 1,
       SenderHistoryTruncated: 1,
+      SenderHistoryForbiddenRetries: 2,
     });
   });
 
@@ -373,6 +375,7 @@ describe('emitSenderHistoryMetric', () => {
       Classification: 'none',
       SenderHistoryAnomalousFanout: 0,
       SenderHistoryTruncated: 0,
+      SenderHistoryForbiddenRetries: 0,
     });
   });
 
