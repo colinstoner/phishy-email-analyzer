@@ -27,7 +27,9 @@ import {
   emitAIUsageMetric,
   emitAnalysisFailureMetric,
   emitCampaignCacheHitMetric,
+  emitUserReportMetric,
 } from '../utils/metrics';
+import { shouldNotifySecurityTeam } from '../services/email/user.report';
 import { ReportOptions } from '../templates/report.html';
 import { EmailCommandService } from '../services/commands/email.command.service';
 import { AgenticAnalyzer } from '../services/ai/agentic/agentic.analyzer';
@@ -172,7 +174,8 @@ async function initializeServices(): Promise<{
   const emailParser = new EmailParserService(
     s3Service,
     config.email.safeDomains,
-    config.storage.s3Bucket
+    config.storage.s3Bucket,
+    { detectUserReports: !!config.reportButton?.enabled }
   );
 
   // Create AI provider(s)
@@ -407,6 +410,26 @@ async function processEmailEvent(
     return validationResult;
   }
 
+  // Outlook Report-button submissions: nobody is waiting for an answer, so
+  // these are handled without emailing the reporter. Junk / not-junk reports
+  // are mailbox hygiene, not a question for Phishy — count them and stop.
+  const userReport = emailData.userReport;
+  if (userReport) {
+    emitUserReportMetric(userReport.reportedAs);
+    if (userReport.reportedAs !== 'phishing') {
+      logger.info('Report-button submission is not a phishing report — skipping analysis', {
+        reporter: emailData.from_email,
+        reportedAs: userReport.reportedAs,
+      });
+      await cleanupStoredEmail(msg, config, services);
+      return { status: 'skipped', reason: `user_report_${userReport.reportedAs}` };
+    }
+    logger.info('Report-button phishing submission — analyzing silently', {
+      reporter: emailData.from_email,
+      networkMessageId: userReport.networkMessageId,
+    });
+  }
+
   // Check if sender is a safelist user (not enterprise domain)
   // Safelist users bypass enterprise profile for basic analysis
   const isSafelistUser = config.email.safeSenders.some(
@@ -635,6 +658,21 @@ async function processEmailEvent(
     }
   }
 
+  // Report-button submissions never produce a reply to the reporter. The
+  // security team is told only when the outcome warrants their attention.
+  if (userReport) {
+    return finishSilentUserReport(msg, emailData, analysis, config, services, {
+      storedAnalysisId,
+      risk: {
+        verdict: riskDecision.verdict,
+        riskScore: riskDecision.riskScore,
+        riskLevel: riskDecision.riskLevel,
+        reasons: riskDecision.reasons,
+      },
+      isPhishing: riskDecision.isPhishing,
+    });
+  }
+
   // Determine recipient
   const recipient = determineRecipient(emailData);
 
@@ -674,11 +712,7 @@ async function processEmailEvent(
       }
     }
 
-    // Delete from S3 if configured
-    if (config.email.deleteAfterProcessing && msg.s3Location) {
-      logger.info('Cleaning up S3 object');
-      await services.s3Service.deleteObject(msg.s3Location.bucket, msg.s3Location.key);
-    }
+    await cleanupStoredEmail(msg, config, services);
 
     return {
       status: 'processed',
@@ -689,6 +723,93 @@ async function processEmailEvent(
 
   logger.warn('Cannot send analysis - invalid recipient', { recipient });
   return { status: 'incomplete', reason: 'invalid_recipient' };
+}
+
+/**
+ * Delete the raw email from S3 when configured to
+ */
+async function cleanupStoredEmail(
+  msg: EmailMessage,
+  config: PhishyConfig,
+  services: NonNullable<typeof cachedServices>
+): Promise<void> {
+  if (config.email.deleteAfterProcessing && msg.s3Location) {
+    logger.info('Cleaning up S3 object');
+    await services.s3Service.deleteObject(msg.s3Location.bucket, msg.s3Location.key);
+  }
+}
+
+/**
+ * Finish an Outlook Report-button phishing submission. The reporter is never
+ * emailed; the analysis has already been stored and counted toward campaign
+ * detection. The security team — operator-configured addresses, never anything
+ * derived from the message — gets the report when the verdict is malicious or
+ * suspicious, or when the analysis could not be completed.
+ */
+async function finishSilentUserReport(
+  msg: EmailMessage,
+  emailData: ExtractedEmailData,
+  analysis: AnalysisResult,
+  config: PhishyConfig,
+  services: NonNullable<typeof cachedServices>,
+  outcome: {
+    storedAnalysisId?: string;
+    risk: NonNullable<ReportOptions['risk']>;
+    isPhishing: boolean;
+  }
+): Promise<ProcessingResult> {
+  const securityTeam = config.notification.securityTeamDistribution;
+  const notify = shouldNotifySecurityTeam({
+    isPhishing: outcome.isPhishing,
+    verdict: outcome.risk.verdict,
+    analysisFailed: analysis.analysisFailed,
+  });
+
+  if (!notify || securityTeam.length === 0) {
+    logger.info('Report-button submission recorded — no notification sent', {
+      reporter: emailData.from_email,
+      verdict: outcome.risk.verdict,
+      hasSecurityTeam: securityTeam.length > 0,
+    });
+    await cleanupStoredEmail(msg, config, services);
+    return { status: 'processed', reason: 'user_report_recorded' };
+  }
+
+  const [primary, ...others] = securityTeam;
+  const emailResult = await services.sesNotifier.sendAnalysisReport(
+    primary,
+    analysis,
+    emailData,
+    others,
+    {
+      ...(outcome.storedAnalysisId ? { analysisId: outcome.storedAnalysisId } : {}),
+      risk: outcome.risk,
+      silentReport: { reporter: emailData.from_email },
+    }
+  );
+
+  // Remember the outbound message ID so security-team replies (commands)
+  // can be matched back to this analysis
+  if (outcome.storedAnalysisId && emailResult.messageId && services.intelligenceDb) {
+    try {
+      await services.intelligenceDb.setReportMessageId(
+        outcome.storedAnalysisId,
+        emailResult.messageId
+      );
+    } catch (linkError) {
+      logger.warn('Failed to store report message ID', {
+        error: linkError instanceof Error ? linkError.message : String(linkError),
+      });
+    }
+  }
+
+  await cleanupStoredEmail(msg, config, services);
+  return {
+    status: 'processed',
+    recipient: primary,
+    messageId: emailResult.messageId,
+    reason: 'user_report_security_notified',
+  };
 }
 
 /**

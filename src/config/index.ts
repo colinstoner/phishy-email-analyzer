@@ -67,9 +67,18 @@ const ENV_MAPPINGS: Record<string, string> = {
   // Email commands
   PHISHY_EMAIL_COMMANDS_ENABLED: 'commands.enabled',
 
+  // Outlook Report-button intake
+  PHISHY_REPORT_BUTTON_ENABLED: 'reportButton.enabled',
+
   // Agentic analysis
   PHISHY_AGENTIC_ENABLED: 'agentic.enabled',
   PHISHY_AGENTIC_MAX_TOOL_ROUNDS: 'agentic.maxToolRounds',
+
+  // Microsoft Graph (optional; certificate is a Secrets Manager ARN or inline PEM)
+  PHISHY_GRAPH_ENABLED: 'graph.enabled',
+  PHISHY_GRAPH_TENANT_ID: 'graph.tenantId',
+  PHISHY_GRAPH_READ_CLIENT_ID: 'graph.read.clientId',
+  PHISHY_GRAPH_READ_CERTIFICATE: 'graph.read.certificate',
 
   // Profile
   PHISHY_PROFILE: 'profile',

@@ -25,6 +25,7 @@ All five must pass before a commit. CI runs them on Node 18/20/22.
 3. **Agentic tools touch only Phishy's own data or pure computation.** No network fetches, no URL retrieval, no open-ended browsing. New tools must follow this rule and treat their inputs (model-authored, derived from hostile content) as data: hashed lookups, parameterized SQL, string comparison.
 4. **`originalForwarder` decides who receives reports** — every source for it must yield an extractable address on a safe domain.
 5. **Bounding must be adversarial.** Any truncation or budget must survive padding attacks (head+tail, domain-diverse selection) and be disclosed to the model as an elision fact.
+6. **Microsoft Graph access is code-driven, never model-driven.** Fixed endpoints on the organization's own tenant; every request is built by code from parsed, escaped values (`graphPath`, `odataFilter` in `services/graph/`). The model never authors a URL, filter or query, and Graph is not an agentic tool. Content read from any mailbox other than the reporter's is metadata-only toward the model and logs. Reads and writes use separate app registrations, each with a certificate (never a client secret). Any write to the tenant requires security-team approval through the authenticated command channel (invariant 2).
 
 ## Conventions
 
@@ -46,6 +47,7 @@ src/
   services/ai/agentic/              tool loop + the four bounded tools
   services/commands/                security-team email command channel
   services/intelligence/            PostgreSQL intel, campaigns, verdict cache
+  services/graph/                   optional Microsoft Graph: cert auth + constrained HTTP client
   utils/canonicalize.ts             hostile-text normalization + URL unwrapping
   config/                           Zod schema + env mappings + loading chain
 migrations/                         numbered SQL, applied manually past 001

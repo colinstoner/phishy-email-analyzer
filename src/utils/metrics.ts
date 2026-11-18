@@ -168,3 +168,32 @@ export function emitCampaignCacheHitMetric(estimatedCostSavedUsd: number): void 
 
   process.stdout.write(`${JSON.stringify(emf)}\n`);
 }
+
+/**
+ * Emit an Outlook Report-button submission. Dimensioned by what the employee
+ * chose (phishing / junk / not_junk). Button reports arrive through an
+ * organization-side mail setting Phishy cannot see, so this count is the only
+ * signal that intake is still flowing — alarm on it going quiet.
+ */
+export function emitUserReportMetric(reportedAs: string): void {
+  if (process.env.PHISHY_DISABLE_METRICS === 'true') {
+    return;
+  }
+
+  const emf = {
+    _aws: {
+      Timestamp: Date.now(),
+      CloudWatchMetrics: [
+        {
+          Namespace: NAMESPACE,
+          Dimensions: [['ReportedAs'], []],
+          Metrics: [{ Name: 'UserReports', Unit: 'Count' }],
+        },
+      ],
+    },
+    ReportedAs: reportedAs,
+    UserReports: 1,
+  };
+
+  process.stdout.write(`${JSON.stringify(emf)}\n`);
+}

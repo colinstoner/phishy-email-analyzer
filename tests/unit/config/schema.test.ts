@@ -252,5 +252,108 @@ describe('PhishyConfigSchema', () => {
       const result = validateConfig(config);
       expect(result.intelligence?.type).toBe('dynamodb');
     });
+
+    it('should leave Outlook Report-button intake off unless enabled', () => {
+      expect(validateConfig(validConfig).reportButton).toBeUndefined();
+      expect(validateConfig({ ...validConfig, reportButton: {} }).reportButton?.enabled).toBe(
+        false
+      );
+      expect(
+        validateConfig({ ...validConfig, reportButton: { enabled: true } }).reportButton?.enabled
+      ).toBe(true);
+    });
+  });
+
+  describe('Microsoft Graph configuration validation', () => {
+    const TENANT_ID = 'aaaaaaaa-1111-4222-8333-bbbbbbbbbbbb';
+    const CLIENT_ID = 'cccccccc-4444-4555-8666-dddddddddddd';
+    const SECRET_ARN =
+      'arn:aws:secretsmanager:us-east-1:000000000000:secret:phishy/graph-read-AbCdEf';
+    const enabledGraph = {
+      enabled: true,
+      tenantId: TENANT_ID,
+      read: { clientId: CLIENT_ID, certificate: SECRET_ARN },
+    };
+
+    const issuePaths = (graph: unknown): string[] => {
+      const result = safeValidateConfig({ ...validConfig, graph });
+      return (result.errors?.issues ?? []).map(issue => issue.path.join('.'));
+    };
+
+    it('is optional and off by default', () => {
+      expect(validateConfig(validConfig).graph).toBeUndefined();
+      expect(validateConfig({ ...validConfig, graph: {} }).graph).toEqual({ enabled: false });
+    });
+
+    it('accepts a complete enabled configuration', () => {
+      const result = validateConfig({ ...validConfig, graph: enabledGraph });
+      expect(result.graph).toEqual(enabledGraph);
+    });
+
+    it('accepts a tenant domain name and an inline PEM certificate', () => {
+      const result = validateConfig({
+        ...validConfig,
+        graph: {
+          enabled: true,
+          tenantId: 'tenant.example.com',
+          read: { clientId: CLIENT_ID, certificate: '-----BEGIN PRIVATE KEY-----\n...' },
+        },
+      });
+      expect(result.graph?.tenantId).toBe('tenant.example.com');
+    });
+
+    it('requires tenantId, read.clientId and read.certificate when enabled', () => {
+      expect(issuePaths({ enabled: true })).toEqual([
+        'graph.tenantId',
+        'graph.read.clientId',
+        'graph.read.certificate',
+      ]);
+      expect(issuePaths({ ...enabledGraph, tenantId: undefined })).toEqual(['graph.tenantId']);
+      expect(issuePaths({ ...enabledGraph, read: { certificate: SECRET_ARN } })).toEqual([
+        'graph.read.clientId',
+      ]);
+      expect(issuePaths({ ...enabledGraph, read: { clientId: CLIENT_ID } })).toEqual([
+        'graph.read.certificate',
+      ]);
+      expect(
+        issuePaths({ ...enabledGraph, read: { clientId: CLIENT_ID, certificate: '   ' } })
+      ).toEqual(['graph.read.certificate']);
+    });
+
+    it('rejects identifiers that are not well formed when enabled', () => {
+      expect(issuePaths({ ...enabledGraph, tenantId: 'common/../other' })).toEqual([
+        'graph.tenantId',
+      ]);
+      expect(issuePaths({ ...enabledGraph, tenantId: 'not a tenant' })).toEqual(['graph.tenantId']);
+      expect(
+        issuePaths({ ...enabledGraph, read: { clientId: 'my-app', certificate: SECRET_ARN } })
+      ).toEqual(['graph.read.clientId']);
+    });
+
+    it('does not validate leftover values while disabled', () => {
+      const result = validateConfig({
+        ...validConfig,
+        graph: { enabled: false, tenantId: '', read: { clientId: '', certificate: '' } },
+      });
+      expect(result.graph?.enabled).toBe(false);
+    });
+
+    it('rejects a non-boolean enabled flag', () => {
+      expect(issuePaths({ enabled: 'yes' })).toEqual(['graph.enabled']);
+    });
+
+    it('never echoes the certificate value in a validation error', () => {
+      const result = safeValidateConfig({
+        ...validConfig,
+        graph: {
+          enabled: true,
+          tenantId: 'not a tenant',
+          read: { clientId: 'nope', certificate: 'INLINE-PEM-SECRET-MATERIAL' },
+        },
+      });
+      expect(result.success).toBe(false);
+      expect(result.errors?.message).not.toContain('INLINE-PEM-SECRET-MATERIAL');
+      expect(JSON.stringify(result.errors?.format())).not.toContain('INLINE-PEM-SECRET-MATERIAL');
+    });
   });
 });
