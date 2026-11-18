@@ -7,6 +7,7 @@ import axios from 'axios';
 import { AnthropicProvider } from '../../../../src/services/ai/anthropic.provider';
 import {
   ModelRefusalError,
+  ProviderAuthError,
   TruncatedResponseError,
 } from '../../../../src/services/ai/model.response';
 import * as metrics from '../../../../src/utils/metrics';
@@ -337,6 +338,21 @@ describe('AnthropicProvider', () => {
       expect(health.lastError).toContain('Invalid Anthropic API key');
       // Auth failures are not retried
       expect(post).toHaveBeenCalledTimes(2);
+    });
+
+    it('fails at once on a 403 without retrying', async () => {
+      post.mockRejectedValue(
+        Object.assign(new Error('Request failed with status code 403'), {
+          isAxiosError: true,
+          response: { status: 403, data: {} },
+        })
+      );
+
+      const failure = makeProvider().analyzeEmail(EMAIL);
+
+      await expect(failure).rejects.toBeInstanceOf(ProviderAuthError);
+      await expect(failure).rejects.toThrow('status 403');
+      expect(post).toHaveBeenCalledTimes(1);
     });
   });
 });

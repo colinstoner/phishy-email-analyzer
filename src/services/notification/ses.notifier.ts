@@ -5,7 +5,7 @@
 
 import { SES, SendEmailCommandOutput } from '@aws-sdk/client-ses';
 import { AnalysisResult, EmailSendResult, ExtractedEmailData } from '../../types';
-import { createLogger } from '../../utils/logger';
+import { contentFacts, createLogger } from '../../utils/logger';
 import { withRetry, isRetryableHttpError } from '../../utils/retry';
 import { buildEmailHtml, buildPlainTextReport, ReportOptions } from '../../templates/report.html';
 import { normalizeConfidence } from '../ai/provider.interface';
@@ -55,7 +55,7 @@ export class SESNotifier {
 
     logger.info('Sending analysis report', {
       recipient,
-      subject: emailData.subject,
+      subject: contentFacts(emailData.subject),
       isPhishing: analysis.isPhishing,
       ccSecurityTeam: ccAddresses,
     });

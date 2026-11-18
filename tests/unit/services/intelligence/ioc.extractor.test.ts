@@ -40,7 +40,7 @@ describe('extractIOCs', () => {
     forwardedHeaders: {},
     attachments: [],
     sender: 'sender@example.com',
-    to: 'recipient@test.org',
+    to: 'recipient@test.example',
     original_sender: 'sender@example.com',
     originalForwarder: '',
     links: [],
@@ -86,15 +86,15 @@ describe('extractIOCs', () => {
   describe('Domain extraction', () => {
     it('should extract suspicious domains', () => {
       const emailData = createMockEmailData({
-        from_email: 'security@acme-secure-login.com',
-        links: ['https://acme-secure-login.com/verify'],
+        from_email: 'security@acme-secure-login.test',
+        links: ['https://acme-secure-login.test/verify'],
       });
 
       const analysis = createMockAnalysis(true);
       const iocs = extractIOCs(emailData, analysis);
 
       const domainIOCs = iocs.filter(i => i.indicatorType === 'domain');
-      expect(domainIOCs.some(d => d.indicatorValue === 'acme-secure-login.com')).toBe(true);
+      expect(domainIOCs.some(d => d.indicatorValue === 'acme-secure-login.test')).toBe(true);
     });
 
     it('should skip safe domains', () => {
@@ -141,8 +141,8 @@ describe('extractIOCs', () => {
   describe('Email extraction', () => {
     it('should extract the original (forwarded) sender as IOC, not the reporter', () => {
       const emailData = createMockEmailData({
-        from_email: 'reporter@mycompany.com',
-        original_sender: 'Fake Support <fake-support@malicious-domain.com>',
+        from_email: 'reporter@mycompany.example',
+        original_sender: 'Fake Support <fake-support@malicious-domain.test>',
       });
 
       const analysis = createMockAnalysis(true, 'High');
@@ -150,7 +150,7 @@ describe('extractIOCs', () => {
 
       const emailIOCs = iocs.filter(i => i.indicatorType === 'email');
       expect(emailIOCs.length).toBe(1);
-      expect(emailIOCs[0].indicatorValue).toBe('fake-support@malicious-domain.com');
+      expect(emailIOCs[0].indicatorValue).toBe('fake-support@malicious-domain.test');
       expect(emailIOCs[0].metadata?.extractionContext).toBe('original_sender_email');
     });
   });
@@ -159,75 +159,75 @@ describe('extractIOCs', () => {
     const sourceContext = {
       analysisId: 'a-1',
       messageId: 'm-1',
-      reporterEmail: 'reporter@mycompany.com',
-      reporterDomain: 'mycompany.com',
+      reporterEmail: 'reporter@mycompany.example',
+      reporterDomain: 'mycompany.example',
       subject: 'Fwd: suspicious',
     };
 
     it('never emits the reporter as an indicator', () => {
       const emailData = createMockEmailData({
-        from_email: 'reporter@mycompany.com',
-        original_sender: 'reporter@mycompany.com', // parser fallback edge case
-        links: ['https://mycompany.com/legit'],
+        from_email: 'reporter@mycompany.example',
+        original_sender: 'reporter@mycompany.example', // parser fallback edge case
+        links: ['https://mycompany.example/legit'],
       });
 
       const iocs = extractIOCs(emailData, createMockAnalysis(true), {}, sourceContext);
 
-      expect(iocs.some(i => i.indicatorValue.includes('mycompany.com'))).toBe(false);
+      expect(iocs.some(i => i.indicatorValue.includes('mycompany.example'))).toBe(false);
     });
 
     it('records the reporter as provenance metadata', () => {
       const emailData = createMockEmailData({
-        from_email: 'reporter@mycompany.com',
+        from_email: 'reporter@mycompany.example',
         original_sender: 'attacker@evil.example',
       });
 
       const iocs = extractIOCs(emailData, createMockAnalysis(true), {}, sourceContext);
 
       expect(iocs.length).toBeGreaterThan(0);
-      expect(iocs.every(i => i.metadata?.reportedBy === 'reporter@mycompany.com')).toBe(true);
+      expect(iocs.every(i => i.metadata?.reportedBy === 'reporter@mycompany.example')).toBe(true);
     });
 
     it('respects configured safe domains and senders', () => {
       const emailData = createMockEmailData({
-        original_sender: 'partner@trusted-partner.com',
-        links: ['https://internal-tool.mycompany.com/page'],
+        original_sender: 'partner@trusted-partner.example',
+        links: ['https://internal-tool.mycompany.example/page'],
       });
 
       const iocs = extractIOCs(emailData, createMockAnalysis(true), {
-        safeDomains: ['mycompany.com'],
-        safeSenders: ['partner@trusted-partner.com'],
+        safeDomains: ['mycompany.example'],
+        safeSenders: ['partner@trusted-partner.example'],
       });
 
       expect(iocs.some(i => i.indicatorType === 'email')).toBe(false);
-      expect(iocs.some(i => i.indicatorValue.includes('mycompany.com'))).toBe(false);
+      expect(iocs.some(i => i.indicatorValue.includes('mycompany.example'))).toBe(false);
     });
   });
 
   describe('Redirect unwrapping', () => {
     it('surfaces the final destination behind an open redirector', () => {
       const emailData = createMockEmailData({
-        links: ['https://maps.google.si/url?q=https%3A%2F%2Fevil-landing.store%2Fpage'],
+        links: ['https://maps.redirector.example/url?q=https%3A%2F%2Fevil-landing.test%2Fpage'],
       });
 
       const iocs = extractIOCs(emailData, createMockAnalysis(true, 'Very High'));
 
       const finalDomain = iocs.find(
-        i => i.indicatorType === 'domain' && i.indicatorValue === 'evil-landing.store'
+        i => i.indicatorType === 'domain' && i.indicatorValue === 'evil-landing.test'
       );
       expect(finalDomain).toBeDefined();
       expect(finalDomain?.severity).toBe('critical');
       expect(finalDomain?.metadata?.extractionContext).toBe('final_url_domain');
 
       const finalUrl = iocs.find(
-        i => i.indicatorType === 'url' && i.indicatorValue === 'https://evil-landing.store/page'
+        i => i.indicatorType === 'url' && i.indicatorValue === 'https://evil-landing.test/page'
       );
       expect(finalUrl?.metadata?.extractionContext).toBe('final_url');
     });
 
     it('marks redirect intermediaries low severity', () => {
       const emailData = createMockEmailData({
-        links: ['https://tracker.example.net/r?url=https%3A%2F%2Fevil-landing.store%2F'],
+        links: ['https://tracker.example.net/r?url=https%3A%2F%2Fevil-landing.test%2F'],
       });
 
       const iocs = extractIOCs(emailData, createMockAnalysis(true, 'Very High'));
@@ -240,27 +240,27 @@ describe('extractIOCs', () => {
     });
 
     it('decodes JWT tracker tokens to find the destination (Feb 2026 regression)', () => {
-      // Modeled on the real campaign: google.si open redirect -> monday.com
-      // tracker whose JWT payload carries the true landing page
+      // An open redirect -> a work-platform tracker whose JWT payload carries
+      // the true landing page (all hosts invented)
       const jwtPayload = Buffer.from(
-        JSON.stringify({ originalUrl: 'https://talamalove.store/.nc', emailId: 'x' })
+        JSON.stringify({ originalUrl: 'https://lure-landing.test/.nc', emailId: 'x' })
       ).toString('base64url');
       const trackerUrl = `https://trackingservice.example.com/tracker/link?token=hdr.${jwtPayload}.sig`;
-      const outerUrl = `https://maps.google.si/url?q=${encodeURIComponent(trackerUrl)}`;
+      const outerUrl = `https://maps.redirector.example/url?q=${encodeURIComponent(trackerUrl)}`;
 
       const emailData = createMockEmailData({ links: [outerUrl] });
       const iocs = extractIOCs(emailData, createMockAnalysis(true, 'Very High'));
 
       const landing = iocs.find(
-        i => i.indicatorType === 'domain' && i.indicatorValue === 'talamalove.store'
+        i => i.indicatorType === 'domain' && i.indicatorValue === 'lure-landing.test'
       );
       expect(landing).toBeDefined();
       expect(landing?.severity).toBe('critical');
 
-      const google = iocs.find(
-        i => i.indicatorType === 'domain' && i.indicatorValue === 'maps.google.si'
+      const redirector = iocs.find(
+        i => i.indicatorType === 'domain' && i.indicatorValue === 'maps.redirector.example'
       );
-      expect(google?.severity).toBe('low');
+      expect(redirector?.severity).toBe('low');
     });
   });
 
@@ -325,18 +325,18 @@ describe('extractIOCs', () => {
       const analysis = {
         ...createMockAnalysis(true, 'Very High'),
         iocs: [
-          { type: 'domain' as const, value: 'evil-sender.jp', role: 'sender' as const },
-          { type: 'domain' as const, value: 'tracker-relay.com', role: 'infrastructure' as const },
+          { type: 'domain' as const, value: 'evil-sender.test', role: 'sender' as const },
+          { type: 'domain' as const, value: 'tracker-relay.test', role: 'infrastructure' as const },
         ],
       };
 
       const iocs = extractIOCs(emailData, analysis);
 
-      const sender = iocs.find(i => i.indicatorValue === 'evil-sender.jp');
+      const sender = iocs.find(i => i.indicatorValue === 'evil-sender.test');
       expect(sender?.severity).toBe('critical');
       expect(sender?.metadata?.extractionContext).toBe('ai_nominated:sender');
 
-      const infra = iocs.find(i => i.indicatorValue === 'tracker-relay.com');
+      const infra = iocs.find(i => i.indicatorValue === 'tracker-relay.test');
       expect(infra?.severity).toBe('medium');
     });
 
@@ -344,29 +344,29 @@ describe('extractIOCs', () => {
       const emailData = createMockEmailData({});
       const analysis = {
         ...createMockAnalysis(true),
-        iocs: [{ type: 'domain' as const, value: 'mycompany.com', role: 'sender' as const }],
+        iocs: [{ type: 'domain' as const, value: 'mycompany.example', role: 'sender' as const }],
       };
 
-      const iocs = extractIOCs(emailData, analysis, { safeDomains: ['mycompany.com'] });
+      const iocs = extractIOCs(emailData, analysis, { safeDomains: ['mycompany.example'] });
 
-      expect(iocs.some(i => i.indicatorValue === 'mycompany.com')).toBe(false);
+      expect(iocs.some(i => i.indicatorValue === 'mycompany.example')).toBe(false);
     });
 
     it('dedupes against regex-extracted indicators, keeping higher confidence', () => {
       const emailData = createMockEmailData({
-        original_sender: 'attacker@evil-sender.jp',
+        original_sender: 'attacker@evil-sender.test',
       });
       const analysis = {
         ...createMockAnalysis(true),
         iocs: [
-          { type: 'email' as const, value: 'attacker@evil-sender.jp', role: 'sender' as const },
+          { type: 'email' as const, value: 'attacker@evil-sender.test', role: 'sender' as const },
         ],
       };
 
       const iocs = extractIOCs(emailData, analysis);
 
       const matches = iocs.filter(
-        i => i.indicatorType === 'email' && i.indicatorValue === 'attacker@evil-sender.jp'
+        i => i.indicatorType === 'email' && i.indicatorValue === 'attacker@evil-sender.test'
       );
       expect(matches.length).toBe(1);
       expect(matches[0].confidenceScore).toBe(0.8);
@@ -404,8 +404,8 @@ describe('extractIOCs', () => {
   describe('Confidence filtering', () => {
     it('should filter IOCs below minimum confidence', () => {
       const emailData = createMockEmailData({
-        from_email: 'sender@suspicious.com',
-        links: ['https://suspicious.com/login'],
+        from_email: 'sender@suspicious.test',
+        links: ['https://suspicious.test/login'],
       });
 
       const analysis = createMockAnalysis(false); // Low confidence for non-phishing
@@ -416,8 +416,8 @@ describe('extractIOCs', () => {
 
     it('should include all IOCs with zero minimum confidence', () => {
       const emailData = createMockEmailData({
-        from_email: 'sender@suspicious.com',
-        links: ['https://suspicious.com/login'],
+        from_email: 'sender@suspicious.test',
+        links: ['https://suspicious.test/login'],
       });
 
       const analysis = createMockAnalysis(false);
@@ -430,7 +430,7 @@ describe('extractIOCs', () => {
   describe('Severity determination', () => {
     it('should set critical severity for high confidence phishing', () => {
       const emailData = createMockEmailData({
-        from_email: 'attacker@malicious.com',
+        from_email: 'attacker@malicious.test',
       });
 
       const analysis = createMockAnalysis(true, 'Very High');
@@ -441,7 +441,7 @@ describe('extractIOCs', () => {
 
     it('should set low severity for non-phishing', () => {
       const emailData = createMockEmailData({
-        from_email: 'sender@questionable.com',
+        from_email: 'sender@questionable.test',
       });
 
       const analysis = createMockAnalysis(false);

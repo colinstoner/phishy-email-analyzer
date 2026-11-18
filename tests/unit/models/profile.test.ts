@@ -15,13 +15,13 @@ describe('EnterpriseProfile', () => {
         name: 'Test Corp',
         organization: {
           name: 'Test Corporation',
-          domains: ['test.com'],
+          domains: ['test.example'],
         },
       };
 
       const result = validateProfile(profile);
       expect(result.name).toBe('Test Corp');
-      expect(result.organization.domains).toContain('test.com');
+      expect(result.organization.domains).toContain('test.example');
     });
 
     it('should accept full profile', () => {
@@ -36,13 +36,13 @@ describe('EnterpriseProfile', () => {
         name: 'Test',
         organization: {
           name: 'Test',
-          domains: ['test.com'],
+          domains: ['test.example'],
         },
         vips: [
           {
             name: 'John CEO',
             title: 'CEO',
-            email: 'ceo@test.com',
+            email: 'ceo@test.example',
             impersonationRisk: 'critical',
           },
         ],
@@ -57,7 +57,7 @@ describe('EnterpriseProfile', () => {
         name: 'Test',
         organization: {
           name: 'Test',
-          domains: ['test.com'],
+          domains: ['test.example'],
         },
         vips: [
           {
@@ -77,12 +77,12 @@ describe('EnterpriseProfile', () => {
         name: 'Test',
         organization: {
           name: 'Test',
-          domains: ['test.com'],
+          domains: ['test.example'],
         },
         trustedPartners: [
           {
             name: 'Partner Inc',
-            domains: ['partner.com'],
+            domains: ['partner.example'],
             relationship: 'vendor',
           },
         ],
@@ -97,12 +97,12 @@ describe('EnterpriseProfile', () => {
         name: 'Test',
         organization: {
           name: 'Test',
-          domains: ['test.com'],
+          domains: ['test.example'],
         },
         trustedPartners: [
           {
             name: 'Partner Inc',
-            domains: ['partner.com'],
+            domains: ['partner.example'],
             relationship: 'friend', // invalid
           },
         ],
@@ -116,7 +116,7 @@ describe('EnterpriseProfile', () => {
         name: 'Test',
         organization: {
           name: 'Test',
-          domains: ['test.com'],
+          domains: ['test.example'],
         },
         analysisConfig: {
           sensitivityLevel: 'paranoid',
@@ -133,7 +133,7 @@ describe('EnterpriseProfile', () => {
         name: 'Test',
         organization: {
           name: 'Test',
-          domains: ['test.com'],
+          domains: ['test.example'],
         },
         analysisConfig: {
           sensitivityLevel: 'extreme', // invalid
@@ -148,7 +148,7 @@ describe('EnterpriseProfile', () => {
         name: 'Test',
         organization: {
           name: 'Test',
-          domains: ['test.com'],
+          domains: ['test.example'],
         },
         analysisConfig: {
           autoEscalateThreshold: 1.5, // invalid
@@ -161,15 +161,15 @@ describe('EnterpriseProfile', () => {
 
   describe('createMinimalProfile', () => {
     it('should create a minimal profile with name and domains', () => {
-      const profile = createMinimalProfile('Acme', ['acme.com', 'acme.io']);
+      const profile = createMinimalProfile('Acme', ['acme.example', 'acme-io.example']);
 
       expect(profile.name).toBe('Acme');
       expect(profile.organization.name).toBe('Acme');
-      expect(profile.organization.domains).toEqual(['acme.com', 'acme.io']);
+      expect(profile.organization.domains).toEqual(['acme.example', 'acme-io.example']);
     });
 
     it('should create valid profile that passes validation', () => {
-      const profile = createMinimalProfile('Test', ['test.com']);
+      const profile = createMinimalProfile('Test', ['test.example']);
       expect(() => validateProfile(profile)).not.toThrow();
     });
   });

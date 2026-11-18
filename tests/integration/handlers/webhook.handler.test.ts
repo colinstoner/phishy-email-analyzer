@@ -38,20 +38,20 @@ describe('Webhook Handler Integration', () => {
   };
 
   const mockEmailData: ExtractedEmailData = {
-    from_email: 'attacker@phishing-site.com',
+    from_email: 'attacker@phishing-site.test',
     subject: 'Urgent: Verify Your Account',
     text: 'Click here to verify your account',
     html: '<p>Click here to verify</p>',
     headers: {
-      'Message-ID': '<test-123@phishing-site.com>',
-      From: 'attacker@phishing-site.com',
+      'Message-ID': '<test-123@phishing-site.test>',
+      From: 'attacker@phishing-site.test',
     },
     forwardedHeaders: {},
     attachments: [],
-    sender: 'attacker@phishing-site.com',
-    to: 'victim@company.com',
-    original_sender: 'user@trusted.com',
-    originalForwarder: 'user@trusted.com',
+    sender: 'attacker@phishing-site.test',
+    to: 'victim@company.example',
+    original_sender: 'user@trusted.example',
+    originalForwarder: 'user@trusted.example',
     links: ['http://192.168.1.100/login'],
   };
 
@@ -129,7 +129,7 @@ describe('Webhook Handler Integration', () => {
     });
 
     it('should return false for non-existent webhook', () => {
-      const removed = webhookService.removeWebhook('https://nonexistent.com/webhook');
+      const removed = webhookService.removeWebhook('https://nonexistent.invalid/webhook');
       expect(removed).toBe(false);
     });
   });
@@ -153,7 +153,7 @@ describe('Webhook Handler Integration', () => {
       expect(url).toBe('https://siem.example.com/webhook');
       expect(payload.event).toBe('threat.high_confidence'); // Very High confidence = high_confidence event
       expect(payload.data.analysisId).toBe('analysis-123');
-      expect(payload.data.fromEmail).toBe('attacker@phishing-site.com');
+      expect(payload.data.fromEmail).toBe('attacker@phishing-site.test');
       expect(config.headers?.['X-Phishy-Signature']).toBeDefined();
     });
 
@@ -409,7 +409,7 @@ describe('Webhook Handler Integration', () => {
 
       const { payload } = getMockCallArgs(0);
       expect(payload.data.correlationFields).toBeDefined();
-      expect(payload.data.correlationFields?.fromEmail).toBe('attacker@phishing-site.com');
+      expect(payload.data.correlationFields?.fromEmail).toBe('attacker@phishing-site.test');
     });
   });
 });

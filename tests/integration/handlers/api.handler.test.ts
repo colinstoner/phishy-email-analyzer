@@ -158,7 +158,7 @@ describe('API Handler Integration', () => {
 
       const event = createApiEvent('POST', '/api/v1/analyses/search', {
         body: {
-          fromDomain: 'phishing-site.com',
+          fromDomain: 'phishing-site.test',
           isPhishing: true,
           limit: 50,
         },

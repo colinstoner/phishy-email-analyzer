@@ -18,8 +18,8 @@ jest.mock('../../../src/config', () => ({
       },
     },
     email: {
-      safeDomains: ['trusted.com', 'example.com'],
-      safeSenders: ['admin@trusted.com'],
+      safeDomains: ['trusted.example', 'example.com'],
+      safeSenders: ['admin@trusted.example'],
       deleteAfterProcessing: false,
     },
     notification: {

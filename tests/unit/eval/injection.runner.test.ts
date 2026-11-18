@@ -331,7 +331,7 @@ describe('injection eval runner (mocked Bedrock)', () => {
 
     expect(runs).toHaveLength(8);
     expect(runs.every(r => r.status === 'error' && !r.scored && !r.success)).toBe(true);
-    expect(runs[0].errorClass).toBe('AccessDeniedException: not authorized');
+    expect(runs[0].errorClass).toMatch(/^ProviderAuthError: .*\(AccessDeniedException\); not retried/);
     expect(groups.map(g => [g.mode, g.errors, g.overall.runs])).toEqual([
       ['agentic', 4, 0],
       ['single', 4, 0],
@@ -560,7 +560,7 @@ describe('runCli', () => {
       summaries: Array<{ overall: { successes: number } }>;
       runs: Array<{ caseId: string; signals: string[] }>;
     };
-    expect(document.harnessVersion).toBe(1);
+    expect(document.harnessVersion).toBe(2);
     expect(document.options).toMatchObject({
       provider: 'bedrock',
       models: [MODEL],

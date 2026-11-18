@@ -466,6 +466,7 @@ Metrics appear in the **`Phishy`** namespace, dimensioned by `Provider` and `Mod
 | `PhishingDetected` | 1 if the verdict was phishing, 0 otherwise |
 | `AnalysisFailureCount` | Reports sent as "analysis unavailable" — the provider was unreachable, the model declined, or its reply was incomplete |
 | `AnalysisRefusalCount` | Model calls declined with `stop_reason: "refusal"`, counted against the model that declined. The category (`cyber`, `bio`, …) is the `RefusalCategory` property on the log line |
+| `VerdictProseDiscardedCount` | Verdicts accepted after discarding prose the model wrote before or after its one JSON object (for example a trailing "Note: ..."). A count only; the prose is never logged |
 | `CampaignCacheHits` | Reports answered from the campaign verdict cache (no AI call) |
 | `EstimatedCostSavedUSD` | Approximate spend avoided by cache hits |
 

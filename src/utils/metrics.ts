@@ -102,7 +102,36 @@ export function emitAnalysisFailureMetric(provider: string, model: string): void
 }
 
 /**
- * Emit a model refusal: the model's safety classifiers (or the model itself)
+ * Emit a verdict accepted after discarding prose around its JSON object (a
+ * note the model appended after the closing brace, or a preamble). A count
+ * only: the prose itself can quote the suspicious email and is never logged.
+ */
+export function emitVerdictProseDiscardedMetric(provider: string, model: string): void {
+  if (process.env.PHISHY_DISABLE_METRICS === 'true') {
+    return;
+  }
+
+  const emf = {
+    _aws: {
+      Timestamp: Date.now(),
+      CloudWatchMetrics: [
+        {
+          Namespace: NAMESPACE,
+          Dimensions: [['Provider', 'Model'], ['Provider']],
+          Metrics: [{ Name: 'VerdictProseDiscardedCount', Unit: 'Count' }],
+        },
+      ],
+    },
+    Provider: provider,
+    Model: model,
+    VerdictProseDiscardedCount: 1,
+  };
+
+  process.stdout.write(`${JSON.stringify(emf)}\n`);
+}
+
+/**
+ * Emit a model refusal:the model's safety classifiers (or the model itself)
  * declined the request with `stop_reason: "refusal"`. Emitted once per refused
  * call, against the model that refused, so a refusal that the fallback model
  * then answers still counts. Category is a property rather than a dimension —
