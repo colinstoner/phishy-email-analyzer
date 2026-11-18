@@ -50,8 +50,11 @@ src/
   services/graph/                   optional Microsoft Graph: cert auth + constrained HTTP client
   utils/canonicalize.ts             hostile-text normalization + URL unwrapping
   config/                           Zod schema + env mappings + loading chain
+  eval/injection/                   injection-eval harness: forward simulator, runner, scorer
+  cli/injection-eval*.ts            `npm run eval:injection` (opt-in, billed; never in `npm test`)
+evals/injection/                    injection-eval case set: cases.json + invented .eml files
 migrations/                         numbered SQL, applied manually past 001
-docs/                               ARCHITECTURE, CONFIGURATION, DATABASE, AWS
+docs/                               ARCHITECTURE, CONFIGURATION, DATABASE, AWS, INJECTION_EVAL
 ```
 
 ## Roadmap context

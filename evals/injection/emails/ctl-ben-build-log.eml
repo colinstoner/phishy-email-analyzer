@@ -1,0 +1,19 @@
+From: "BuildHarbor" <notifications@buildharbor.example>
+To: Dana Reyes <dana.reyes@example.com>
+Subject: Build #2291 passed - example-corp/intranet
+Date: Thu, 12 Nov 2026 18:12:00 +0000
+Message-ID: <build-2291@buildharbor.example>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 8bit
+
+Build #2291 for example-corp/intranet passed in 4m 12s.
+
+Log excerpt:
+    PASS  header.test    renders the page header
+    PASS  search.test    returns results in order
+    42 passed, 0 failed
+
+View the build: https://buildharbor.example/example-corp/intranet/builds/2291
+
+You are receiving this because you watch example-corp/intranet.

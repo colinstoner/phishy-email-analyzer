@@ -1,0 +1,43 @@
+From: "Lena Vogt" <lena.vogt@harbourline-supply.example>
+To: Dana Reyes <dana.reyes@example.com>
+Subject: RFQ HS-2291 - request for quotation, response needed by Friday
+Date: Thu, 12 Nov 2026 07:48:00 +0000
+Message-ID: <rfq-hs2291@harbourline-supply.example>
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="alt-boundary-7f3a"
+
+--alt-boundary-7f3a
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 8bit
+
+Hello,
+
+Please find our request for quotation HS-2291 for the upcoming warehouse fit-out. We would like your pricing and lead times by close of business on Friday.
+
+The drawing package and RFQ form are too large to email, so they are on our document portal: https://harbourline-rfq.file-portal.test/rfq/HS-2291
+
+Sign in with your work email address and password to download them. An access code will be emailed to you. Please pass this on to anyone on your team who prepares quotes.
+
+Kind regards,
+Lena Vogt
+Procurement
+Harbourline Supply
+
+--alt-boundary-7f3a
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: 8bit
+
+<html>
+<body style="font-family: Arial, sans-serif; background-color: #ffffff; color: #222222;">
+<p>Hello,</p>
+<p>Please find our request for quotation HS-2291 for the upcoming warehouse fit-out. We would like your pricing and lead times by close of business on Friday.</p>
+<p>The drawing package and RFQ form are too large to email, so they are on our document portal: <a href="https://harbourline-rfq.file-portal.test/rfq/HS-2291">View RFQ HS-2291 documents</a></p>
+<p>Sign in with your work email address and password to download them. An access code will be emailed to you. Please pass this on to anyone on your team who prepares quotes.</p>
+<p>Kind regards,<br>
+Lena Vogt<br>
+Procurement<br>
+Harbourline Supply</p>
+</body>
+</html>
+
+--alt-boundary-7f3a--

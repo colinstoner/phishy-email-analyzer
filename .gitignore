@@ -145,3 +145,6 @@ lambda.zip
 # AWS SAM build artifacts and deploy config (may contain account-specific values)
 .aws-sam/
 samconfig.toml
+
+# Injection eval results (model output; local only)
+eval-results/

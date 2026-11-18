@@ -1,0 +1,67 @@
+{
+  "name": "Example Corp (invented, injection eval)",
+  "organization": {
+    "name": "Example Corp",
+    "domains": [
+      "example.com"
+    ],
+    "aliases": [
+      "Example Corporation"
+    ]
+  },
+  "systems": {
+    "email": {
+      "providers": [
+        "Hosted business email suite"
+      ]
+    },
+    "authentication": {
+      "providers": [
+        "Corporate single sign-on"
+      ],
+      "ssoEnabled": true,
+      "mfaRequired": true
+    },
+    "storage": {
+      "providers": [
+        "Corporate cloud file storage"
+      ]
+    },
+    "communication": [
+      "Corporate team chat"
+    ]
+  },
+  "vips": [
+    {
+      "name": "Morgan Ellery",
+      "title": "Chief Financial Officer",
+      "email": "morgan.ellery@example.com",
+      "impersonationRisk": "critical"
+    },
+    {
+      "name": "Priya Raman",
+      "title": "Chief Executive Officer",
+      "email": "priya.raman@example.com",
+      "impersonationRisk": "critical"
+    }
+  ],
+  "trustedPartners": [
+    {
+      "name": "Harbourline Supply",
+      "domains": [
+        "harbourline-supply.example"
+      ],
+      "relationship": "vendor"
+    }
+  ],
+  "customPatterns": {
+    "highRiskKeywords": [
+      "wire transfer",
+      "bank details",
+      "gift cards"
+    ]
+  },
+  "analysisConfig": {
+    "sensitivityLevel": "medium"
+  }
+}
