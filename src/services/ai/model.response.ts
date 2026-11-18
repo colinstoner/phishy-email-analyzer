@@ -56,6 +56,20 @@ export class TruncatedResponseError extends Error {
   }
 }
 
+/**
+ * The provider rejected Phishy's own credentials or permissions (expired AWS
+ * token, unknown access key, denied model access, invalid API key). It fails
+ * the same way on every retry, so it is never retried: waiting out the backoff
+ * budget would only spend the Lambda timeout. The message names the error
+ * class only, never request content.
+ */
+export class ProviderAuthError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'ProviderAuthError';
+  }
+}
+
 function readUsage(raw: unknown): TokenUsage | undefined {
   const usage = raw as
     | {

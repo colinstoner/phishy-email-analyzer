@@ -141,10 +141,11 @@ export function findAnchorMismatches(html: string): string[] {
     const hrefDomain = registrableDomain(href);
     if (!hrefDomain) continue;
 
+    // Only the two computed domains are quoted, never the anchor text itself:
+    // the flag is rendered under VERIFIED, and anchor text is attacker-chosen
+    // free text (it may span lines and imitate the prompt's structure).
     if (registrableOf(textDomain) !== hrefDomain) {
-      flags.push(
-        `Link text shows "${anchorText.substring(0, 80)}" but actually points to ${hrefDomain}`
-      );
+      flags.push(`Link text shows the domain ${textDomain} but actually points to ${hrefDomain}`);
     }
   }
 

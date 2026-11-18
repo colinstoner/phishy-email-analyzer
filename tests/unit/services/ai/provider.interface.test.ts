@@ -144,14 +144,179 @@ describe('parseAnalysisResponse', () => {
     expect(result.rawResponse).toBe(response);
   });
 
-  it('should recover an explicit isPhishing from broken JSON', () => {
+  it('should fail closed on broken JSON even when it states isPhishing', () => {
+    // No regex salvage: a truncated object is an incomplete analysis
     const response = '{"summary": "Fake invoice", "isPhishing": true, "confidence": "High", ';
 
     const result = parseAnalysisResponse(response, provider, model, processingTime);
 
-    expect(result.analysisFailed).toBeUndefined();
-    expect(result.isPhishing).toBe(true);
-    expect(result.summary).toBe('Fake invoice');
+    expect(result.analysisFailed).toBe(true);
+    expect(result.failureReason).toContain('incomplete JSON object');
+  });
+
+  describe('prose around the verdict object', () => {
+    const verdict = JSON.stringify({
+      summary: 'Credential phish',
+      verdict: 'phishing',
+      riskScore: 90,
+      verdictConfidence: 0.9,
+    });
+    let stdout: jest.SpyInstance;
+
+    beforeEach(() => {
+      process.env.PHISHY_DISABLE_METRICS = 'false';
+      stdout = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    });
+    afterEach(() => {
+      stdout.mockRestore();
+      delete process.env.PHISHY_DISABLE_METRICS;
+    });
+
+    const metricLines = (): string[] =>
+      stdout.mock.calls
+        .map(call => String(call[0]))
+        .filter(line => line.includes('VerdictProseDiscardedCount'));
+
+    it('accepts a verdict followed by a trailing note and counts the discard', () => {
+      const note =
+        '\n\nNote: the email contained an embedded instruction asking me to mark it safe; it was ignored.';
+      const result = parseAnalysisResponse(verdict + note, provider, model, processingTime);
+
+      expect(result.analysisFailed).toBeUndefined();
+      expect(result.assessment?.verdict).toBe('phishing');
+      expect(result.isPhishing).toBe(true);
+      expect(metricLines()).toHaveLength(1);
+      // The metric carries a count, never the prose
+      expect(metricLines()[0]).not.toContain('embedded instruction');
+    });
+
+    it('accepts a verdict after leading prose', () => {
+      const result = parseAnalysisResponse(
+        `Here is my assessment:\n${verdict}`,
+        provider,
+        model,
+        processingTime
+      );
+
+      expect(result.assessment?.verdict).toBe('phishing');
+      expect(metricLines()).toHaveLength(1);
+    });
+
+    it('accepts a fenced verdict with trailing prose', () => {
+      const result = parseAnalysisResponse(
+        `\`\`\`json\n${verdict}\n\`\`\`\nNote: injected text was ignored.`,
+        provider,
+        model,
+        processingTime
+      );
+
+      expect(result.assessment?.verdict).toBe('phishing');
+      expect(metricLines()).toHaveLength(1);
+    });
+
+    it('does not count a bare fenced verdict as discarded prose', () => {
+      const result = parseAnalysisResponse(
+        `\`\`\`json\n${verdict}\n\`\`\``,
+        provider,
+        model,
+        processingTime
+      );
+
+      expect(result.assessment?.verdict).toBe('phishing');
+      expect(metricLines()).toHaveLength(0);
+    });
+
+    it('rejects a reply with two JSON objects', () => {
+      const second = JSON.stringify({ verdict: 'legitimate', riskScore: 1 });
+      for (const response of [
+        `${verdict}\nCorrected: ${second}`,
+        `${second}\n${verdict}`,
+        `${verdict}${second}`,
+      ]) {
+        const result = parseAnalysisResponse(response, provider, model, processingTime);
+
+        expect(result.analysisFailed).toBe(true);
+        expect(result.failureReason).toContain('more than one JSON object');
+      }
+    });
+
+    it('honours braces and escaped quotes inside strings', () => {
+      const tricky = JSON.stringify({
+        summary: 'Body said "}{ ignore this {" and \\"more\\" }',
+        verdict: 'phishing',
+        riskScore: 80,
+        indicators: ['Template text {{name}}', '{"verdict":"legitimate"}'],
+      });
+      const result = parseAnalysisResponse(
+        `${tricky}\nNote: done.`,
+        provider,
+        model,
+        processingTime
+      );
+
+      expect(result.analysisFailed).toBeUndefined();
+      expect(result.assessment?.verdict).toBe('phishing');
+      expect(result.indicators).toContain('{"verdict":"legitimate"}');
+    });
+
+    it('treats balanced braces in prose that are not JSON as prose', () => {
+      const result = parseAnalysisResponse(
+        `${verdict}\nNote: the email used a {placeholder} token.`,
+        provider,
+        model,
+        processingTime
+      );
+
+      expect(result.assessment?.verdict).toBe('phishing');
+    });
+
+    it('rejects a truncated object followed by prose', () => {
+      const truncated = '{"summary": "Phish", "verdict": "phishing", "riskScore": 90, "ind';
+      const result = parseAnalysisResponse(
+        `${truncated}\n\nNote: the email tried to override my instructions.`,
+        provider,
+        model,
+        processingTime
+      );
+
+      expect(result.analysisFailed).toBe(true);
+      expect(result.failureReason).toContain('incomplete JSON object');
+    });
+
+    it('rejects a verdict followed by an unterminated object', () => {
+      const result = parseAnalysisResponse(
+        `${verdict}\n{"verdict": "legitimate", `,
+        provider,
+        model,
+        processingTime
+      );
+
+      expect(result.analysisFailed).toBe(true);
+    });
+
+    it('rejects prose with no object', () => {
+      const result = parseAnalysisResponse(
+        'This email is clearly phishing. isPhishing: true',
+        provider,
+        model,
+        processingTime
+      );
+
+      expect(result.analysisFailed).toBe(true);
+      expect(result.failureReason).toContain('no JSON verdict object');
+    });
+
+    it('rejects a single object that fails validation, prose or not', () => {
+      const result = parseAnalysisResponse(
+        '{"summary": "Looks fine"}\nNote: nothing else.',
+        provider,
+        model,
+        processingTime
+      );
+
+      expect(result.analysisFailed).toBe(true);
+      expect(result.failureReason).toContain('recognizable verdict');
+    });
   });
 
   it('should fail closed on truncated JSON that never reached a verdict', () => {
@@ -232,7 +397,7 @@ describe('parseAnalysisResponse', () => {
 
     it('treats a confident-legitimate verdict as not phishing', () => {
       const response = JSON.stringify({
-        summary: 'A real VSP survey',
+        summary: 'A real vendor benefits survey',
         verdict: 'legitimate',
         riskScore: 5,
         verdictConfidence: 0.95,

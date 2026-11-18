@@ -30,10 +30,10 @@ describe('canonicalizeText', () => {
   });
 
   it('normalizes unicode compatibility characters (styled homoglyphs)', () => {
-    // Fullwidth "PayPal" normalizes to plain ASCII under NFKC
-    const styled = 'ＰａｙＰａｌ';
+    // Fullwidth "ExampleBank" normalizes to plain ASCII under NFKC
+    const styled = 'ＥｘａｍｐｌｅＢａｎｋ';
     const result = canonicalizeText(styled);
-    expect(result.canonical).toBe('PayPal');
+    expect(result.canonical).toBe('ExampleBank');
     expect(result.flags.join(' ')).toContain('compatibility characters');
   });
 
@@ -90,7 +90,7 @@ describe('canonicalizeUrl', () => {
   });
 
   it('flags punycode hostnames with their unicode rendering', () => {
-    const result = canonicalizeUrl('https://xn--pypal-4ve.com/login');
+    const result = canonicalizeUrl('https://xn--exmple-cua.example/login');
     expect(result.flags.join(' ')).toContain('Punycode');
     expect(result.flags.join(' ')).toContain('renders as');
   });
@@ -115,10 +115,10 @@ describe('buildLinkFacts', () => {
 
 describe('findAnchorMismatches', () => {
   it('flags anchor text that displays a different domain than the href', () => {
-    const html = '<a href="https://evil.test/login">https://www.paypal.com/signin</a>';
+    const html = '<a href="https://evil.test/login">https://www.bank.example/signin</a>';
     const flags = findAnchorMismatches(html);
     expect(flags).toHaveLength(1);
-    expect(flags[0]).toContain('paypal.com');
+    expect(flags[0]).toContain('bank.example');
     expect(flags[0]).toContain('evil.test');
   });
 

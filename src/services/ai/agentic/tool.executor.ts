@@ -175,7 +175,13 @@ export class AgenticToolExecutor {
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      logger.warn('Agentic tool failed', { tool: name, error: message });
+      // Tool inputs derive from the email; an error (a database one, say) can
+      // echo them, so the message stays at debug
+      logger.warn('Agentic tool failed', {
+        tool: name,
+        error: error instanceof Error ? error.name : 'unknown',
+      });
+      logger.debug('Agentic tool failure detail', { tool: name, error: message });
       return { content: JSON.stringify({ error: message }), isError: true };
     }
   }

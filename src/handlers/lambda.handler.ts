@@ -21,7 +21,7 @@ import {
   AnalysisResult,
   EmailSendResult,
 } from '../types';
-import { createLogger } from '../utils/logger';
+import { contentFacts, createLogger } from '../utils/logger';
 import { extractEmailAddress, domainMatches } from '../utils/validation';
 import { estimateCostUsd } from '../utils/pricing';
 import {
@@ -404,7 +404,7 @@ async function processEmailEvent(
 
   logger.info('Extracted email data', {
     from: emailData.from_email,
-    subject: emailData.subject.substring(0, 50),
+    subject: contentFacts(emailData.subject),
   });
 
   // Check for duplicate
@@ -533,7 +533,7 @@ async function processEmailEvent(
     emitAnalysisFailureMetric(analysis.provider ?? 'unknown', analysis.model ?? 'unknown');
     logger.error('Analysis could not be completed — sending "analysis unavailable" report', {
       reporter: emailData.from_email,
-      subject: emailData.subject,
+      subject: contentFacts(emailData.subject),
       failureReason: analysis.failureReason,
     });
   }
@@ -727,7 +727,10 @@ async function processEmailEvent(
       );
 
       if (alertSent) {
-        logger.info('Campaign alert sent', { senderDomain, subject: emailData.subject });
+        logger.info('Campaign alert sent', {
+          senderDomain,
+          subject: contentFacts(emailData.subject),
+        });
       }
     } catch (error) {
       logger.error('Campaign tracking failed', {
@@ -814,7 +817,10 @@ async function processEmailEvent(
     };
   }
 
-  logger.warn('Cannot send analysis - invalid recipient', { recipient });
+  // An invalid recipient is not a verified reporter address: it can be any
+  // text the email's headers supplied, so only its facts are logged above debug
+  logger.warn('Cannot send analysis - invalid recipient', { recipient: contentFacts(recipient) });
+  logger.debug('Invalid recipient value', { recipient });
   return { status: 'incomplete', reason: 'invalid_recipient' };
 }
 
@@ -1061,7 +1067,9 @@ function validateEmail(emailData: ExtractedEmailData, config: PhishyConfig): Pro
 
   // Check if from trusted source
   if (!isFromTrustedSource(emailData.from_email, config)) {
-    logger.info('Skipping untrusted source', { from: emailData.from_email });
+    // Not a reporter: whoever sent this is outside the trusted domains
+    logger.info('Skipping untrusted source', { from: contentFacts(emailData.from_email) });
+    logger.debug('Untrusted source address', { from: emailData.from_email });
     return { status: 'skipped', reason: 'untrusted_source' };
   }
 

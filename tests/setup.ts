@@ -11,7 +11,7 @@ process.env.PHISHY_DISABLE_METRICS = 'true'; // No EMF lines on stdout during te
 // Mock environment variables commonly needed
 process.env.PHISHY_AWS_REGION = 'us-east-1';
 process.env.S3_BUCKET_NAME = 'test-phishy-bucket';
-process.env.SAFE_DOMAINS = 'example.com,test.org';
+process.env.SAFE_DOMAINS = 'example.com,test.example';
 process.env.SAFE_SENDERS = 'trusted@example.com';
 
 // Global test timeout
