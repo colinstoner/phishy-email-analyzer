@@ -47,7 +47,7 @@ jest.mock('../../../src/config', () => ({
         lookbackDays: 30,
         burstWindowHours: 24,
         budgetMs: 8000,
-        fanoutMinRecipients: 10,
+        fanoutMinRecipients: 15,
         fanoutMultiplier: 3,
       },
     },
@@ -106,7 +106,12 @@ const FACTS: SenderHistoryFacts = {
   burstWindowHours: 24,
   history: { messages: exact(12), recipients: exact(3), firstSeen: '2026-05-04' },
   twoWay: { messages: exact(5), internalSenders: exact(2) },
-  burst: { messages: exact(41), recipients: exact(40), newRecipients: exact(38) },
+  burst: {
+    messages: exact(41),
+    recipients: exact(40),
+    newRecipients: exact(38),
+    sameSubject: { recipients: exact(40), newRecipients: exact(38) },
+  },
   sendingIps: {
     burst: 1,
     seenInHistory: 0,

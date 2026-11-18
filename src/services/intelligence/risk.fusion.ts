@@ -182,7 +182,7 @@ export function fuseRisk(result: AnalysisResult, signals: FusionSignals = {}): R
   //    becomes 'suspicious', so the banner cannot contradict the reason.
   if (signals.senderHistory?.classification === 'established_with_anomalous_fanout') {
     reasons.push(
-      'This sender has emailed your organization before, but this time its mail went to far more ' +
+      'This sender has emailed your organization before, but this time the same message went to far more ' +
         "people than usual, most of whom it had never written to. That pattern is typical of a known contact's mailbox being taken over."
     );
     if (score < SENDER_FANOUT_RISK_FLOOR) {

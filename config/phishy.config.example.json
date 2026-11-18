@@ -69,7 +69,7 @@
       "lookbackDays": 30,
       "burstWindowHours": 24,
       "budgetMs": 8000,
-      "fanoutMinRecipients": 10,
+      "fanoutMinRecipients": 15,
       "fanoutMultiplier": 3
     }
   },

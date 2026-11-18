@@ -322,8 +322,8 @@ When a known external contact's mailbox is taken over, the attacker's mail comes
 | `PHISHY_GRAPH_SENDER_HISTORY_LOOKBACK_DAYS` | `30` | Days of mail-flow records to examine (14-90; message trace keeps 90) |
 | `PHISHY_GRAPH_SENDER_HISTORY_BURST_WINDOW_HOURS` | `24` | Hours before the email's time that count as the burst rather than as history (1-72) |
 | `PHISHY_GRAPH_SENDER_HISTORY_BUDGET_MS` | `8000` | Overall deadline for one lookup (1000-30000). On expiry the analysis runs without the facts |
-| `PHISHY_GRAPH_SENDER_HISTORY_FANOUT_MIN_RECIPIENTS` | `10` | Fewest distinct burst recipients that can count as anomalous fan-out (2-1000) |
-| `PHISHY_GRAPH_SENDER_HISTORY_FANOUT_MULTIPLIER` | `3` | Burst recipients must be at least this many times the history recipients (1-100) |
+| `PHISHY_GRAPH_SENDER_HISTORY_FANOUT_MIN_RECIPIENTS` | `15` | Fewest distinct recipients of one subject in the burst that can count as anomalous fan-out (2-1000) |
+| `PHISHY_GRAPH_SENDER_HISTORY_FANOUT_MULTIPLIER` | `3` | Those recipients must be at least this many times the distinct recipients in the history period (1-100) |
 
 File configuration uses `graph.senderHistory.*` with the same names (`enabled`, `lookbackDays`, `burstWindowHours`, `budgetMs`, `fanoutMinRecipients`, `fanoutMultiplier`).
 
@@ -336,6 +336,7 @@ File configuration uses `graph.senderHistory.*` with the same names (`enabled`, 
 | History | Messages from the address, distinct internal recipients, and the first date seen, in the history period |
 | Two-way contact | Messages your organization sent *to* the address, and from how many distinct internal senders, in the history period (replies sent during the burst are not counted) |
 | Burst window | Messages and distinct internal recipients from the address, and how many of those recipients had no mail from it in the history period |
+| Widest single message | The largest number of distinct internal recipients that received the **same subject** in the burst window, and how many of them had no mail from the address in the history period. This is the figure fan-out is judged on. Subjects are compared after trimming, case-folding and collapsing whitespace; the subject is only a grouping key in memory and is never logged, stored or shown to the model |
 | Sending IPs | How many distinct sending IPs the burst used, and how many of them were seen in the history period. The model and the combined report get the counts only; the addresses themselves appear only in an email sent to the security team alone (see below) |
 
 **Classification** (decided by code, never by the model):
@@ -345,9 +346,13 @@ File configuration uses `graph.senderHistory.*` with the same names (`enabled`, 
 | `no_history` | No message from the address and none to it in the history period |
 | `limited_history` | Some history, but below `established` |
 | `established` | At least 3 history messages from the address, **or** at least 1 together with two-way contact |
-| `established_with_anomalous_fanout` | `established`, **and** the burst reached at least `fanoutMinRecipients` (10) distinct recipients, **and** at least `fanoutMultiplier` (3) times the history's distinct recipients, **and** at least half of the burst recipients had no mail from the address in the history period |
+| `established_with_anomalous_fanout` | `established`, **and** two-way contact (at least one message from your organization to the address in the history period), **and** one subject in the burst reached at least `fanoutMinRecipients` (15) distinct recipients, **and** that is at least `fanoutMultiplier` (3) times the history's distinct recipients, **and** at least half of those recipients had no mail from the address in the history period |
 
-**A relationship never lowers risk.** Trust is exactly what a mailbox takeover borrows, so `established` earns nothing: the model is told not to treat it as evidence of legitimacy, risk fusion ignores it, and the reporter is told nothing about it. Only `established_with_anomalous_fanout` acts: it adds one plain-language reason to the report and raises the risk score to at least 35 (medium), turning a `legitimate` verdict into `suspicious` when it does. A security-team ruling still overrides it.
+**Why these defaults.** The rule is deliberately narrow, because the common look-alikes are all legitimate. A single email to a project team reaches a dozen or so people, so the minimum is 15. Bulk senders — marketing, webinars, newsletters — have a history but nobody in the organization ever writes to them, so two-way contact is required. Transactional systems send many different messages in a day to many people, so fan-out is measured per subject rather than over everything the sender sent. A sender that fans out without meeting all of these stays `established`, and the counts are still shown.
+
+**Known limit.** A mailbox takeover that reaches fewer recipients than the minimum, or that comes from a contact nobody has written to in the lookback, is not flagged by this rule; catching it rests on the content analysis, which runs regardless. Lowering `fanoutMinRecipients` trades that gap for more false positives on ordinary team-wide emails.
+
+**A relationship never lowers risk.** Trust is exactly what a mailbox takeover borrows, so `established` earns nothing: the model is told not to treat it as evidence of legitimacy, risk fusion ignores it, and the reporter is told nothing about it. Only `established_with_anomalous_fanout` acts (and `established` without it is never reassurance, for the reason just given): it adds one plain-language reason to the report and raises the risk score to at least 35 (medium), turning a `legitimate` verdict into `suspicious` when it does. A security-team ruling still overrides it.
 
 **Bounds and honesty.**
 

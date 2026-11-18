@@ -275,10 +275,14 @@ How to use these facts:
   what an attacker borrows by taking over a real mailbox; that mail passes
   SPF, DKIM and DMARC. Do not treat "established" as evidence of legitimacy
   and do not lower riskScore because of it.
-* established_with_anomalous_fanout: a known sender suddenly reaching far more
-  people than usual, mostly people it never wrote to before. This is a strong
-  indicator of a compromised account mailing its address book - weigh it
-  heavily, above all with an invoice, RFQ/RFP, payment or shared-file lure.
+* established_with_anomalous_fanout: a sender the organization corresponds
+  with suddenly sent ONE subject to far more people than it usually reaches,
+  mostly people it never wrote to before. This is a strong indicator of a
+  compromised account mailing its address book - weigh it heavily, above all
+  with an invoice, RFQ/RFP, payment or shared-file lure.
+* The rule behind that class is deliberately narrow. A takeover that reaches
+  only a few people, or a sender nobody here has written to, stays
+  "established": that is not reassurance, and the content decides.
 * no_history / limited_history are neutral facts, not proof of malice.
 * Sending IPs change routinely for senders on large hosted mail platforms;
   unseen IPs are a weak signal on their own.

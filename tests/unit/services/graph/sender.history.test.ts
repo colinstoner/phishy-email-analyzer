@@ -19,6 +19,10 @@ import {
   TRACE_MAX_WINDOW_MS,
   TraceRows,
   assertTraceRowsMatch,
+  DEFAULT_FANOUT_MIN_RECIPIENTS,
+  DEFAULT_FANOUT_MULTIPLIER,
+  FANOUT_MIN_NEW_RECIPIENT_SHARE,
+  FANOUT_MIN_TWO_WAY_MESSAGES,
   claimedSenderAddress,
   classifySenderRelationship,
   computeSenderHistoryFacts,
@@ -27,6 +31,7 @@ import {
   listMessageTracesBySender,
   resolveEmailTime,
   splitTraceWindows,
+  subjectGroupKey,
 } from '../../../../src/services/graph';
 import * as graphModule from '../../../../src/services/graph';
 import { ExtractedEmailData } from '../../../../src/types';
@@ -49,7 +54,7 @@ const SETTINGS: SenderHistorySettings = {
   lookbackDays: 30,
   burstWindowHours: 24,
   budgetMs: 8000,
-  fanoutMinRecipients: 10,
+  fanoutMinRecipients: 15,
   fanoutMultiplier: 3,
   safeDomains: ['example.com'],
   safeSenders: ['partner@safelisted.example.org'],
@@ -100,15 +105,20 @@ const BASE = {
   burstStartMs: NOW - DAY,
   nowMs: NOW,
   lookbackDays: 30,
-  fanoutMinRecipients: 10,
+  fanoutMinRecipients: 15,
   fanoutMultiplier: 3,
 };
 
-/** A blast inside the burst window to `count` distinct recipients, as one message each */
+/** A blast inside the burst window: one subject to `count` distinct recipients, a row each */
 function blast(count: number, extra: Partial<MessageTrace> = {}): MessageTrace[] {
   return Array.from({ length: count }, (_, i) =>
-    inboundRow(NOW - HOUR, `person${i}@example.com`, extra)
+    inboundRow(NOW - HOUR, `person${i}@example.com`, { subject: 'RFQ 1001', ...extra })
   );
+}
+
+/** Mail the organization sent to the sender in the history period: two-way contact */
+function reply(daysAgo = 4): MessageTrace {
+  return inboundRow(NOW - daysAgo * DAY, SENDER, { senderAddress: 'person0@example.com' });
 }
 
 describe('claimedSenderAddress', () => {
@@ -253,25 +263,124 @@ describe('computeSenderHistoryFacts', () => {
     expect(facts.classification).toBe('limited_history');
   });
 
-  it('flags anomalous fan-out from an established sender', () => {
-    const history = [
+  describe('anomalous fan-out', () => {
+    const history = (): MessageTrace[] => [
       inboundRow(NOW - 20 * DAY, 'person0@example.com'),
       inboundRow(NOW - 12 * DAY, 'person0@example.com'),
       inboundRow(NOW - 6 * DAY, 'person1@example.com'),
     ];
-    const facts = computeSenderHistoryFacts({
-      ...BASE,
-      inbound: rows([...history, ...blast(40, { fromIP: '198.51.100.7' })]),
-      outbound: rows([]),
+
+    it('flags one subject sent far beyond the usual reach of a sender we correspond with', () => {
+      const facts = computeSenderHistoryFacts({
+        ...BASE,
+        inbound: rows([...history(), ...blast(40, { fromIP: '198.51.100.7' })]),
+        outbound: rows([reply()]),
+      });
+      expect(facts.classification).toBe('established_with_anomalous_fanout');
+      expect(facts.burst.recipients).toEqual({ count: 40, atLeast: false });
+      expect(facts.burst.newRecipients).toEqual({ count: 38, atLeast: false });
+      expect(facts.burst.sameSubject).toEqual({
+        recipients: { count: 40, atLeast: false },
+        newRecipients: { count: 38, atLeast: false },
+      });
+      expect(facts.sendingIps).toEqual({
+        burst: 1,
+        seenInHistory: 0,
+        historyComplete: true,
+        burstIps: [{ ip: '198.51.100.7', seenInHistory: false }],
+      });
     });
-    expect(facts.classification).toBe('established_with_anomalous_fanout');
-    expect(facts.burst.recipients).toEqual({ count: 40, atLeast: false });
-    expect(facts.burst.newRecipients).toEqual({ count: 38, atLeast: false });
-    expect(facts.sendingIps).toEqual({
-      burst: 1,
-      seenInHistory: 0,
-      historyComplete: true,
-      burstIps: [{ ip: '198.51.100.7', seenInHistory: false }],
+
+    it('requires two-way contact: a bulk sender nobody writes to stays established', () => {
+      const facts = computeSenderHistoryFacts({
+        ...BASE,
+        inbound: rows([...history(), ...blast(40)]),
+        outbound: rows([]),
+      });
+      expect(facts.classification).toBe('established');
+      // The fan-out is still reported as a fact
+      expect(facts.burst.sameSubject.recipients.count).toBe(40);
+    });
+
+    it('does not count mail sent to the sender during the burst as two-way contact', () => {
+      const facts = computeSenderHistoryFacts({
+        ...BASE,
+        inbound: rows([...history(), ...blast(40)]),
+        outbound: rows([inboundRow(NOW - HOUR, SENDER, { senderAddress: 'person5@example.com' })]),
+      });
+      expect(facts.classification).toBe('established');
+    });
+
+    it('measures fan-out per subject: a transactional system sending many different messages is not flagged', () => {
+      const transactional = Array.from({ length: 120 }, (_, i) =>
+        inboundRow(NOW - HOUR, `person${i}@example.com`, { subject: `Order ${1000 + i} shipped` })
+      );
+      const facts = computeSenderHistoryFacts({
+        ...BASE,
+        inbound: rows([...history(), ...transactional]),
+        outbound: rows([reply()]),
+      });
+      expect(facts.burst.recipients.count).toBe(120);
+      expect(facts.burst.newRecipients?.count).toBe(118);
+      expect(facts.burst.sameSubject).toEqual({
+        recipients: { count: 1, atLeast: false },
+        newRecipients: { count: 1, atLeast: false },
+      });
+      expect(facts.classification).toBe('established');
+    });
+
+    it('does not flag one email to a project team below the minimum, and does at the minimum', () => {
+      const classify = (teamSize: number): string =>
+        computeSenderHistoryFacts({
+          ...BASE,
+          inbound: rows([...history(), ...blast(teamSize)]),
+          outbound: rows([reply()]),
+        }).classification;
+      expect(classify(14)).toBe('established');
+      expect(classify(15)).toBe('established_with_anomalous_fanout');
+    });
+
+    it('groups subjects ignoring case and spacing, and keeps no subject text', () => {
+      const variants = ['RFQ 1001', '  rfq   1001 ', 'Rfq\t1001'];
+      const sameMessage = Array.from({ length: 18 }, (_, i) =>
+        inboundRow(NOW - HOUR, `person${i}@example.com`, { subject: variants[i % 3] })
+      );
+      const facts = computeSenderHistoryFacts({
+        ...BASE,
+        inbound: rows([...history(), ...sameMessage]),
+        outbound: rows([reply()]),
+      });
+      expect(facts.burst.sameSubject.recipients.count).toBe(18);
+      expect(facts.classification).toBe('established_with_anomalous_fanout');
+      expect(JSON.stringify(facts).toLowerCase()).not.toContain('rfq');
+      expect(subjectGroupKey('  RFQ \n 1001 ')).toBe('rfq 1001');
+      expect(subjectGroupKey(undefined)).toBe('');
+    });
+
+    it('takes the new-recipient share from the same subject group, not the whole burst', () => {
+      const known = Array.from({ length: 16 }, (_, i) => `known${i}@example.com`);
+      const usual = known.map(recipient => inboundRow(NOW - 8 * DAY, recipient));
+      // The usual newsletter to the usual 16 people plus 4 new ones ...
+      const newsletter = [...known, 'n1@example.com', 'n2@example.com', 'n3@example.com', 'n4@example.com'].map(
+        recipient => inboundRow(NOW - HOUR, recipient, { subject: 'Monthly update' })
+      );
+      // ... and unrelated one-off messages to 30 other new people
+      const oneOffs = Array.from({ length: 30 }, (_, i) =>
+        inboundRow(NOW - HOUR, `other${i}@example.com`, { subject: `Ticket ${i}` })
+      );
+      const facts = computeSenderHistoryFacts({
+        ...BASE,
+        fanoutMultiplier: 1,
+        inbound: rows([...usual, ...newsletter, ...oneOffs]),
+        outbound: rows([reply()]),
+      });
+      expect(facts.burst.recipients.count).toBe(50);
+      expect(facts.burst.newRecipients?.count).toBe(34);
+      expect(facts.burst.sameSubject).toEqual({
+        recipients: { count: 20, atLeast: false },
+        newRecipients: { count: 4, atLeast: false },
+      });
+      expect(facts.classification).toBe('established');
     });
   });
 
@@ -375,13 +484,17 @@ describe('computeSenderHistoryFacts', () => {
     const facts = computeSenderHistoryFacts({
       ...BASE,
       inbound: rows([...history, ...blast(40)], { historyTruncated: true }),
-      outbound: rows([], { historyTruncated: true }),
+      outbound: rows([reply()], { historyTruncated: true }),
     });
     expect(facts.truncated).toBe(true);
     expect(facts.history.messages).toEqual({ count: 5, atLeast: true });
     expect(facts.history.recipients.atLeast).toBe(true);
     expect(facts.twoWay.messages.atLeast).toBe(true);
     expect(facts.burst.newRecipients).toBeNull();
+    expect(facts.burst.sameSubject).toEqual({
+      recipients: { count: 40, atLeast: false },
+      newRecipients: null,
+    });
     expect(facts.sendingIps.historyComplete).toBe(false);
     // Fan-out cannot be judged, so the class stays at what is known
     expect(facts.classification).toBe('established');
@@ -401,44 +514,88 @@ describe('computeSenderHistoryFacts', () => {
 });
 
 describe('classifySenderRelationship thresholds', () => {
-  const established = {
+  const anomalous = {
     historyMessages: 5,
-    historyRecipients: 3,
+    historyRecipients: 5,
     historyTruncated: false,
-    twoWayMessages: 0,
-    burstRecipients: 10,
-    newRecipients: 5,
-    fanoutMinRecipients: 10,
+    twoWayMessages: 1,
+    sameSubjectRecipients: 15,
+    sameSubjectNewRecipients: 8,
+    fanoutMinRecipients: 15,
     fanoutMultiplier: 3,
   };
 
-  it('needs all three fan-out conditions', () => {
-    expect(classifySenderRelationship(established)).toBe('established_with_anomalous_fanout');
-    expect(classifySenderRelationship({ ...established, burstRecipients: 9 })).toBe('established');
-    expect(classifySenderRelationship({ ...established, historyRecipients: 4 })).toBe(
+  it('needs every fan-out condition', () => {
+    expect(classifySenderRelationship(anomalous)).toBe('established_with_anomalous_fanout');
+    // two-way contact
+    expect(classifySenderRelationship({ ...anomalous, twoWayMessages: 0 })).toBe('established');
+    // enough recipients of one subject
+    expect(classifySenderRelationship({ ...anomalous, sameSubjectRecipients: 14 })).toBe(
       'established'
     );
-    expect(classifySenderRelationship({ ...established, newRecipients: 4 })).toBe('established');
+    // three times the usual reach
+    expect(classifySenderRelationship({ ...anomalous, historyRecipients: 6 })).toBe('established');
+    // half of them new
+    expect(classifySenderRelationship({ ...anomalous, sameSubjectNewRecipients: 7 })).toBe(
+      'established'
+    );
+    // a complete history to compare against
+    expect(classifySenderRelationship({ ...anomalous, historyTruncated: true })).toBe(
+      'established'
+    );
+    expect(classifySenderRelationship({ ...anomalous, sameSubjectNewRecipients: null })).toBe(
+      'established'
+    );
+  });
+
+  it('ships the documented defaults', () => {
+    expect(DEFAULT_FANOUT_MIN_RECIPIENTS).toBe(15);
+    expect(DEFAULT_FANOUT_MULTIPLIER).toBe(3);
+    expect(FANOUT_MIN_NEW_RECIPIENT_SHARE).toBe(0.5);
+    expect(FANOUT_MIN_TWO_WAY_MESSAGES).toBe(1);
   });
 
   it('honours configured thresholds', () => {
     expect(
       classifySenderRelationship({
-        ...established,
-        burstRecipients: 6,
-        newRecipients: 6,
+        ...anomalous,
+        historyRecipients: 3,
+        sameSubjectRecipients: 6,
+        sameSubjectNewRecipients: 6,
         fanoutMinRecipients: 5,
         fanoutMultiplier: 2,
       })
     ).toBe('established_with_anomalous_fanout');
   });
 
+  it('keeps `established` as it was: history alone, or one message with two-way contact', () => {
+    const quiet = { ...anomalous, sameSubjectRecipients: 0, sameSubjectNewRecipients: 0 };
+    expect(classifySenderRelationship({ ...quiet, historyMessages: 3, twoWayMessages: 0 })).toBe(
+      'established'
+    );
+    expect(classifySenderRelationship({ ...quiet, historyMessages: 1, twoWayMessages: 1 })).toBe(
+      'established'
+    );
+    expect(classifySenderRelationship({ ...quiet, historyMessages: 2, twoWayMessages: 0 })).toBe(
+      'limited_history'
+    );
+  });
+
   it('never calls a sender without history anomalous', () => {
     expect(
-      classifySenderRelationship({ ...established, historyMessages: 0, historyRecipients: 0 })
+      classifySenderRelationship({
+        ...anomalous,
+        historyMessages: 0,
+        historyRecipients: 0,
+        twoWayMessages: 0,
+      })
     ).toBe('no_history');
     expect(
-      classifySenderRelationship({ ...established, historyMessages: 2, historyRecipients: 1 })
+      classifySenderRelationship({
+        ...anomalous,
+        historyMessages: 0,
+        historyRecipients: 0,
+      })
     ).toBe('limited_history');
   });
 });
@@ -1048,7 +1205,7 @@ describe('createSenderHistoryService', () => {
     lookbackDays: 30,
     burstWindowHours: 24,
     budgetMs: 8000,
-    fanoutMinRecipients: 10,
+    fanoutMinRecipients: 15,
     fanoutMultiplier: 3,
   };
   const graph = fakeGraph([() => collection([])]);

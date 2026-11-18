@@ -71,11 +71,21 @@ export const ESTABLISHED_MIN_MESSAGES = 3;
  * the history period) this many history messages are enough for `established`
  */
 export const ESTABLISHED_MIN_MESSAGES_WITH_TWO_WAY = 1;
-/** Default: fewest distinct burst recipients that can count as anomalous fan-out */
-export const DEFAULT_FANOUT_MIN_RECIPIENTS = 10;
-/** Default: burst recipients must be at least this many times the history recipients */
+/**
+ * Anomalous fan-out is judged on the largest group of burst recipients that
+ * received the SAME subject, and only for a sender with two-way contact.
+ * The common false positives all fail one of those: one email to a project
+ * team (too few recipients), a bulk sender nobody ever writes to (no two-way
+ * contact), a transactional system sending many different messages in a day
+ * (no single subject reaches many people).
+ */
+/** Messages the organization must have sent to the address in the history period */
+export const FANOUT_MIN_TWO_WAY_MESSAGES = 1;
+/** Default: fewest distinct recipients of one subject that can count as anomalous fan-out */
+export const DEFAULT_FANOUT_MIN_RECIPIENTS = 15;
+/** Default: those recipients must be at least this many times the history recipients */
 export const DEFAULT_FANOUT_MULTIPLIER = 3;
-/** Share of burst recipients that must be new to the address */
+/** Share of those recipients that must be new to the address */
 export const FANOUT_MIN_NEW_RECIPIENT_SHARE = 0.5;
 
 // ── Bounds ─────────────────────────────────────────────────────────────────
@@ -240,13 +250,56 @@ export interface SenderHistoryInput {
 interface PeriodTally {
   messages: Set<string>;
   recipients: Set<string>;
+  /** Recipients per normalized subject. The subject is hostile text: a grouping key only */
+  recipientsBySubject: Map<string, Set<string>>;
   senders: Set<string>;
   ips: Set<string>;
   firstMs?: number;
 }
 
 function emptyTally(): PeriodTally {
-  return { messages: new Set(), recipients: new Set(), senders: new Set(), ips: new Set() };
+  return {
+    messages: new Set(),
+    recipients: new Set(),
+    recipientsBySubject: new Map(),
+    senders: new Set(),
+    ips: new Set(),
+  };
+}
+
+/**
+ * A subject as a grouping key: trimmed, case-folded, whitespace collapsed.
+ * It is hostile text and is used for nothing else — it stays in memory for
+ * the length of one computation and is never logged, returned or shown.
+ */
+export function subjectGroupKey(subject: string | undefined): string {
+  return (subject ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+/**
+ * The largest set of recipients that received one subject, and how many of
+ * them are absent from `known`. Ties go to the group with more new recipients.
+ */
+function largestSubjectGroup(
+  groups: Map<string, Set<string>>,
+  known: Set<string>
+): { recipients: number; fresh: number } {
+  let best = { recipients: 0, fresh: 0 };
+  for (const recipients of groups.values()) {
+    let fresh = 0;
+    for (const recipient of recipients) {
+      if (!known.has(recipient)) {
+        fresh++;
+      }
+    }
+    if (
+      recipients.size > best.recipients ||
+      (recipients.size === best.recipients && fresh > best.fresh)
+    ) {
+      best = { recipients: recipients.size, fresh };
+    }
+  }
+  return best;
 }
 
 /**
@@ -283,6 +336,10 @@ function tally(
     period.messages.add(messageKey);
     if (recipient && row.status?.toLowerCase() !== 'expanded') {
       period.recipients.add(recipient);
+      const subjectKey = subjectGroupKey(row.subject);
+      const group = period.recipientsBySubject.get(subjectKey) ?? new Set<string>();
+      group.add(recipient);
+      period.recipientsBySubject.set(subjectKey, group);
     }
     if (row.senderAddress) {
       period.senders.add(row.senderAddress.toLowerCase());
@@ -307,15 +364,19 @@ function utcDate(ms: number | undefined): string | undefined {
 
 /**
  * Decide the classification from counts. Fan-out is only judged against a
- * complete history: with a truncated one "new recipient" cannot be claimed.
+ * complete history (with a truncated one "new recipient" cannot be claimed),
+ * only for a sender the organization has written to, and on the recipients
+ * of a single subject rather than everything the sender sent in the burst.
  */
 export function classifySenderRelationship(input: {
   historyMessages: number;
   historyRecipients: number;
   historyTruncated: boolean;
   twoWayMessages: number;
-  burstRecipients: number;
-  newRecipients: number | null;
+  /** Most distinct burst recipients that received one subject */
+  sameSubjectRecipients: number;
+  /** How many of those had no mail from the address in the history period */
+  sameSubjectNewRecipients: number | null;
   fanoutMinRecipients: number;
   fanoutMultiplier: number;
 }): SenderRelationshipClass {
@@ -330,10 +391,12 @@ export function classifySenderRelationship(input: {
   }
   const anomalous =
     !input.historyTruncated &&
-    input.newRecipients !== null &&
-    input.burstRecipients >= input.fanoutMinRecipients &&
-    input.burstRecipients >= input.fanoutMultiplier * Math.max(input.historyRecipients, 1) &&
-    input.newRecipients >= Math.ceil(FANOUT_MIN_NEW_RECIPIENT_SHARE * input.burstRecipients);
+    input.sameSubjectNewRecipients !== null &&
+    input.twoWayMessages >= FANOUT_MIN_TWO_WAY_MESSAGES &&
+    input.sameSubjectRecipients >= input.fanoutMinRecipients &&
+    input.sameSubjectRecipients >= input.fanoutMultiplier * Math.max(input.historyRecipients, 1) &&
+    input.sameSubjectNewRecipients >=
+      Math.ceil(FANOUT_MIN_NEW_RECIPIENT_SHARE * input.sameSubjectRecipients);
   return anomalous ? 'established_with_anomalous_fanout' : 'established';
 }
 
@@ -361,6 +424,11 @@ export function computeSenderHistoryFacts(input: SenderHistoryInput): SenderHist
     newRecipients = bounded(fresh, burstTruncated);
   }
 
+  const subjectGroup = largestSubjectGroup(
+    inbound.burst.recipientsBySubject,
+    inbound.history.recipients
+  );
+
   let seenIps = 0;
   const reportableIps: SenderBurstIp[] = [];
   for (const ip of inbound.burst.ips) {
@@ -383,8 +451,8 @@ export function computeSenderHistoryFacts(input: SenderHistoryInput): SenderHist
     historyRecipients: inbound.history.recipients.size,
     historyTruncated,
     twoWayMessages: outbound.messages.size,
-    burstRecipients: inbound.burst.recipients.size,
-    newRecipients: newRecipients?.count ?? null,
+    sameSubjectRecipients: subjectGroup.recipients,
+    sameSubjectNewRecipients: historyTruncated ? null : subjectGroup.fresh,
     fanoutMinRecipients: input.fanoutMinRecipients,
     fanoutMultiplier: input.fanoutMultiplier,
   });
@@ -406,6 +474,10 @@ export function computeSenderHistoryFacts(input: SenderHistoryInput): SenderHist
       messages: bounded(inbound.burst.messages.size, burstTruncated),
       recipients: bounded(inbound.burst.recipients.size, burstTruncated),
       newRecipients,
+      sameSubject: {
+        recipients: bounded(subjectGroup.recipients, burstTruncated),
+        newRecipients: historyTruncated ? null : bounded(subjectGroup.fresh, burstTruncated),
+      },
     },
     sendingIps: {
       burst: inbound.burst.ips.size,
@@ -603,6 +675,7 @@ export class SenderHistoryService {
         historyMessages: facts.history.messages.count,
         historyRecipients: facts.history.recipients.count,
         burstRecipients: facts.burst.recipients.count,
+        sameSubjectRecipients: facts.burst.sameSubject.recipients.count,
         truncated: facts.truncated,
         windows: windows.length,
         forbiddenRetries: stats.forbiddenRetries,

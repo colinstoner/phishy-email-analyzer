@@ -37,7 +37,12 @@ function facts(
     burstWindowHours: 24,
     history: { messages: exact(12), recipients: exact(3), firstSeen: '2026-10-20' },
     twoWay: { messages: exact(5), internalSenders: exact(2) },
-    burst: { messages: exact(41), recipients: exact(40), newRecipients: exact(38) },
+    burst: {
+      messages: exact(41),
+      recipients: exact(40),
+      newRecipients: exact(38),
+      sameSubject: { recipients: exact(36), newRecipients: exact(35) },
+    },
     sendingIps: {
       burst: 2,
       seenInHistory: 0,
@@ -54,7 +59,12 @@ function facts(
 
 const TRUNCATED = facts('established', {
   history: { messages: { count: 2000, atLeast: true }, recipients: { count: 150, atLeast: true }, firstSeen: '2026-11-01' },
-  burst: { messages: exact(4), recipients: exact(4), newRecipients: null },
+  burst: {
+    messages: exact(4),
+    recipients: exact(4),
+    newRecipients: null,
+    sameSubject: { recipients: { count: 3, atLeast: true }, newRecipients: null },
+  },
   sendingIps: { burst: 1, seenInHistory: 1, historyComplete: false },
   truncated: true,
 });
@@ -107,6 +117,9 @@ describe('formatSenderHistoryLines', () => {
     expect(text).toContain(
       'Burst window (the last 24 hours): 41 messages to 40 distinct internal recipients; 38 of them had no mail from this address in the history period'
     );
+    expect(text).toContain(
+      'Widest single message in the burst: 36 distinct internal recipients received the same subject; 35 of them had no mail from this address in the history period'
+    );
     expect(text).toContain('2 distinct; 0 of them also seen in the history period');
     expect(text).not.toContain('at least');
     expect(text).not.toContain('Elision');
@@ -120,6 +133,9 @@ describe('formatSenderHistoryLines', () => {
       'at least 2000 messages to at least 150 distinct internal recipients; first seen on or before 2026-11-01'
     );
     expect(text).toContain('could not be determined (history was cut short)');
+    expect(text).toContain(
+      'Widest single message in the burst: at least 3 distinct internal recipients received the same subject; how many of them are new'
+    );
     expect(text).toContain('1 distinct; at least 1 of them also seen');
     expect(text).toContain('Elision: counts marked "at least" were cut short by a row cap');
   });
@@ -129,7 +145,12 @@ describe('formatSenderHistoryLines', () => {
       facts('no_history', {
         history: { messages: exact(0), recipients: exact(0) },
         twoWay: { messages: exact(0), internalSenders: exact(0) },
-        burst: { messages: exact(0), recipients: exact(0), newRecipients: exact(0) },
+        burst: {
+          messages: exact(0),
+          recipients: exact(0),
+          newRecipients: exact(0),
+          sameSubject: { recipients: exact(0), newRecipients: exact(0) },
+        },
         sendingIps: { burst: 0, seenInHistory: 0, historyComplete: true },
       })
     )
@@ -139,6 +160,7 @@ describe('formatSenderHistoryLines', () => {
     expect(text).toContain('none: no mail from the organization to this address');
     expect(text).toContain('no mail from this address');
     expect(text).toContain('none recorded');
+    expect(text).not.toContain('Widest single message');
     expect(text).not.toMatch(/domain/i);
   });
 
@@ -169,7 +191,10 @@ describe('prompt: SENDER RELATIONSHIP block', () => {
     expect(block).toBeLessThan(prompt.indexOf('=== OPERATOR'));
     expect(block).toBeLessThan(prompt.indexOf('=== CLAIMED'));
     expect(prompt).toContain('Classification: established_with_anomalous_fanout');
+    expect(prompt).toContain('36 distinct internal recipients received the same subject');
     expect(prompt).toContain('A relationship NEVER lowers risk');
+    // The subject is a grouping key only: the block never quotes one
+    expect(prompt.slice(block, prompt.indexOf('=== OPERATOR'))).not.toContain('RFQ 1001');
   });
 
   it('never carries a sending IP, even though the facts hold them for the security copy', () => {
@@ -585,7 +610,7 @@ describe('graph.senderHistory configuration', () => {
       lookbackDays: 30,
       burstWindowHours: 24,
       budgetMs: 8000,
-      fanoutMinRecipients: 10,
+      fanoutMinRecipients: 15,
       fanoutMultiplier: 3,
     });
   });

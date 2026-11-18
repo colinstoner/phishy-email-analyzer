@@ -183,6 +183,15 @@ export interface SenderHistoryFacts {
     recipients: BoundedCount;
     /** Burst recipients with no mail from the address in the history period; null when history was cut short */
     newRecipients: BoundedCount | null;
+    /**
+     * The largest group of burst recipients that received the same subject
+     * (the figure fan-out is judged on), and how many of them are new to the
+     * address. Counts only: the subject itself is never kept.
+     */
+    sameSubject: {
+      recipients: BoundedCount;
+      newRecipients: BoundedCount | null;
+    };
   };
   sendingIps: {
     /** Distinct sending IPs in the burst window */

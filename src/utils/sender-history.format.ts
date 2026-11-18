@@ -111,6 +111,18 @@ export function formatSenderHistoryLines(
   }
   lines.push([`Burst window (the last ${facts.burstWindowHours} hours)`, burstText]);
 
+  const { sameSubject } = burst;
+  if (sameSubject.recipients.count > 0) {
+    lines.push([
+      'Widest single message in the burst',
+      `${formatBoundedCount(sameSubject.recipients, 'distinct internal recipient')} received the same subject; ${
+        sameSubject.newRecipients === null
+          ? 'how many of them are new to this address could not be determined (history was cut short)'
+          : `${sameSubject.newRecipients.atLeast ? 'at least ' : ''}${sameSubject.newRecipients.count} of them had no mail from this address in the history period`
+      }`,
+    ]);
+  }
+
   const { sendingIps } = facts;
   lines.push([
     'Sending IPs in the burst window',
