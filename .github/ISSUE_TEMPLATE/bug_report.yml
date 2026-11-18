@@ -48,7 +48,7 @@ body:
       label: Environment
       placeholder: |
         Phishy version: 3.0.0
-        Provider: bedrock (global.anthropic.claude-opus-4-8)
+        Provider: bedrock (global.anthropic.claude-opus-5-5)
         Node: 22
         Features enabled: intelligence, agentic
   - type: textarea

@@ -4,7 +4,12 @@
  * using fake in-memory providers (no network calls).
  */
 
+import axios from 'axios';
 import { AnalysisService } from '../../../../src/services/ai/analysis.service';
+import { AnthropicProvider } from '../../../../src/services/ai/anthropic.provider';
+import { AgenticAnalyzer } from '../../../../src/services/ai/agentic/agentic.analyzer';
+import { AgenticToolExecutor } from '../../../../src/services/ai/agentic/tool.executor';
+import * as metrics from '../../../../src/utils/metrics';
 import { AIProvider, ProviderHealth } from '../../../../src/services/ai/provider.interface';
 import { AnalysisResult, ExtractedEmailData } from '../../../../src/types';
 import { createMinimalProfile } from '../../../../src/models/profile.model';
@@ -279,6 +284,117 @@ describe('AnalysisService', () => {
       expect(first.provider).toBe('none');
       expect(second).toEqual(recovered);
       expect(primary.analyzeEmail).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('analyzeEmail - agentic path with refusals (real provider, HTTP mocked)', () => {
+    const VERDICT = JSON.stringify({
+      summary: 'Credential-harvesting lure.',
+      verdict: 'phishing',
+      riskScore: 90,
+      verdictConfidence: 0.9,
+      threatVectors: ['credential_harvest'],
+      targeting: 'mass',
+      indicators: ['Link to login.bad-domain.test'],
+      recommendations: ['Delete the email'],
+      iocs: [],
+    });
+    const THINKING = { type: 'thinking', thinking: '', signature: 'sig-loop-1' };
+    const TOOL_TURN = {
+      data: {
+        content: [
+          THINKING,
+          {
+            type: 'tool_use',
+            id: 'toolu_01',
+            name: 'examine_url',
+            input: { url: 'https://login.bad-domain.test/' },
+          },
+        ],
+        stop_reason: 'tool_use',
+      },
+    };
+    const REFUSAL = {
+      data: { content: [], stop_reason: 'refusal', stop_details: { category: 'cyber' } },
+    };
+    const VERDICT_TURN = {
+      data: { content: [THINKING, { type: 'text', text: VERDICT }], stop_reason: 'end_turn' },
+    };
+
+    let post: jest.SpyInstance;
+    let refusalMetric: jest.SpyInstance;
+
+    function makeAgenticService(): AnalysisService {
+      const provider = new AnthropicProvider({ apiKey: 'test-key' }, headers => headers);
+      const analyzer = new AgenticAnalyzer(new AgenticToolExecutor({}), {
+        essentialHeadersExtractor: headers => headers,
+      });
+      return new AnalysisService({ primaryProvider: provider, agenticAnalyzer: analyzer });
+    }
+
+    const sentBody = (call: number): Record<string, unknown> =>
+      post.mock.calls[call][1] as Record<string, unknown>;
+
+    beforeEach(() => {
+      post = jest.spyOn(axios, 'post');
+      refusalMetric = jest.spyOn(metrics, 'emitAnalysisRefusalMetric').mockImplementation(() => {});
+    });
+
+    it('abandons a refused loop and recovers on the single-shot refusal fallback', async () => {
+      post
+        .mockResolvedValueOnce(TOOL_TURN) // agentic round 1
+        .mockResolvedValueOnce(REFUSAL) // agentic round 2: refused mid-loop
+        .mockResolvedValueOnce(REFUSAL) // single-shot on the primary model
+        .mockResolvedValueOnce(VERDICT_TURN); // single-shot on the refusal fallback
+
+      const result = await makeAgenticService().analyzeEmail(makeEmailData());
+
+      expect(post).toHaveBeenCalledTimes(4);
+      expect(result.analysisFailed).toBeUndefined();
+      expect(result.assessment?.verdict).toBe('phishing');
+      expect(result.model).toBe('claude-opus-4-8');
+
+      // The loop replayed its own thinking block to the model that produced it...
+      expect(sentBody(1).model).toBe('claude-opus-5-5');
+      expect(JSON.stringify(sentBody(1).messages)).toContain('sig-loop-1');
+      // ...but the single-shot requests are fresh: one user prompt, no tools,
+      // and no thinking block from the abandoned conversation
+      for (const call of [2, 3]) {
+        const messages = sentBody(call).messages as Array<{ role: string; content: unknown }>;
+        expect(messages).toHaveLength(1);
+        expect(messages[0].role).toBe('user');
+        expect(typeof messages[0].content).toBe('string');
+        expect(sentBody(call)).not.toHaveProperty('tools');
+        expect(JSON.stringify(sentBody(call))).not.toContain('sig-loop-1');
+      }
+      expect(sentBody(3).model).toBe('claude-opus-4-8');
+      // One metric per refused call
+      expect(refusalMetric).toHaveBeenCalledTimes(2);
+    });
+
+    it('reports analysisFailed — never a verdict — when every model refuses', async () => {
+      post.mockResolvedValue(REFUSAL);
+
+      const result = await makeAgenticService().analyzeEmail(makeEmailData());
+
+      // agentic round 1, single-shot primary, single-shot fallback
+      expect(post).toHaveBeenCalledTimes(3);
+      expect(result.analysisFailed).toBe(true);
+      expect(result.failureReason).toContain('declined');
+      expect(result.assessment).toBeUndefined();
+      expect(result.confidence).toBe('N/A');
+    });
+
+    it('does not hand a refusal to the fallback provider as if it were an outage', async () => {
+      post.mockResolvedValue(REFUSAL);
+      const primary = new AnthropicProvider({ apiKey: 'test-key' }, headers => headers);
+      const fallback = makeProvider({ name: 'fake-fallback' });
+      const service = new AnalysisService({ primaryProvider: primary, fallbackProvider: fallback });
+
+      const result = await service.analyzeEmail(makeEmailData());
+
+      expect(result.analysisFailed).toBe(true);
+      expect(fallback.analyzeEmail).not.toHaveBeenCalled();
     });
   });
 

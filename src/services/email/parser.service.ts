@@ -26,6 +26,7 @@ import {
 } from '../../utils/validation';
 import { S3Service } from '../storage/s3.service';
 import { buildLinkFacts, canonicalizeText, findAnchorMismatches } from '../../utils/canonicalize';
+import { detectUserReport } from './user.report';
 
 const logger = createLogger('email-parser');
 
@@ -91,15 +92,30 @@ const ESSENTIAL_HEADER_NAMES = [
  */
 const ORIGINAL_SENDER_HEADERS = ['X-Original-From', 'X-Sender', 'Original-From', 'X-Envelope-From'];
 
+export interface EmailParserOptions {
+  /**
+   * Recognize Outlook Report-button submissions (see user.report.ts). Off by
+   * default: without it a button report is parsed like any other forward.
+   */
+  detectUserReports?: boolean;
+}
+
 export class EmailParserService {
   private s3Service: S3Service;
   private safeDomains: string[];
   private defaultBucket: string;
+  private detectUserReports: boolean;
 
-  constructor(s3Service: S3Service, safeDomains: string[], defaultBucket: string) {
+  constructor(
+    s3Service: S3Service,
+    safeDomains: string[],
+    defaultBucket: string,
+    options: EmailParserOptions = {}
+  ) {
     this.s3Service = s3Service;
     this.safeDomains = safeDomains.map(d => d.toLowerCase());
     this.defaultBucket = defaultBucket;
+    this.detectUserReports = options.detectUserReports ?? false;
   }
 
   /**
@@ -218,11 +234,19 @@ export class EmailParserService {
             logger.warn('Empty or very short email content received');
           }
 
-          const forwarded = await this.parseRawEmail(content);
+          const subject = record.ses.mail.commonHeaders?.subject ?? 'No Subject';
+          const userReport = this.detectUserReports ? detectUserReport(subject) : null;
+
+          // A button report's wrapper body is a machine-generated dump of the
+          // reported email's headers, not an employee's note — drop it so
+          // attacker-controlled header text is never labeled REPORTED.
+          const forwarded = await this.parseRawEmail(content, {
+            discardWrapperBody: !!userReport,
+          });
 
           const msg: EmailMessage = {
             from_email: record.ses.mail.source,
-            subject: record.ses.mail.commonHeaders?.subject ?? 'No Subject',
+            subject,
             headers: this.extractHeaders(record.ses.mail.headers),
             text: forwarded.text || record.ses.mail.commonHeaders?.subject || 'No email content',
             html: forwarded.html,
@@ -238,6 +262,7 @@ export class EmailParserService {
               dkim: record.ses.receipt?.dkimVerdict?.status,
               dmarc: record.ses.receipt?.dmarcVerdict?.status,
             },
+            ...(userReport ? { userReport } : {}),
           };
 
           logger.debug('Processed email', {
@@ -337,7 +362,10 @@ export class EmailParserService {
    * forwarded block, so downstream forwarded-header extraction and analysis
    * see the original email rather than just the wrapper.
    */
-  private async parseRawEmail(content: string): Promise<{
+  private async parseRawEmail(
+    content: string,
+    options: { discardWrapperBody?: boolean } = {}
+  ): Promise<{
     text: string;
     html: string | null;
     attachments: EmailAttachment[];
@@ -375,8 +403,10 @@ export class EmailParserService {
       return result;
     }
 
-    result.text = parsed.text ?? '';
-    result.html = typeof parsed.html === 'string' ? parsed.html : null;
+    if (!options.discardWrapperBody) {
+      result.text = parsed.text ?? '';
+      result.html = typeof parsed.html === 'string' ? parsed.html : null;
+    }
 
     for (const attachment of parsed.attachments.slice(0, MAX_ATTACHMENTS)) {
       // Forward-as-attachment: parse the embedded original email
@@ -544,6 +574,18 @@ export class EmailParserService {
 
     emailData.originalForwarder = this.findOriginalForwarder(msg, emailData.headers);
     emailData.forwardedHeaders = this.extractForwardedHeaders(emailData.text);
+
+    if (msg.userReport) {
+      emailData.userReport = msg.userReport;
+      // The wrapper subject embeds a per-recipient message ID and a timestamp,
+      // so it never repeats. Use the reported email's own subject (from the
+      // attached original) so campaign grouping and reports line up with
+      // forwards of the same email.
+      const originalSubject = emailData.forwardedHeaders['Original-Subject'];
+      if (originalSubject) {
+        emailData.subject = originalSubject;
+      }
+    }
 
     // Canonicalize hostile content: links are unwrapped to their true
     // destinations (gateway wrappers removed), the body is normalized, and

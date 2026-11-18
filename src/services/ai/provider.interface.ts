@@ -15,13 +15,19 @@ import {
 } from '../../types';
 import { EnterpriseProfile } from '../../models/profile.model';
 import { ConversationRequest, ConversationResponse } from './conversation.types';
+import { EffortLevel } from './model.capabilities';
 
 /**
- * Options for AI analysis
+ * Options for AI analysis.
+ *
+ * There are deliberately no sampling parameters (temperature, top_p, top_k):
+ * current Claude models reject them with a 400. `effort` is the control for
+ * depth, cost and latency.
  */
 export interface AnalysisOptions {
   maxTokens?: number;
-  temperature?: number;
+  /** Overrides the configured `ai.effort` for this call */
+  effort?: EffortLevel;
   timeout?: number;
   additionalContext?: string;
 }
@@ -241,6 +247,17 @@ export function parseAnalysisResponse(
     const parsed = JSON.parse(jsonText) as AIAnalysisResponse;
     const assessment = sanitizeAssessment(parsed);
 
+    // Fail closed: JSON that carries neither a recognized verdict nor a boolean
+    // isPhishing is not a ruling. Defaulting it to isPhishing:false would turn
+    // a malformed reply into "legitimate".
+    if (!assessment && typeof parsed?.isPhishing !== 'boolean') {
+      return createFailedAnalysisResult(
+        'The model response did not contain a recognizable verdict',
+        processingTimeMs,
+        responseText
+      );
+    }
+
     // Derive the legacy fields from the structured verdict when present, so
     // every downstream consumer keeps working unchanged.
     const isPhishing = assessment
@@ -267,6 +284,17 @@ export function parseAnalysisResponse(
     // Attempt to extract key fields with regex if JSON parsing fails
     const result = extractFieldsFromText(responseText);
 
+    // Fail closed: text that is not JSON and states no explicit isPhishing
+    // value (a truncated or free-form reply) is an incomplete analysis, not a
+    // "not phishing" ruling.
+    if (!result) {
+      return createFailedAnalysisResult(
+        'The model response was not valid JSON and contained no explicit verdict',
+        processingTimeMs,
+        responseText
+      );
+    }
+
     return {
       ...result,
       rawResponse: responseText,
@@ -278,18 +306,57 @@ export function parseAnalysisResponse(
 }
 
 /**
- * Extract analysis fields from non-JSON text
+ * The result for an analysis the model did not complete — it refused, its
+ * reply was cut off, or the reply held no verdict. `analysisFailed` is what
+ * downstream code keys on: risk fusion routes it to the `undetermined`
+ * verdict, the report says the email was not checked, and it is never stored
+ * or cached. `isPhishing: false` is a placeholder, never a ruling.
+ */
+export function createFailedAnalysisResult(
+  failureReason: string,
+  processingTimeMs?: number,
+  rawResponse?: string
+): AnalysisResult {
+  return {
+    // The summary is shown to the reporting employee: keep it plain. The
+    // technical detail (model IDs, refusal category) stays in failureReason,
+    // which is logged for operators.
+    summary:
+      'Analysis could not be completed, so this email was NOT checked. Treat it with caution.',
+    analysisFailed: true,
+    failureReason,
+    isPhishing: false,
+    confidence: 'N/A',
+    indicators: ['Analysis could not be completed'],
+    recommendations: ['Treat this email with caution and contact your security team'],
+    rawResponse,
+    processingTimeMs,
+    // 'none' marks a result no model produced. The campaign verdict cache
+    // excludes it by that value — a second guard behind the handler's
+    // analysisFailed check. The models involved are named in failureReason.
+    provider: 'none',
+    model: 'none',
+  };
+}
+
+/**
+ * Extract analysis fields from non-JSON text. Returns undefined when the text
+ * states no explicit isPhishing value.
  */
 function extractFieldsFromText(
   text: string
-): Omit<AnalysisResult, 'rawResponse' | 'processingTimeMs' | 'provider' | 'model'> {
+): Omit<AnalysisResult, 'rawResponse' | 'processingTimeMs' | 'provider' | 'model'> | undefined {
   const summaryMatch = text.match(/"summary"\s*:\s*"([^"]+)"/i);
   const isPhishingMatch = text.match(/"isPhishing"\s*:\s*(true|false)/i);
   const confidenceMatch = text.match(/"confidence"\s*:\s*"([^"]+)"/i);
 
+  if (!isPhishingMatch) {
+    return undefined;
+  }
+
   return {
     summary: summaryMatch?.[1] ?? 'Analysis completed - response format unexpected',
-    isPhishing: isPhishingMatch?.[1]?.toLowerCase() === 'true',
+    isPhishing: isPhishingMatch[1].toLowerCase() === 'true',
     confidence: normalizeConfidence(confidenceMatch?.[1] ?? 'Unknown'),
     indicators: [],
     recommendations: ['Review the raw analysis output for details'],
