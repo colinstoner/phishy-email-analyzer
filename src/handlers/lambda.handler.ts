@@ -19,6 +19,7 @@ import {
   EmailMessage,
   ExtractedEmailData,
   AnalysisResult,
+  EmailSendResult,
 } from '../types';
 import { createLogger } from '../utils/logger';
 import { extractEmailAddress, domainMatches } from '../utils/validation';
@@ -27,6 +28,7 @@ import {
   emitAIUsageMetric,
   emitAnalysisFailureMetric,
   emitCampaignCacheHitMetric,
+  emitSecurityCopyFailureMetric,
   emitUserReportMetric,
 } from '../utils/metrics';
 import { shouldNotifySecurityTeam } from '../services/email/user.report';
@@ -51,6 +53,11 @@ import {
   createGraphReadClient,
   enrichWithOriginalMessage,
 } from '../services/graph';
+import {
+  BlastRadiusReport,
+  BlastRadiusService,
+  createBlastRadiusService,
+} from '../services/graph/blast-radius.service';
 
 const logger = createLogger('lambda-handler');
 
@@ -81,6 +88,8 @@ let cachedServices: {
   commandService?: EmailCommandService;
   /** Read-only Graph client for the original-message lookup, when that feature is on */
   originalFetchClient?: GraphClient;
+  /** Who-else-received-it lookup for malicious verdicts, when that feature is on */
+  blastRadius?: BlastRadiusService;
 } | null = null;
 
 /**
@@ -117,7 +126,9 @@ export async function handler(event: SESEvent, _context: Context): Promise<APIGa
       }
 
       try {
-        const result = await processEmailEvent(emailEvent.msg, config, services);
+        const result = await processEmailEvent(emailEvent.msg, config, services, () =>
+          _context?.getRemainingTimeInMillis?.()
+        );
         processingResults.push(result);
       } catch (eventError) {
         logger.error('Error processing event', {
@@ -304,6 +315,8 @@ async function initializeServices(): Promise<{
     campaignService,
     commandService,
     originalFetchClient,
+    // Who-else-received-it lookup for malicious verdicts (off by default)
+    blastRadius: createBlastRadiusService(config.graph),
   };
 
   logger.info('Services initialized', {
@@ -400,7 +413,8 @@ async function loadProfile(profilePath: string, region: string): Promise<Enterpr
 async function processEmailEvent(
   msg: EmailMessage,
   config: PhishyConfig,
-  services: NonNullable<typeof cachedServices>
+  services: NonNullable<typeof cachedServices>,
+  getRemainingMs?: () => number | undefined
 ): Promise<ProcessingResult> {
   // Extract and normalize email data
   const emailData = services.emailParser.extractEmailData(msg);
@@ -699,6 +713,19 @@ async function processEmailEvent(
     }
   }
 
+  // Blast radius: for a malicious verdict, who else received this and what
+  // they did with it. Code-driven, after the verdict; the result goes only
+  // into an email addressed to the security team and never to the model or
+  // the reporter. Decided here, run just before that email is sent.
+  const blastRadiusService =
+    riskDecision.isPhishing && !analysis.analysisFailed && !isSafelistUser
+      ? services.blastRadius
+      : undefined;
+  const lookupBlastRadius = blastRadiusService
+    ? (reporterAddress?: string): Promise<BlastRadiusReport> =>
+        blastRadiusService.lookup(emailData, { remainingMs: getRemainingMs?.(), reporterAddress })
+    : undefined;
+
   // Report-button submissions never produce a reply to the reporter. The
   // security team is told only when the outcome warrants their attention.
   if (userReport) {
@@ -711,6 +738,7 @@ async function processEmailEvent(
         reasons: riskDecision.reasons,
       },
       isPhishing: riskDecision.isPhishing,
+      lookupBlastRadius,
     });
   }
 
@@ -734,18 +762,25 @@ async function processEmailEvent(
       },
     };
 
-    const emailResult = await services.sesNotifier.sendAnalysisReport(
-      recipient,
-      analysis,
-      emailData,
-      ccOverride,
-      reportOptions
+    // With blast radius, the lookup runs inside sendReports, after the
+    // reporter's copy has gone; its result is in the security team's copy only.
+    const securityTeam = config.notification.securityTeamDistribution;
+    const { reporterResult: emailResult, commandReplyMessageId } = await sendReports(
+      services.sesNotifier,
+      { recipient, analysis, emailData, ccOverride, reportOptions },
+      lookupBlastRadius && securityTeam.length > 0
+        ? {
+            securityTeam,
+            lookup: (): Promise<BlastRadiusReport> => lookupBlastRadius(recipient),
+          }
+        : undefined
     );
 
-    // Remember the outbound message ID so In-Reply-To matching works
-    if (storedAnalysisId && emailResult.messageId && services.intelligenceDb) {
+    // Remember the outbound message ID so In-Reply-To matching works (the
+    // security team's copy when it was sent separately: they send commands)
+    if (storedAnalysisId && commandReplyMessageId && services.intelligenceDb) {
       try {
-        await services.intelligenceDb.setReportMessageId(storedAnalysisId, emailResult.messageId);
+        await services.intelligenceDb.setReportMessageId(storedAnalysisId, commandReplyMessageId);
       } catch (linkError) {
         logger.warn('Failed to store report message ID', {
           error: linkError instanceof Error ? linkError.message : String(linkError),
@@ -764,6 +799,96 @@ async function processEmailEvent(
 
   logger.warn('Cannot send analysis - invalid recipient', { recipient });
   return { status: 'incomplete', reason: 'invalid_recipient' };
+}
+
+/**
+ * Run a blast-radius lookup for an email to the security team. `lookup()`
+ * does not throw; if it ever does, the email still goes out, with a note.
+ */
+async function resolveBlastRadius(
+  lookup: () => Promise<BlastRadiusReport>
+): Promise<BlastRadiusReport> {
+  try {
+    return await lookup();
+  } catch (error) {
+    logger.error('Blast radius lookup threw', {
+      error: error instanceof Error ? error.name : 'unknown',
+    });
+    return {
+      status: 'unavailable',
+      note: 'Blast radius lookup could not be completed.',
+      lookedUpAt: new Date().toISOString(),
+    };
+  }
+}
+
+/**
+ * Send the analysis report.
+ *
+ * Without `blastRadius` (the feature is off, or the verdict is not
+ * malicious): one email to the reporter with the security team in Cc.
+ *
+ * With it, two emails, in this order:
+ * 1. the reporter's copy, at once and without the section — their warning
+ *    never waits on the lookup;
+ * 2. the lookup (bounded by its own budget and the remaining Lambda time);
+ * 3. the security team's own copy, with the section, or with a one-line
+ *    note when the lookup produced nothing. It is always sent.
+ *
+ * A reporter who is on the security team gets only the security copy. The
+ * security copy's message ID is the one command replies are matched to.
+ */
+export async function sendReports(
+  notifier: SESNotifier,
+  report: {
+    recipient: string;
+    analysis: AnalysisResult;
+    emailData: ExtractedEmailData;
+    ccOverride?: string[];
+    reportOptions: ReportOptions;
+  },
+  blastRadius?: { securityTeam: string[]; lookup: () => Promise<BlastRadiusReport> }
+): Promise<{ reporterResult: EmailSendResult; commandReplyMessageId?: string }> {
+  const { recipient, analysis, emailData, ccOverride, reportOptions } = report;
+
+  if (!blastRadius) {
+    const reporterResult = await notifier.sendAnalysisReport(
+      recipient,
+      analysis,
+      emailData,
+      ccOverride,
+      reportOptions
+    );
+    return { reporterResult, commandReplyMessageId: reporterResult.messageId };
+  }
+
+  const reporter = recipient.trim().toLowerCase();
+  const reporterIsSecurityTeam = blastRadius.securityTeam.some(
+    member => member.trim().toLowerCase() === reporter
+  );
+  const reporterResult = reporterIsSecurityTeam
+    ? undefined
+    : await notifier.sendAnalysisReport(recipient, analysis, emailData, [], reportOptions);
+
+  const section = await resolveBlastRadius(blastRadius.lookup);
+
+  const [first, ...rest] = blastRadius.securityTeam;
+  const securityResult = await notifier.sendAnalysisReport(first, analysis, emailData, rest, {
+    ...reportOptions,
+    blastRadius: section,
+  });
+  if (!securityResult.success) {
+    // The reporter already has theirs: nothing is re-sent, but this must be seen
+    logger.error('Security-team copy of a malicious report was not sent', {
+      error: securityResult.error,
+    });
+    emitSecurityCopyFailureMetric();
+  }
+
+  return {
+    reporterResult: reporterResult ?? securityResult,
+    commandReplyMessageId: securityResult.messageId,
+  };
 }
 
 /**
@@ -786,6 +911,11 @@ async function cleanupStoredEmail(
  * detection. The security team — operator-configured addresses, never anything
  * derived from the message — gets the report when the verdict is malicious or
  * suspicious, or when the analysis could not be completed.
+ *
+ * With blast radius on and a malicious verdict (`lookupBlastRadius` is set),
+ * the lookup runs first and that same single email carries its section, or
+ * a one-line note when the lookup produced nothing. Nobody is waiting on
+ * this path, so there is no second email and no ordering to preserve.
  */
 async function finishSilentUserReport(
   msg: EmailMessage,
@@ -797,6 +927,7 @@ async function finishSilentUserReport(
     storedAnalysisId?: string;
     risk: NonNullable<ReportOptions['risk']>;
     isPhishing: boolean;
+    lookupBlastRadius?: () => Promise<BlastRadiusReport>;
   }
 ): Promise<ProcessingResult> {
   const securityTeam = config.notification.securityTeamDistribution;
@@ -816,6 +947,10 @@ async function finishSilentUserReport(
     return { status: 'processed', reason: 'user_report_recorded' };
   }
 
+  const blastRadius = outcome.lookupBlastRadius
+    ? await resolveBlastRadius(outcome.lookupBlastRadius)
+    : undefined;
+
   const [primary, ...others] = securityTeam;
   const emailResult = await services.sesNotifier.sendAnalysisReport(
     primary,
@@ -826,8 +961,16 @@ async function finishSilentUserReport(
       ...(outcome.storedAnalysisId ? { analysisId: outcome.storedAnalysisId } : {}),
       risk: outcome.risk,
       silentReport: { reporter: emailData.from_email },
+      ...(blastRadius ? { blastRadius } : {}),
     }
   );
+  if (blastRadius && !emailResult.success) {
+    // Same signal as a failed security copy on the forward path
+    logger.error('Security-team email for a malicious button report was not sent', {
+      error: emailResult.error,
+    });
+    emitSecurityCopyFailureMetric();
+  }
 
   // Remember the outbound message ID so security-team replies (commands)
   // can be matched back to this analysis

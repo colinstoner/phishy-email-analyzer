@@ -160,6 +160,8 @@ describe('Outlook Report-button intake', () => {
     expect(cc).toEqual(['soc-lead@example.com']);
     expect([recipient, ...cc]).not.toContain('employee@example.com');
     expect(options.silentReport).toEqual({ reporter: 'employee@example.com' });
+    // Blast radius is off here: the email is exactly what it was without it
+    expect(options).not.toHaveProperty('blastRadius');
 
     // The reported email's own subject replaces the machine-generated wrapper
     expect(emailData.subject).toBe('Your account is suspended');

@@ -107,7 +107,7 @@ The agentic conversation is **append-only**: the system prompt and tool list are
 
 ## Microsoft Graph (optional foundation)
 
-`src/services/graph/` lets Phishy call Microsoft Graph on the organization's own Microsoft 365 tenant. It is off by default. The foundation is authentication, credential loading, an HTTP client and a library of read operations; enabling it alone changes nothing. One pipeline feature is built on it, behind its own flag: the [original-message lookup](#original-message-lookup). Further features (checking who else received an email) build on it separately.
+`src/services/graph/` lets Phishy call Microsoft Graph on the organization's own Microsoft 365 tenant. It is off by default. The foundation is authentication, credential loading, an HTTP client and a library of read operations; enabling it alone changes nothing. Two pipeline features are built on it, each behind its own flag: the [original-message lookup](#original-message-lookup) (before analysis) and [blast radius](#blast-radius-optional) (after a malicious verdict).
 
 | Piece | File | Role |
 |---|---|---|
@@ -117,6 +117,7 @@ The agentic conversation is **append-only**: the system prompt and tool list are
 | HTTP client | `graph.client.ts` | `getJson` / `getBytes` / `getText` / `postJson` / `getPaged` against a fixed base URL |
 | Read operations | `mail.operations.ts`, `trace.operations.ts`, `directory.operations.ts` | small typed GET-only functions (find a message by Internet message ID or sender + window, search, headers, MIME, last-verb, message trace, users, licence capabilities); every result is capped and reports truncation; cross-mailbox and trace lookups return metadata only |
 | Original-message lookup | `original.fetch.ts` | the pipeline step described [below](#original-message-lookup): reporter-mailbox check, claimed-time parsing, the unique-match rule, time budget |
+| Blast radius | `blast-radius.service.ts` | the post-verdict step described [below](#blast-radius-optional): message trace, per-mailbox fallback, time budget, coverage |
 | Probe CLI | `src/cli/graph-probe*.ts` | `npm run graph:probe` — an operator's local, read-only check of which of those calls work in their tenant ([GRAPH_PROBE.md](GRAPH_PROBE.md)); not part of the pipeline |
 
 Trust rules (CLAUDE.md invariant 6):
@@ -126,6 +127,21 @@ Trust rules (CLAUDE.md invariant 6):
 - **Mailbox content is hostile data.** Response bodies are never logged. Content read from any mailbox other than the reporter's own is metadata-only toward the model and logs.
 - **Reads and writes are separate identities.** A client holds exactly one credential. Configuration has a `read` app registration today; a `write` registration, when one exists, is a different app with its own certificate and its own client, so a read path can never obtain a write token. Any write to the tenant additionally requires security-team approval through the authenticated command channel.
 - **Secrets stay secret.** The private key, client assertion and access token never appear in logs or error messages; errors carry only status, Graph error code, request id and a path template with data segments blanked.
+
+### Blast radius (optional)
+
+`blast-radius.service.ts` answers the security team's next question after a malicious verdict: who else received this, and did anyone open or answer it? Off by default (`graph.blastRadius.enabled`, effective only with `graph.enabled`).
+
+- **Where it runs.** In `lambda.handler.ts` (`sendReports`), after the fused verdict, after the analysis has been stored and after the reporter's copy of the report has been sent, only when that verdict is malicious (`riskDecision.isPhishing`), the analysis did not fail, the reporter is not a safelist user and there is a security team to tell. Its result is passed to the report template and nowhere else: not to the model, not to the database, not to the logs (which get counts only).
+- **Identifying the message.** By the original's Internet Message-ID when the parsed email carries one (`forwardedHeaders['Original-Message-ID']`); otherwise by the claimed sender address, the quoted subject and a time window (24 hours either side of the claimed date, or the last 7 days when the forward has no usable date). All of these are hostile strings and reach Graph only through `odataFilter`.
+- **Route 1: message trace.** Recipients and delivery status without reading a mailbox. Each trace row also names the Message-ID that recipient received, so however the trace was keyed, each recipient's mailbox is then read by `internetMessageId eq` (an exact, cheap lookup; at most 3 distinct IDs per mailbox, disclosed when capped) for the folder, read flag and last verb. Rows with status *expanded* (a distribution list, whose members have their own rows) are left out; *failed* rows are listed as not delivered and their mailboxes are not read.
+- **Route 2: per-mailbox search.** When trace fails (commonly HTTP 403: the tenant lacks Microsoft's message-trace service principal, or it is still propagating) or returns no rows, Phishy lists users, keeps licensed, enabled, non-guest accounts up to the mailbox cap, and searches each: by Message-ID when the key has one, otherwise by sender + window (+ subject). The sender search is a filtered, ordered scan and is much slower per mailbox than a Message-ID lookup; it is used only here, where no Message-ID is known. `/messages` does not cover Recoverable Items, so mailboxes without a match are searched there too, time permitting.
+- **Detail is read with the match.** Folder and last verb are read as soon as a mailbox matches, not in a later pass, so a lookup that runs out of time has full detail for every mailbox it reached. Detail that could not be read (a failed request, or the budget ending mid-read) is counted, makes the result partial and is stated in the section.
+- **Bounds.** A hard time budget (default 45 s, shrunk to leave 20 s of Lambda time for sending), a mailbox cap (default 2000), 12 mailboxes at a time with one search per mailbox at a time, and a client limited to two attempts and 5 s per request. `Retry-After` is honoured within a bound; a throttled request that cannot be retried stops the lookup. When the budget ends, what was established so far is reported.
+- **Honest coverage.** The section always says "checked N of M mailboxes" and is marked partial when anything was left uncovered: cap, budget, throttling, failed requests, a truncated trace or directory listing, or Recoverable Items not searched everywhere. "Replied" and "forwarded" are reported only for the last-verb values the MAPI definition gives (102/103 and 104); any other value is shown as unknown with its code.
+- **Delivery.** `sendReports` sends the reporter the usual report first (no Cc, no section), then runs the lookup, then sends the security team its own copy with the section — always, with a one-line note in place of the section when the lookup failed or ran out of time. A reporter who is on the security team gets only that copy. The security copy's message ID is the one stored for command replies; command recognition itself depends only on the sender, the subject, the quoted reference and reply headers, none of which needed the Cc. If the security copy cannot be sent, an error is logged and `SecurityCopySendFailures` is emitted; nothing is re-sent to the reporter. When the feature is off or the verdict is not malicious, the single combined email goes out exactly as before.
+- **Report-button submissions.** A malicious Outlook Report-button report is handled silently: the reporter is never emailed, and the security team gets one email. With blast radius on, the lookup runs before that single email (same budget rules) and the email carries the section, or the one-line note when the lookup produced nothing. There is no second email on that path.
+- **Read-only.** GET requests through the operations library only; no message is moved, deleted or changed.
 
 ### Original-message lookup
 
@@ -168,8 +184,9 @@ Everything optional is off by default and independently enableable:
 | `PHISHY_CAMPAIGN_CACHE_ENABLED` | verdict reuse | intelligence DB + migration 003 |
 | `PHISHY_EMAIL_COMMANDS_ENABLED` | security-team replies | intelligence DB + migration 002 |
 | `PHISHY_AGENTIC_ENABLED` | tool-loop analysis + AI command parsing | nothing (tools appear as their backends do) |
-| `PHISHY_GRAPH_ENABLED` | Microsoft Graph access (foundation — changes nothing on its own) | Entra app registration with a certificate; outbound HTTPS to Microsoft |
+| `PHISHY_GRAPH_ENABLED` | Microsoft Graph access (foundation — changes nothing on its own; the two features below have their own flags) | Entra app registration with a certificate; outbound HTTPS to Microsoft |
 | `PHISHY_GRAPH_ORIGINAL_FETCH_ENABLED` | read the original message's real headers from the reporter's mailbox | `PHISHY_GRAPH_ENABLED`; `Mail.Read` on reporters' mailboxes |
+| `PHISHY_GRAPH_BLAST_RADIUS_ENABLED` | who else received a malicious email (security-team copy only) | `PHISHY_GRAPH_ENABLED` + read permissions listed in [CONFIGURATION.md](CONFIGURATION.md#blast-radius-optional) |
 | `PHISHY_REPORT_BUTTON_ENABLED` | silent handling of Outlook Report-button submissions | Microsoft 365 user-reported settings delivering to Phishy |
 
 See [CONFIGURATION.md](CONFIGURATION.md) for the full reference.

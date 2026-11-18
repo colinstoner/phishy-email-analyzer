@@ -35,7 +35,7 @@ const MAILBOX = 'reporter@example.com';
 const MESSAGE_ID = '<abc.123@mail.example.net>';
 const GRAPH_ID = 'AAMkAGraphId-0001=';
 const SUMMARY_SELECT =
-  'id,internetMessageId,subject,from,receivedDateTime,parentFolderId,hasAttachments';
+  'id,internetMessageId,subject,from,receivedDateTime,parentFolderId,hasAttachments,isRead';
 
 const rawMessage = {
   id: GRAPH_ID,

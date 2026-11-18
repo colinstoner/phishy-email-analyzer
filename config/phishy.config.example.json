@@ -58,6 +58,11 @@
     },
     "originalFetch": {
       "enabled": false
+    },
+    "blastRadius": {
+      "enabled": false,
+      "timeBudgetMs": 45000,
+      "maxMailboxes": 2000
     }
   },
   "reportButton": {

@@ -185,7 +185,7 @@ With the flag off (the default), a button report that reaches Phishy is treated 
 
 ### Microsoft Graph (Optional)
 
-Phishy can authenticate to Microsoft Graph on your own Microsoft 365 tenant. `PHISHY_GRAPH_ENABLED` is a **foundation**: on its own it does not change how emails are analyzed. Each feature that uses Graph has its own flag — today that is the [original-message lookup](#original-message-lookup) — so that features (and later ones, such as checking who else received an email) share one safe, already-reviewed way to reach the tenant. Leave it off unless you are enabling one of them. See [ARCHITECTURE.md](ARCHITECTURE.md#microsoft-graph-optional-foundation) for the trust rules.
+Phishy can authenticate to Microsoft Graph on your own Microsoft 365 tenant. `PHISHY_GRAPH_ENABLED` is a **foundation**: on its own it does not change how emails are analyzed. Each feature that uses Graph has its own flag — today the [original-message lookup](#original-message-lookup) and [blast radius](#blast-radius-optional) (checking who else received a malicious email) — so that features share one safe, already-reviewed way to reach the tenant. Leave it off unless you are enabling one of them. See [ARCHITECTURE.md](ARCHITECTURE.md#microsoft-graph-optional-foundation) for the trust rules.
 
 To find out which Graph calls work in your tenant — with which permissions and licences — before any feature depends on them, run the read-only probe: [GRAPH_PROBE.md](GRAPH_PROBE.md). It runs locally (`npm run graph:probe`), takes the same tenant ID, client ID and certificate, and does not need `PHISHY_GRAPH_ENABLED`.
 
@@ -196,6 +196,8 @@ To find out which Graph calls work in your tenant — with which permissions and
 | `PHISHY_GRAPH_READ_CLIENT_ID` | - | Application (client) ID (GUID) of the read-only app registration. Required when enabled |
 | `PHISHY_GRAPH_READ_CERTIFICATE` | - | Secrets Manager ARN (recommended) or inline PEM holding the app's private key and certificate. Required when enabled |
 | `PHISHY_GRAPH_ORIGINAL_FETCH_ENABLED` | `false` | Before analysis, read the original message's real headers from the reporter's own mailbox. Has effect only when `PHISHY_GRAPH_ENABLED` is also `true`. See [Original-message lookup](#original-message-lookup) |
+
+Blast radius has its own variables, listed under [Blast radius](#blast-radius-optional).
 
 File configuration uses the same names: `graph.enabled`, `graph.tenantId`, `graph.read.clientId`, `graph.read.certificate`, `graph.originalFetch.enabled`. With `graph.enabled` set, a missing or malformed value fails configuration at startup; with it unset, the other values are ignored.
 
@@ -252,6 +254,42 @@ The Lambda needs outbound HTTPS (TCP 443) to:
 - `graph.microsoft.com` — Graph API
 
 If the function runs in a VPC, that means a NAT gateway (or equivalent egress) and security-group/egress-filter rules allowing those hosts; there is no VPC endpoint for them. Phishy only ever contacts these two hosts for Graph: the client's base URL is fixed, it refuses redirects, and it will not follow a paging link to any other origin.
+
+#### Blast radius (Optional)
+
+When Phishy's verdict on a forwarded email is malicious, it can look up **who else in the organization received the message and what they did with it**, and add the answer to the security team's copy of the report. The reporter's copy never contains it, and the result is never shown to the model. The lookup is read-only: it does not move, delete or change any message. See [ARCHITECTURE.md](ARCHITECTURE.md#blast-radius-optional) for how it works.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PHISHY_GRAPH_BLAST_RADIUS_ENABLED` | `false` | Run the lookup after a malicious verdict. Has no effect unless `PHISHY_GRAPH_ENABLED` is `true` |
+| `PHISHY_GRAPH_BLAST_RADIUS_TIME_BUDGET_MS` | `45000` | Hard limit on the whole lookup, in milliseconds (1000-150000). The lookup also never starts with less than about 22 seconds of Lambda time left, and shrinks its budget to leave 20 seconds for sending the reports |
+| `PHISHY_GRAPH_BLAST_RADIUS_MAX_MAILBOXES` | `2000` | Most mailboxes one lookup will read (1-20000) |
+
+File configuration: `graph.blastRadius.enabled`, `graph.blastRadius.timeBudgetMs`, `graph.blastRadius.maxMailboxes`.
+
+Application permissions on the **read** app registration (admin consent required):
+
+| Permission | Needed for | Without it |
+|---|---|---|
+| `User.Read.All` | listing the organization's mailboxes | recipients from message trace are listed with delivery status only; the per-mailbox route cannot run |
+| `Mail.ReadBasic.All` | finding the message in a mailbox, its folder and its read flag | no mailbox details; without message trace as well, the lookup reports that it could not be completed |
+| `Mail.Read` | whether the message was replied to or forwarded (a MAPI extended property) | that column reads "Unknown" |
+| `ExchangeMessageTrace.Read.All` | the message-trace route (recipients and delivery status without reading mailboxes) | Phishy falls back to searching mailboxes directly |
+
+Message trace also needs Microsoft's message-trace service principal in the tenant; many tenants do not have it, and the request is then refused (HTTP 403). That is expected and handled: Phishy searches mailboxes instead. Run the [probe](GRAPH_PROBE.md) to see which of these calls work in your tenant before enabling the flag.
+
+Things to know before enabling:
+
+- **It needs to read every mailbox it is to cover.** A mailbox permission scoped with Exchange RBAC for Applications (above) limits the lookup to the mailboxes in that scope; mailboxes outside it count as not checked, and the report says so.
+- **Coverage is always stated.** The section reads "checked N of M mailboxes" and is marked `PARTIAL COVERAGE` whenever the time budget, the mailbox cap, throttling or failed requests kept the lookup from covering everything. The per-mailbox route covers licensed, enabled user mailboxes only: shared mailboxes, unlicensed and disabled accounts are not searched.
+- **The reporter never waits for it.** For a malicious verdict the reporter's report is sent first, then the lookup runs, then the security team's copy is sent. The security team's copy arrives later by at most the time budget. Reports with any other verdict are unaffected. Keep the budget well under the Lambda timeout minus the time analysis can take.
+- **Two emails instead of one.** For a malicious verdict with the lookup enabled, the reporter receives the usual report without the security team in Cc, and the security team receives its own copy carrying the section. The security team's copy is always sent: with the section, or with a one-line note when the lookup failed or ran out of time. A reporter who is on the security-team distribution gets only the security team's copy. Command replies ([email commands](#email-commands-security-team-correspondence)) are matched to the security team's copy. If that copy cannot be sent, Phishy logs an error and emits the `SecurityCopySendFailures` metric; alarm on it, because the reporter has been told and the security team has not.
+- **Outlook Report-button reports get one email, not two.** With `PHISHY_REPORT_BUTTON_ENABLED`, a malicious button report is still handled silently: the reporter is never emailed, and the single email to the security team carries the section (or the one-line note). The lookup runs before that email.
+- **Not every trace row is a mailbox copy.** Rows that message trace reports as *expanded* are distribution lists (their members are listed individually) and are left out; *failed* rows are listed as "Not delivered" and counted separately.
+- **Request volume.** The per-mailbox route makes one or two requests per mailbox. Microsoft limits an app to 10,000 Outlook requests per 10 minutes; a flood of reports of different malicious messages in a large tenant can reach that. Phishy stops a lookup when throttled, reports what it covered, and reuses a result for repeat reports of the same message for 10 minutes (per Lambda instance). Lower the mailbox cap if you see `BlastRadiusPartial` rise.
+- **Failure changes nothing else.** If the lookup fails or runs out of time before finding anything, the report is sent as usual with a one-line note to the security team.
+
+CloudWatch metrics (namespace `Phishy`, dimension `BlastRadiusRoute` = `trace`, `mailbox` or `none`): `BlastRadiusLookups`, `BlastRadiusRecipientsFound`, `BlastRadiusMailboxesChecked`, `BlastRadiusMailboxesEligible`, `BlastRadiusCoveragePercent`, `BlastRadiusPartial`, `BlastRadiusFailures`, `BlastRadiusErrors`, `BlastRadiusCacheHits`, `BlastRadiusDurationMs`. Without a dimension: `SecurityCopySendFailures`.
 
 #### Original-message lookup
 
