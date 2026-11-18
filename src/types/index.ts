@@ -25,6 +25,26 @@ export interface EmailMessage {
     dkim?: string;
     dmarc?: string;
   };
+  /**
+   * Set when the message is an Outlook Report-button submission rather than a
+   * forward. Derived only from SES-delivered mail by the parser — the external
+   * payload schema strips it.
+   */
+  userReport?: UserReport;
+}
+
+/** What the employee chose in Outlook's Report menu */
+export type UserReportKind = 'phishing' | 'junk' | 'not_junk';
+
+/**
+ * An Outlook Report-button submission: the reporter clicked a button and is
+ * not waiting for an answer, so these are handled without replying to them.
+ */
+export interface UserReport {
+  source: 'outlook-report-button';
+  reportedAs: UserReportKind;
+  /** Exchange network message ID of the reported (original) message */
+  networkMessageId: string;
 }
 
 /**
@@ -70,6 +90,8 @@ export interface ExtractedEmailData {
   canonicalText?: string;
   /** Obfuscation indicators found during canonicalization — themselves signals */
   contentFlags?: string[];
+  /** Present when this is an Outlook Report-button submission (handled silently) */
+  userReport?: UserReport;
 }
 
 /**
@@ -87,8 +109,15 @@ export interface LinkFact {
  */
 export interface TokenUsage {
   inputTokens: number;
+  /** Billed output tokens. Includes thinking tokens on models that think. */
   outputTokens: number;
   totalTokens: number;
+  /**
+   * The share of outputTokens spent on thinking, when the API reports it
+   * (`usage.output_tokens_details.thinking_tokens`). Already counted in
+   * outputTokens — never add it on top.
+   */
+  thinkingTokens?: number;
 }
 
 /**

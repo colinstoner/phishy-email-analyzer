@@ -133,9 +133,43 @@ describe('parseAnalysisResponse', () => {
 
     const result = parseAnalysisResponse(response, provider, model, processingTime);
 
-    // Should have a fallback response
-    expect(result.summary).toContain('Analysis completed');
-    expect(result.provider).toBe(provider);
+    // Not JSON and no explicit "isPhishing": this is an incomplete analysis,
+    // never a "not phishing" ruling
+    expect(result.analysisFailed).toBe(true);
+    expect(result.failureReason).toContain('not valid JSON');
+    expect(result.confidence).toBe('N/A');
+    // 'none' is the marker the campaign verdict cache excludes
+    expect(result.provider).toBe('none');
+    expect(result.model).toBe('none');
+    expect(result.rawResponse).toBe(response);
+  });
+
+  it('should recover an explicit isPhishing from broken JSON', () => {
+    const response = '{"summary": "Fake invoice", "isPhishing": true, "confidence": "High", ';
+
+    const result = parseAnalysisResponse(response, provider, model, processingTime);
+
+    expect(result.analysisFailed).toBeUndefined();
+    expect(result.isPhishing).toBe(true);
+    expect(result.summary).toBe('Fake invoice');
+  });
+
+  it('should fail closed on truncated JSON that never reached a verdict', () => {
+    const response = '{"summary": "This looks like a routine newsletter", "verd';
+
+    const result = parseAnalysisResponse(response, provider, model, processingTime);
+
+    expect(result.analysisFailed).toBe(true);
+    expect(result.assessment).toBeUndefined();
+  });
+
+  it('should fail closed on valid JSON that carries no verdict', () => {
+    for (const response of ['{}', '{"summary": "Looks fine"}', '{"verdict": "probably_ok"}']) {
+      const result = parseAnalysisResponse(response, provider, model, processingTime);
+
+      expect(result.analysisFailed).toBe(true);
+      expect(result.failureReason).toContain('recognizable verdict');
+    }
   });
 
   it('should handle empty indicators and recommendations', () => {
@@ -168,8 +202,10 @@ describe('parseAnalysisResponse', () => {
 
     const result = parseAnalysisResponse(response, provider, model, processingTime);
 
-    // String 'true' should not be truthy in our implementation
+    // String 'true' is not a boolean verdict. It must not read as phishing —
+    // and must not read as "not phishing" either: the analysis is failed.
     expect(result.isPhishing).toBe(false);
+    expect(result.analysisFailed).toBe(true);
   });
 
   describe('structured verdict', () => {

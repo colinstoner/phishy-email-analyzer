@@ -178,3 +178,34 @@ describe('buildPlainTextReport', () => {
     expect(text).toContain('Reference: abc-123-def');
   });
 });
+
+describe('silent Report-button reports (security team only)', () => {
+  const silent: ReportOptions = {
+    ...becOptions,
+    silentReport: { reporter: 'reporter@example.com' },
+  };
+
+  it('replaces the reporter thank-you with who reported it and that they were not told', () => {
+    const html = buildEmailHtml(analysis(), email(), silent);
+
+    expect(html).toContain('Reported by reporter@example.com with the Outlook Report button');
+    expect(html).toContain('The reporter was not sent this analysis.');
+    expect(html).not.toContain('thanks for reporting');
+  });
+
+  it('does the same in the plain-text report', () => {
+    const text = buildPlainTextReport(analysis(), email(), silent);
+
+    expect(text).toContain('Reported by reporter@example.com with the Outlook Report button');
+    expect(text).not.toContain('thanks for reporting');
+  });
+
+  it('escapes the reporter address in HTML', () => {
+    const html = buildEmailHtml(analysis(), email(), {
+      ...becOptions,
+      silentReport: { reporter: '<img src=x>@example.com' },
+    });
+
+    expect(html).not.toContain('<img src=x>');
+  });
+});

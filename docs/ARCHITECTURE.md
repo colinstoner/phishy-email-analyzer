@@ -19,6 +19,8 @@ Phishy is an AWS Lambda that receives employee-forwarded emails via SES, analyze
                           │  AnalysisService                            │
                           │   ├─ AgenticAnalyzer (tool loop, optional)  │
                           │   └─ single-shot prompt (default/fallback)  │
+                          │        └─ refused? retry once on the        │
+                          │           refusal-fallback model            │
                           │        │                                    │
                           │        ▼                                    │
                           │  intelligence DB writes · IOC extraction    │
@@ -43,6 +45,12 @@ Phishy is an AWS Lambda that receives employee-forwarded emails via SES, analyze
 - **Adversarial bounding.** Body truncation keeps head+tail (padding can't hide the payload); the link budget fills round-robin across registrable domains; every elision is disclosed to the model.
 - **Boundary validation.** External (API Gateway) payloads pass a Zod schema that strips trust-bearing fields — `authVerdicts` and `s3Location` only exist when derived from SES receipts.
 
+## Two kinds of report
+
+A **forward** is a question: the employee gets a report back. An **Outlook Report-button submission** (opt-in, `PHISHY_REPORT_BUTTON_ENABLED`) is not — the employee clicked a button and moved on — so Phishy never replies to the reporter. Phishing reports run the same pipeline and reach only the security team, and only when the verdict warrants it; junk / not-junk reports are counted and skipped.
+
+Button reports are recognized in the parser (`services/email/user.report.ts`) from the wrapper's machine-generated subject, on SES-delivered mail only — the external payload schema strips the marker. The marker is not authentication and grants nothing: recognizing a report only ever reduces what Phishy does, so forging one gains an attacker nothing. The wrapper body (a dump of the reported email's headers) is discarded rather than labeled `REPORTED`; the attached original is parsed like any forward-as-attachment. Notifications go to operator-configured security addresses, never to anything derived from the message.
+
 ## Who may tell Phishy what to do
 
 Three principals, three levels of trust:
@@ -64,10 +72,25 @@ The SES verdicts describe the hop that delivered the reply to Phishy — which i
 | `AgenticAnalyzer` | `services/ai/agentic/agentic.analyzer.ts` | bounded tool loop (max N rounds, falls back on any failure) |
 | `AgenticToolExecutor` | `services/ai/agentic/tool.executor.ts` | the four tools; org data and pure computation only, no network |
 | `AnthropicProvider` / `BedrockProvider` | `services/ai/*.provider.ts` | Messages API via raw HTTP / InvokeModel; both implement `converse()` for tool use |
+| response handling | `services/ai/model.response.ts` | shared by both providers: reads replies by block type, handles refusals (one retry on the refusal-fallback model) and truncation, fail closed |
+| model capabilities | `services/ai/model.capabilities.ts` | pure table: which models accept `output_config.effort`, and at which levels |
 | `EmailCommandService` | `services/commands/email.command.service.ts` | security-team replies → verdict feedback → completed-action replies |
 | `IntelligenceDatabaseService` | `services/intelligence/database.service.ts` | PostgreSQL: analyses, IOCs, campaigns, feedback, usage |
 | `CampaignAlertService` | `services/intelligence/campaign.service.ts` | flood detection → employee alerts |
 | `SESNotifier` | `services/notification/ses.notifier.ts` | outbound reports and replies |
+
+## When the model does not produce a verdict
+
+The default model (Claude Opus 5.5) always thinks before answering, and its safety classifiers can decline a request. Both change what a reply can look like, so every call path — single-shot analysis, the agentic loop, and command parsing — reads replies through `model.response.ts`:
+
+- **Blocks are selected by type.** A reply starts with `thinking` blocks; the verdict is in the `text` blocks. Nothing indexes `content[0]`.
+- **A refusal** (`stop_reason: "refusal"`, an HTTP 200) is retried once, as the same single-shot request, on `ai.refusalFallbackModel` in the same provider. `reasoning_extraction` refusals are not retried. A refusal inside the agentic loop abandons the loop and falls through to the single-shot path, which builds a fresh request from the prompt — the loop's thinking blocks are never replayed to another model.
+- **A truncated reply** (`stop_reason: "max_tokens"`) is never parsed. Thinking counts toward `max_tokens`, so the cut can land anywhere, including after a `"verdict"` field.
+- **A reply with no recognizable verdict** — not JSON, or JSON with neither a known `verdict` nor a boolean `isPhishing` — is not a ruling.
+
+All of these end the same way: an `analysisFailed` result, which risk fusion routes to the `undetermined` verdict and the report renders as "analysis unavailable". It is never stored, never cached, and never shown as `legitimate`.
+
+The agentic conversation is **append-only**: the system prompt and tool list are fixed for the loop, earlier messages are never edited, and each assistant turn is sent back exactly as received. Thinking blocks are signed against the conversation prefix that produced them, so editing history would invalidate them.
 
 ## Data flow decisions worth knowing
 
@@ -110,5 +133,6 @@ Everything optional is off by default and independently enableable:
 | `PHISHY_EMAIL_COMMANDS_ENABLED` | security-team replies | intelligence DB + migration 002 |
 | `PHISHY_AGENTIC_ENABLED` | tool-loop analysis + AI command parsing | nothing (tools appear as their backends do) |
 | `PHISHY_GRAPH_ENABLED` | Microsoft Graph access (foundation only — no feature uses it yet) | Entra app registration with a certificate; outbound HTTPS to Microsoft |
+| `PHISHY_REPORT_BUTTON_ENABLED` | silent handling of Outlook Report-button submissions | Microsoft 365 user-reported settings delivering to Phishy |
 
 See [CONFIGURATION.md](CONFIGURATION.md) for the full reference.
