@@ -5,6 +5,10 @@
 
 import { AnalysisResult, ExtractedEmailData, EmailAttachment } from '../types';
 import { normalizeConfidence } from '../services/ai/provider.interface';
+import type {
+  BlastRadiusRecipient,
+  BlastRadiusReport,
+} from '../services/graph/blast-radius.service';
 
 /** Maximum length for email body display */
 const MAX_BODY_LENGTH = 10000;
@@ -54,6 +58,11 @@ export interface ReportOptions {
     riskLevel: string;
     reasons: string[];
   };
+  /**
+   * Who else received the email and what they did with it. **Security-team
+   * copy only**: the caller must never set this on the reporter's copy.
+   */
+  blastRadius?: BlastRadiusReport;
 }
 
 /**
@@ -374,6 +383,7 @@ export function buildEmailHtml(
             <div class="analysis">
                 ${analysisHtml}
             </div>
+            ${options?.blastRadius ? buildBlastRadiusHtml(options.blastRadius) : ''}
             <div class="metadata">
                 <p><strong>Analyzed Email Subject:</strong> ${escapeHtml(originalSubject)}</p>
                 <p><strong>From:</strong> ${escapeHtml(emailData.from_email)}</p>
@@ -580,6 +590,10 @@ export function buildPlainTextReport(
     lines.push('');
   }
 
+  if (options?.blastRadius) {
+    lines.push(...buildBlastRadiusText(options.blastRadius), '');
+  }
+
   // Metadata
   lines.push(divider);
   lines.push('Email Details:');
@@ -600,6 +614,167 @@ export function buildPlainTextReport(
   lines.push(`Report generated: ${new Date().toLocaleString()}`);
 
   return lines.join('\n');
+}
+
+const BLAST_FOLDER_LABEL: Record<string, string> = {
+  inbox: 'Inbox',
+  junk: 'Junk',
+  deleted: 'Deleted Items',
+  recoverable: 'Purged (Recoverable Items)',
+  other: 'Other folder',
+  unknown: 'Unknown',
+};
+
+const BLAST_COLUMNS = ['Recipient', 'Delivery', 'Location', 'Read', 'Replied / forwarded'];
+
+/** The cells of one recipient row, as plain (unescaped) text */
+function blastRadiusRow(recipient: BlastRadiusRecipient, reporter?: string): string[] {
+  const address =
+    recipient.address + (reporter && recipient.address === reporter ? ' (reporter)' : '');
+  let location: string;
+  let read = '-';
+  let response = '-';
+  if (recipient.mailbox === 'found') {
+    location = BLAST_FOLDER_LABEL[recipient.folder ?? 'unknown'] ?? 'Unknown';
+    if (recipient.copies) {
+      location += ` (${recipient.copies} copies)`;
+    }
+    read = recipient.isRead === undefined ? 'Unknown' : recipient.isRead ? 'Read' : 'Unread';
+    if (recipient.response === 'replied') {
+      response = 'REPLIED';
+    } else if (recipient.response === 'forwarded') {
+      response = 'FORWARDED';
+    } else if (recipient.response === 'none') {
+      response = 'None recorded';
+    } else {
+      response =
+        recipient.lastVerbCode === undefined
+          ? 'Unknown'
+          : `Unknown (last-verb code ${recipient.lastVerbCode})`;
+    }
+  } else {
+    location = recipient.mailbox === 'not_found' ? 'Not in mailbox' : 'Mailbox not checked';
+  }
+  return [address, recipient.deliveryStatus ?? '-', location, read, response];
+}
+
+/**
+ * The statements of a blast-radius result, shared by both formats. Values
+ * taken from the suspicious email (sender, subject) are returned unescaped:
+ * the HTML builder escapes every line.
+ */
+function blastRadiusLines(report: BlastRadiusReport): string[] {
+  const lines: string[] = [];
+  const totals = report.totals ?? { recipients: 0, read: 0, replied: 0, forwarded: 0 };
+  const coverage = report.coverage;
+
+  lines.push(
+    report.route === 'trace'
+      ? `Message trace shows ${totals.recipients} recipient(s) in the organization.`
+      : `Found in ${totals.recipients} mailbox(es).`
+  );
+  lines.push(
+    `Marked read by ${totals.read}; replied to by ${totals.replied}; forwarded by ${totals.forwarded}.`
+  );
+  if (coverage) {
+    const eligible = `${coverage.eligibleIsLowerBound ? 'at least ' : ''}${coverage.mailboxesEligible}`;
+    const unit = report.route === 'trace' ? 'recipient mailboxes' : 'mailboxes';
+    lines.push(
+      report.status === 'partial'
+        ? `PARTIAL COVERAGE: checked ${coverage.mailboxesChecked} of ${eligible} ${unit}. Recipients or details may be missing.`
+        : `Coverage: checked ${coverage.mailboxesChecked} of ${eligible} ${unit}.`
+    );
+  }
+  if (report.criteria) {
+    const window = `between ${report.criteria.receivedFrom} and ${report.criteria.receivedTo}`;
+    if (report.matchedBy === 'messageId') {
+      lines.push('Matched on: the original Message-ID.');
+    } else if (report.matchedBy === 'senderSubject') {
+      lines.push(
+        `Matched on: sender ${report.criteria.senderAddress ?? ''} and subject "${report.criteria.subject ?? ''}", received ${window}.`
+      );
+    } else {
+      lines.push(`Matched on: sender ${report.criteria.senderAddress ?? ''}, received ${window}.`);
+    }
+  }
+  const reporter = report.reporterAddress;
+  if (
+    reporter &&
+    report.recipients?.some(row => row.address === reporter && row.response === 'forwarded')
+  ) {
+    lines.push('The reporter forwarding the email to Phishy counts as a forward.');
+  }
+  return lines;
+}
+
+/**
+ * Blast-radius section (HTML) for the security team's copy. Recipient
+ * addresses are the organization's own, but they and the sender/subject
+ * come from mail flow: everything is escaped.
+ */
+function buildBlastRadiusHtml(report: BlastRadiusReport): string {
+  if (report.status === 'unavailable') {
+    return `
+            <div class="analysis blast-radius">
+                <p><strong>Security team only:</strong> ${escapeHtml(report.note ?? 'Blast radius lookup could not be completed.')}</p>
+            </div>`;
+  }
+
+  const recipients = report.recipients ?? [];
+  const cell = 'padding: 4px 8px; border-bottom: 1px solid #e9ecef; text-align: left;';
+  let table = '';
+  if (recipients.length) {
+    table += '<table style="width: 100%; border-collapse: collapse; font-size: 13px;">';
+    table += `<tr>${BLAST_COLUMNS.map(name => `<th style="${cell}">${name}</th>`).join('')}</tr>`;
+    for (const recipient of recipients) {
+      const cells = blastRadiusRow(recipient, report.reporterAddress);
+      table += `<tr>${cells.map(text => `<td style="${cell}">${escapeHtml(text)}</td>`).join('')}</tr>`;
+    }
+    table += '</table>';
+    const unlisted = (report.totals?.recipients ?? recipients.length) - recipients.length;
+    if (unlisted > 0) {
+      table += `<p class="no-items">${unlisted} more recipient(s) not listed.</p>`;
+    }
+  }
+
+  const statements = blastRadiusLines(report)
+    .map(line => `<p>${escapeHtml(line)}</p>`)
+    .join('');
+  const caveats = (report.caveats ?? []).map(text => `<li>${escapeHtml(text)}</li>`).join('');
+
+  return `
+            <div class="analysis blast-radius">
+                <h2>Blast radius (security team only)</h2>
+                ${statements}
+                ${table}
+                ${caveats ? `<ul style="font-size: 13px; color: #6c757d;">${caveats}</ul>` : ''}
+                <p class="ref-line">Looked up ${escapeHtml(report.lookedUpAt)}. This section is not in the reporter's copy.</p>
+            </div>`;
+}
+
+/** Blast-radius section (plain text) for the security team's copy */
+function buildBlastRadiusText(report: BlastRadiusReport): string[] {
+  if (report.status === 'unavailable') {
+    return [`Security team only: ${report.note ?? 'Blast radius lookup could not be completed.'}`];
+  }
+
+  const lines = ['BLAST RADIUS (security team only)', '-'.repeat(40), ...blastRadiusLines(report)];
+  const recipients = report.recipients ?? [];
+  if (recipients.length) {
+    lines.push(`  ${BLAST_COLUMNS.join(' | ')}`);
+    for (const recipient of recipients) {
+      lines.push(`  ${blastRadiusRow(recipient, report.reporterAddress).join(' | ')}`);
+    }
+    const unlisted = (report.totals?.recipients ?? recipients.length) - recipients.length;
+    if (unlisted > 0) {
+      lines.push(`  ${unlisted} more recipient(s) not listed.`);
+    }
+  }
+  for (const caveat of report.caveats ?? []) {
+    lines.push(`  Note: ${caveat}`);
+  }
+  lines.push(`Looked up ${report.lookedUpAt}. This section is not in the reporter's copy.`);
+  return lines;
 }
 
 /**

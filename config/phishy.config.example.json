@@ -53,6 +53,11 @@
     "read": {
       "clientId": "11111111-1111-1111-1111-111111111111",
       "certificate": "arn:aws:secretsmanager:us-east-1:123456789012:secret:phishy/graph-read-AbCdEf"
+    },
+    "blastRadius": {
+      "enabled": false,
+      "timeBudgetMs": 45000,
+      "maxMailboxes": 2000
     }
   },
   "logLevel": "info"

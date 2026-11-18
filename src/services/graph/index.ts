@@ -13,3 +13,4 @@ export * from './operations.common';
 export * from './mail.operations';
 export * from './trace.operations';
 export * from './directory.operations';
+export * from './blast-radius.service';

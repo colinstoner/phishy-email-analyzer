@@ -141,7 +141,7 @@ Requires the intelligence database and `migrations/002_analysis_feedback.sql`.
 
 ### Microsoft Graph (Optional)
 
-Phishy can authenticate to Microsoft Graph on your own Microsoft 365 tenant. This is a **foundation**: enabling it does not change how emails are analyzed — no feature calls Graph yet. It exists so that later features (retrieving a reporter's original message, checking who else received an email) have a safe, already-reviewed way to reach the tenant. Leave it off unless you are preparing for those. See [ARCHITECTURE.md](ARCHITECTURE.md#microsoft-graph-optional-foundation) for the trust rules.
+Phishy can authenticate to Microsoft Graph on your own Microsoft 365 tenant. This is a **foundation**: enabling it does not by itself change how emails are analyzed. It exists so that features with their own flags (checking who else received an email — see [Blast radius](#blast-radius-optional)) have a safe, already-reviewed way to reach the tenant. Leave it off unless you use one of those. See [ARCHITECTURE.md](ARCHITECTURE.md#microsoft-graph-optional-foundation) for the trust rules.
 
 To find out which Graph calls work in your tenant — with which permissions and licences — before any feature depends on them, run the read-only probe: [GRAPH_PROBE.md](GRAPH_PROBE.md). It runs locally (`npm run graph:probe`), takes the same tenant ID, client ID and certificate, and does not need `PHISHY_GRAPH_ENABLED`.
 
@@ -207,6 +207,40 @@ The Lambda needs outbound HTTPS (TCP 443) to:
 - `graph.microsoft.com` — Graph API
 
 If the function runs in a VPC, that means a NAT gateway (or equivalent egress) and security-group/egress-filter rules allowing those hosts; there is no VPC endpoint for them. Phishy only ever contacts these two hosts for Graph: the client's base URL is fixed, it refuses redirects, and it will not follow a paging link to any other origin.
+
+#### Blast radius (Optional)
+
+When Phishy's verdict on a forwarded email is malicious, it can look up **who else in the organization received the message and what they did with it**, and add the answer to the security team's copy of the report. The reporter's copy never contains it, and the result is never shown to the model. The lookup is read-only: it does not move, delete or change any message. See [ARCHITECTURE.md](ARCHITECTURE.md#blast-radius-optional) for how it works.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PHISHY_GRAPH_BLAST_RADIUS_ENABLED` | `false` | Run the lookup after a malicious verdict. Has no effect unless `PHISHY_GRAPH_ENABLED` is `true` |
+| `PHISHY_GRAPH_BLAST_RADIUS_TIME_BUDGET_MS` | `45000` | Hard limit on the whole lookup, in milliseconds (1000-150000). The lookup also never starts with less than about 22 seconds of Lambda time left, and shrinks its budget to leave 20 seconds for sending the reports |
+| `PHISHY_GRAPH_BLAST_RADIUS_MAX_MAILBOXES` | `2000` | Most mailboxes one lookup will read (1-20000) |
+
+File configuration: `graph.blastRadius.enabled`, `graph.blastRadius.timeBudgetMs`, `graph.blastRadius.maxMailboxes`.
+
+Application permissions on the **read** app registration (admin consent required):
+
+| Permission | Needed for | Without it |
+|---|---|---|
+| `User.Read.All` | listing the organization's mailboxes | recipients from message trace are listed with delivery status only; the per-mailbox route cannot run |
+| `Mail.ReadBasic.All` | finding the message in a mailbox, its folder and its read flag | no mailbox details; without message trace as well, the lookup reports that it could not be completed |
+| `Mail.Read` | whether the message was replied to or forwarded (a MAPI extended property) | that column reads "Unknown" |
+| `ExchangeMessageTrace.Read.All` | the message-trace route (recipients and delivery status without reading mailboxes) | Phishy falls back to searching mailboxes directly |
+
+Message trace also needs Microsoft's message-trace service principal in the tenant; many tenants do not have it, and the request is then refused (HTTP 403). That is expected and handled: Phishy searches mailboxes instead. Run the [probe](GRAPH_PROBE.md) to see which of these calls work in your tenant before enabling the flag.
+
+Things to know before enabling:
+
+- **It needs to read every mailbox it is to cover.** A mailbox permission scoped with Exchange RBAC for Applications (above) limits the lookup to the mailboxes in that scope; mailboxes outside it count as not checked, and the report says so.
+- **Coverage is always stated.** The section reads "checked N of M mailboxes" and is marked `PARTIAL COVERAGE` whenever the time budget, the mailbox cap, throttling or failed requests kept the lookup from covering everything. The per-mailbox route covers licensed, enabled user mailboxes only: shared mailboxes, unlicensed and disabled accounts are not searched.
+- **It delays malicious reports**, by at most the time budget, because the lookup runs before the reports are sent. Reports with any other verdict are unaffected. Keep the budget well under the Lambda timeout minus the time analysis can take.
+- **Two emails instead of one.** For a malicious verdict with the lookup enabled, the security team receives its own copy (carrying the section) and the reporter receives the usual report without the security team in Cc. If the security team's copy cannot be sent, the single combined email goes out as before.
+- **Request volume.** The per-mailbox route makes one or two requests per mailbox. Microsoft limits an app to 10,000 Outlook requests per 10 minutes; a flood of reports of different malicious messages in a large tenant can reach that. Phishy stops a lookup when throttled, reports what it covered, and reuses a result for repeat reports of the same message for 10 minutes (per Lambda instance). Lower the mailbox cap if you see `BlastRadiusPartial` rise.
+- **Failure changes nothing else.** If the lookup fails or runs out of time before finding anything, the report is sent as usual with a one-line note to the security team.
+
+CloudWatch metrics (namespace `Phishy`, dimension `BlastRadiusRoute` = `trace`, `mailbox` or `none`): `BlastRadiusLookups`, `BlastRadiusRecipientsFound`, `BlastRadiusMailboxesChecked`, `BlastRadiusMailboxesEligible`, `BlastRadiusCoveragePercent`, `BlastRadiusPartial`, `BlastRadiusFailures`, `BlastRadiusErrors`, `BlastRadiusCacheHits`, `BlastRadiusDurationMs`.
 
 ### AWS Secrets Manager Integration
 

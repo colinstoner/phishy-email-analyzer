@@ -149,6 +149,20 @@ const GraphCredentialConfigSchema = z.object({
   certificate: z.string().optional(),
 });
 
+/**
+ * Blast radius: after a malicious verdict, look up who else in the
+ * organization received the message and what they did with it, for the
+ * security team's copy of the report. Read-only; effective only when
+ * `graph.enabled` is true.
+ */
+const GraphBlastRadiusConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  /** Hard limit on the whole lookup, in milliseconds */
+  timeBudgetMs: z.number().int().min(1000).max(150000).default(45000),
+  /** Most mailboxes one lookup will read */
+  maxMailboxes: z.number().int().min(1).max(20000).default(2000),
+});
+
 const GraphConfigSchema = z
   .object({
     enabled: z.boolean().default(false),
@@ -156,6 +170,8 @@ const GraphConfigSchema = z
     tenantId: z.string().optional(),
     /** App registration holding read-only application permissions */
     read: GraphCredentialConfigSchema.optional(),
+    /** Who-else-received-it lookup for malicious verdicts */
+    blastRadius: GraphBlastRadiusConfigSchema.optional(),
   })
   .superRefine((data, ctx) => {
     if (!data.enabled) {
@@ -232,6 +248,7 @@ export type CommandsConfig = z.infer<typeof CommandsConfigSchema>;
 export type AgenticConfig = z.infer<typeof AgenticConfigSchema>;
 export type GraphConfig = z.infer<typeof GraphConfigSchema>;
 export type GraphCredentialConfig = z.infer<typeof GraphCredentialConfigSchema>;
+export type GraphBlastRadiusConfig = z.infer<typeof GraphBlastRadiusConfigSchema>;
 
 /**
  * Partial configuration for merging

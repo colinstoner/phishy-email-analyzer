@@ -127,3 +127,67 @@ export function emitCampaignCacheHitMetric(estimatedCostSavedUsd: number): void 
 
   process.stdout.write(`${JSON.stringify(emf)}\n`);
 }
+
+export interface BlastRadiusMetric {
+  /** Route that produced the answer; `none` when no route did */
+  route: 'trace' | 'mailbox' | 'none';
+  outcome: 'complete' | 'partial' | 'unavailable';
+  recipientsFound: number;
+  mailboxesChecked: number;
+  mailboxesEligible: number;
+  /** Graph requests that failed during the lookup */
+  errors: number;
+  durationMs: number;
+  /** Answered from this Lambda instance's short-lived result cache */
+  cached?: boolean;
+}
+
+/**
+ * Emit one blast-radius lookup (who else received a malicious email),
+ * dimensioned by route. Counts only: never an address or a subject.
+ */
+export function emitBlastRadiusMetric(metric: BlastRadiusMetric): void {
+  if (process.env.PHISHY_DISABLE_METRICS === 'true') {
+    return;
+  }
+
+  const emf = {
+    _aws: {
+      Timestamp: Date.now(),
+      CloudWatchMetrics: [
+        {
+          Namespace: NAMESPACE,
+          Dimensions: [['BlastRadiusRoute']],
+          Metrics: [
+            { Name: 'BlastRadiusLookups', Unit: 'Count' },
+            { Name: 'BlastRadiusRecipientsFound', Unit: 'Count' },
+            { Name: 'BlastRadiusMailboxesChecked', Unit: 'Count' },
+            { Name: 'BlastRadiusMailboxesEligible', Unit: 'Count' },
+            { Name: 'BlastRadiusCoveragePercent', Unit: 'Percent' },
+            { Name: 'BlastRadiusPartial', Unit: 'Count' },
+            { Name: 'BlastRadiusFailures', Unit: 'Count' },
+            { Name: 'BlastRadiusErrors', Unit: 'Count' },
+            { Name: 'BlastRadiusCacheHits', Unit: 'Count' },
+            { Name: 'BlastRadiusDurationMs', Unit: 'Milliseconds' },
+          ],
+        },
+      ],
+    },
+    BlastRadiusRoute: metric.route,
+    BlastRadiusLookups: 1,
+    BlastRadiusRecipientsFound: metric.recipientsFound,
+    BlastRadiusMailboxesChecked: metric.mailboxesChecked,
+    BlastRadiusMailboxesEligible: metric.mailboxesEligible,
+    BlastRadiusCoveragePercent:
+      metric.mailboxesEligible > 0
+        ? Math.round((100 * metric.mailboxesChecked) / metric.mailboxesEligible)
+        : 0,
+    BlastRadiusPartial: metric.outcome === 'partial' ? 1 : 0,
+    BlastRadiusFailures: metric.outcome === 'unavailable' ? 1 : 0,
+    BlastRadiusErrors: metric.errors,
+    BlastRadiusCacheHits: metric.cached ? 1 : 0,
+    BlastRadiusDurationMs: metric.durationMs,
+  };
+
+  process.stdout.write(`${JSON.stringify(emf)}\n`);
+}
