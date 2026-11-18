@@ -42,6 +42,7 @@ import {
 } from '../services/intelligence';
 import { extractIOCs, IOCSourceContext } from '../services/intelligence/ioc.extractor';
 import { ThreatIndicatorRecord } from '../services/intelligence/database.service';
+import { SenderHistoryService, createSenderHistoryService } from '../services/graph/sender.history';
 
 const logger = createLogger('lambda-handler');
 
@@ -70,6 +71,7 @@ let cachedServices: {
   campaignService?: CampaignAlertService;
   intelligenceDb?: IntelligenceDatabaseService;
   commandService?: EmailCommandService;
+  senderHistory?: SenderHistoryService;
 } | null = null;
 
 /**
@@ -261,6 +263,17 @@ async function initializeServices(): Promise<{
     });
   }
 
+  // Sender-relationship check (optional): message trace facts about the
+  // claimed sender. A misconfiguration here must not stop email analysis.
+  let senderHistory: SenderHistoryService | undefined;
+  try {
+    senderHistory = createSenderHistoryService(config);
+  } catch (error) {
+    logger.warn('Sender history is enabled but could not be set up', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+
   cachedServices = {
     s3Service,
     emailParser,
@@ -269,6 +282,7 @@ async function initializeServices(): Promise<{
     intelligenceDb,
     campaignService,
     commandService,
+    senderHistory,
   };
 
   logger.info('Services initialized', {
@@ -442,6 +456,12 @@ async function processEmailEvent(
     }
   }
 
+  // Sender-relationship facts for the prompt, risk fusion and the report.
+  // Never throws; undefined on any failure, and analysis proceeds as usual.
+  if (!analysis && services.senderHistory && !isSafelistUser) {
+    emailData.senderHistory = await services.senderHistory.lookupForEmail(emailData);
+  }
+
   // Analyze with AI (cache miss or cache disabled)
   analysis ??= await services.analysisService.analyzeEmail(emailData);
 
@@ -507,7 +527,10 @@ async function processEmailEvent(
         isSafelistUser
       )
     : {};
-  const riskDecision = fuseRisk(analysis, fusionSignals);
+  const riskDecision = fuseRisk(analysis, {
+    ...fusionSignals,
+    senderHistory: emailData.senderHistory,
+  });
   if (riskDecision.reasons.length) {
     logger.info('Risk fusion applied', {
       verdict: riskDecision.verdict,

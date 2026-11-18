@@ -9,7 +9,13 @@
  * the signals, this decides.
  */
 
-import { AnalysisResult, ThreatVerdict, ConfidenceLevel, MALICIOUS_VERDICTS } from '../../types';
+import {
+  AnalysisResult,
+  ThreatVerdict,
+  ConfidenceLevel,
+  MALICIOUS_VERDICTS,
+  SenderHistoryFacts,
+} from '../../types';
 import { ThreatIndicatorRecord, CampaignRecord, FeedbackRecord } from './database.service';
 
 export type RiskLevel = 'critical' | 'high' | 'medium' | 'low' | 'safe';
@@ -24,7 +30,19 @@ export interface FusionSignals {
   humanVerdict?: FeedbackRecord['verdict'];
   /** The reporter is on the configured safe-sender / safe-domain allowlist */
   isSafeSender?: boolean;
+  /**
+   * Sender-relationship facts from the organization's mail-flow records.
+   * One-directional by design: they can add a reason and raise the floor,
+   * and are never read in a way that lowers a score or clears a verdict.
+   */
+  senderHistory?: SenderHistoryFacts;
 }
+
+/**
+ * Risk floor when an established sender shows anomalous fan-out (a known
+ * contact suddenly mailing many people it never wrote to): 'medium'.
+ */
+export const SENDER_FANOUT_RISK_FLOOR = 35;
 
 export interface RiskDecision {
   verdict: ThreatVerdict;
@@ -155,7 +173,27 @@ export function fuseRisk(result: AnalysisResult, signals: FusionSignals = {}): R
     reasons.push('Reporter is on the trusted-sender allowlist.');
   }
 
-  // 5. A failed analysis stays 'undetermined' unless hard intel above escalated
+  // 5. Sender relationship. A relationship must never lower risk — trust is
+  //    exactly what a mailbox takeover borrows — so only the anomalous
+  //    classification is read, and only to raise: `established` (or any other
+  //    class) contributes nothing, and nothing here can reduce the score or
+  //    turn a verdict benign. It runs after the allowlist cap so the cap
+  //    cannot undo it. When the floor lifts a 'legitimate' verdict the label
+  //    becomes 'suspicious', so the banner cannot contradict the reason.
+  if (signals.senderHistory?.classification === 'established_with_anomalous_fanout') {
+    reasons.push(
+      'This sender has emailed your organization before, but this time its mail went to far more ' +
+        "people than usual, most of whom it had never written to. That pattern is typical of a known contact's mailbox being taken over."
+    );
+    if (score < SENDER_FANOUT_RISK_FLOOR) {
+      score = SENDER_FANOUT_RISK_FLOOR;
+      if (verdict === 'legitimate') {
+        verdict = 'suspicious';
+      }
+    }
+  }
+
+  // 6. A failed analysis stays 'undetermined' unless hard intel above escalated
   //    it. Always disclose that the email could not be assessed so the report
   //    can't read as a clean bill of health.
   if (result.analysisFailed) {

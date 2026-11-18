@@ -141,7 +141,7 @@ Requires the intelligence database and `migrations/002_analysis_feedback.sql`.
 
 ### Microsoft Graph (Optional)
 
-Phishy can authenticate to Microsoft Graph on your own Microsoft 365 tenant. This is a **foundation**: enabling it does not change how emails are analyzed — no feature calls Graph yet. It exists so that later features (retrieving a reporter's original message, checking who else received an email) have a safe, already-reviewed way to reach the tenant. Leave it off unless you are preparing for those. See [ARCHITECTURE.md](ARCHITECTURE.md#microsoft-graph-optional-foundation) for the trust rules.
+Phishy can authenticate to Microsoft Graph on your own Microsoft 365 tenant. This is a **foundation**: enabling it does not, by itself, change how emails are analyzed. Each feature built on it has its own switch — today the [sender-relationship check](#sender-relationship-check-optional) — and more (retrieving a reporter's original message, checking who else received an email) will follow the same pattern. Leave it off unless you are enabling one of them. See [ARCHITECTURE.md](ARCHITECTURE.md#microsoft-graph-optional-foundation) for the trust rules.
 
 To find out which Graph calls work in your tenant — with which permissions and licences — before any feature depends on them, run the read-only probe: [GRAPH_PROBE.md](GRAPH_PROBE.md). It runs locally (`npm run graph:probe`), takes the same tenant ID, client ID and certificate, and does not need `PHISHY_GRAPH_ENABLED`.
 
@@ -207,6 +207,56 @@ The Lambda needs outbound HTTPS (TCP 443) to:
 - `graph.microsoft.com` — Graph API
 
 If the function runs in a VPC, that means a NAT gateway (or equivalent egress) and security-group/egress-filter rules allowing those hosts; there is no VPC endpoint for them. Phishy only ever contacts these two hosts for Graph: the client's base URL is fixed, it refuses redirects, and it will not follow a paging link to any other origin.
+
+#### Sender-relationship check (optional)
+
+When a known external contact's mailbox is taken over, the attacker's mail comes from the real account: SPF, DKIM and DMARC pass and the address is familiar. What gives it away is behaviour — a sender with a history suddenly writes to far more people than usual, most of whom it never dealt with. With this check on, before each analysis Phishy reads your tenant's **Exchange message trace** (delivery records only; no mailbox is opened) for the sender address the forwarded email claims, and computes counts about that relationship. The counts go to the model as facts computed by Phishy, to risk fusion, and into the report.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PHISHY_GRAPH_SENDER_HISTORY_ENABLED` | `false` | Enable the check. Only effective when `PHISHY_GRAPH_ENABLED` is `true` |
+| `PHISHY_GRAPH_SENDER_HISTORY_LOOKBACK_DAYS` | `30` | Days of mail-flow records to examine (14-90; message trace keeps 90) |
+| `PHISHY_GRAPH_SENDER_HISTORY_BURST_WINDOW_HOURS` | `24` | Hours before the email's time that count as the burst rather than as history (1-72) |
+| `PHISHY_GRAPH_SENDER_HISTORY_BUDGET_MS` | `8000` | Overall deadline for one lookup (1000-30000). On expiry the analysis runs without the facts |
+| `PHISHY_GRAPH_SENDER_HISTORY_INCLUDE_DOMAIN` | `true` | Also compute history for every address on the sender's domain (never for free-mail domains) |
+| `PHISHY_GRAPH_SENDER_HISTORY_FREE_MAIL_DOMAINS` | - | Comma-separated domains to add to the built-in free-mail list |
+| `PHISHY_GRAPH_SENDER_HISTORY_FANOUT_MIN_RECIPIENTS` | `10` | Fewest distinct burst recipients that can count as anomalous fan-out (2-1000) |
+| `PHISHY_GRAPH_SENDER_HISTORY_FANOUT_MULTIPLIER` | `3` | Burst recipients must be at least this many times the history recipients (1-100) |
+
+File configuration uses `graph.senderHistory.*` with the same names (`enabled`, `lookbackDays`, `burstWindowHours`, `budgetMs`, `includeDomain`, `freeMailDomains`, `fanoutMinRecipients`, `fanoutMultiplier`).
+
+**Permission.** Add the Microsoft Graph application permission `ExchangeMessageTrace.Read.All` to the read app registration and grant admin consent. Message trace also depends on a Microsoft-owned service principal existing in the tenant; `npm run graph:probe` ([GRAPH_PROBE.md](GRAPH_PROBE.md)) tells you whether trace calls work before you turn this on. Until they do, the endpoint answers 403: Phishy then analyzes exactly as it would with the check off, emits `Outcome=forbidden`, and leaves the API alone for five minutes.
+
+**What is computed.** The lookback is split into a *burst window* and a *history period*. The burst window starts `burstWindowHours` before the email's own date and always ends at lookup time (the email's date is claimed text, so it can only move the start back, by at most 7 days; if it does not parse, "now" is used). Everything in the lookback before that is history.
+
+| Fact | Meaning |
+|------|---------|
+| History | Messages from the address, distinct internal recipients, and the first date seen, in the history period |
+| Two-way contact | Messages your organization sent *to* the address, and from how many distinct internal senders, in the history period (replies sent during the burst are not counted) |
+| Burst window | Messages and distinct internal recipients from the address, and how many of those recipients had no mail from it in the history period |
+| Sending IPs | How many distinct sending IPs the burst used, and how many of them were seen in the history period (counts only) |
+| Domain | The same history for every address on the sender's domain. Omitted for free-mail domains (built in: `gmail.com`, `googlemail.com`, `outlook.com`, `hotmail.com`, `live.com`, `msn.com`, `yahoo.com`, `ymail.com`, `aol.com`, `icloud.com`, `me.com`, `proton.me`, `protonmail.com`, `gmx.com`, `mail.com`, `zoho.com`, `yandex.com`) |
+
+**Classification** (decided by code, never by the model):
+
+| Class | Rule |
+|-------|------|
+| `no_history` | No message from the address and none to it in the history period |
+| `limited_history` | Some history, but below `established` |
+| `established` | At least 3 history messages from the address, **or** at least 1 together with two-way contact |
+| `established_with_anomalous_fanout` | `established`, **and** the burst reached at least `fanoutMinRecipients` (10) distinct recipients, **and** at least `fanoutMultiplier` (3) times the history's distinct recipients, **and** at least half of the burst recipients had no mail from the address in the history period |
+
+**A relationship never lowers risk.** Trust is exactly what a mailbox takeover borrows, so `established` earns nothing: the model is told not to treat it as evidence of legitimacy, risk fusion ignores it, and the reporter is told nothing about it. Only `established_with_anomalous_fanout` acts: it adds one plain-language reason to the report and raises the risk score to at least 35 (medium), turning a `legitimate` verdict into `suspicious` when it does. A security-team ruling still overrides it.
+
+**Bounds and honesty.**
+
+- One trace query covers at most 10 days, so a lookup makes one request per 10-day window per query type (mail from the address, mail to the address, mail from the domain): **9 requests** at the defaults, 6 without domain history, 27 at a 90-day lookback. They run in parallel, at most 6 at a time, under the single `budgetMs` deadline; requests still in flight at the deadline are cancelled.
+- Each window keeps at most 2000 rows (at most two requests). When a sender exceeds that, the affected counts are reported as **"at least N"** to the model and in the report, the number of new recipients is reported as undeterminable, and fan-out is not judged.
+- Message trace allows 100 requests per 5 minutes per tenant. Each Lambda instance spends at most 60 of them per 5 minutes on this check, then skips it (`Outcome=rate_limited`). Results are reused per sender address for 5 minutes within an instance.
+- Any failure — timeout, 403, a failed window — means no facts at all rather than partial counts, and the analysis proceeds exactly as it would with the check off.
+- The sender address is taken from the forwarded message's `From:` line and must be a single, plain ASCII address on a domain outside `SAFE_DOMAINS`; anything else is not looked up. It is never logged, and it is not repeated in the facts given to the model. Recipient addresses and IPs are never shown to the model, logged, stored or put in the report — counts only. Nothing is written to the database.
+
+**Metrics** (namespace `Phishy`, dimension `Outcome` = `ok`, `cache_hit`, `skipped`, `timeout`, `forbidden`, `cooldown`, `rate_limited`, `error`): `SenderHistoryLookups`, `SenderHistoryDurationMs`, `SenderHistoryAnomalousFanout`, `SenderHistoryTruncated`.
 
 ### AWS Secrets Manager Integration
 

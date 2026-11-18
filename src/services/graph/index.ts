@@ -1,7 +1,8 @@
 /**
  * Microsoft Graph foundation: authentication, credential loading and a
- * constrained HTTP client. Optional and off by default; nothing in the
- * email-processing path calls Graph.
+ * constrained HTTP client. Optional and off by default. The only caller in
+ * the email-processing path is the sender-relationship check
+ * (`sender.history.ts`), behind its own flag.
  */
 
 export * from './graph.errors';
@@ -13,3 +14,4 @@ export * from './operations.common';
 export * from './mail.operations';
 export * from './trace.operations';
 export * from './directory.operations';
+export * from './sender.history';

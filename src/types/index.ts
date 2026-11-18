@@ -70,6 +70,73 @@ export interface ExtractedEmailData {
   canonicalText?: string;
   /** Obfuscation indicators found during canonicalization — themselves signals */
   contentFlags?: string[];
+  /**
+   * Sender-relationship facts computed by Phishy from the organization's own
+   * mail-flow records (optional Graph feature). Numbers and an enum only —
+   * never an address. Absent when the check is off, skipped or failed.
+   */
+  senderHistory?: SenderHistoryFacts;
+}
+
+/** A count that may have been cut short by a row cap: `atLeast` means "N or more" */
+export interface BoundedCount {
+  count: number;
+  atLeast: boolean;
+}
+
+/**
+ * How the claimed sender address relates to the organization, decided by code
+ * from message-trace counts. None of these is a statement about safety: an
+ * established sender is exactly what a mailbox takeover borrows.
+ */
+export type SenderRelationshipClass =
+  'no_history' | 'limited_history' | 'established' | 'established_with_anomalous_fanout';
+
+/**
+ * What the organization's message trace says about one external sender
+ * address. Counts only: no recipient address, sender address or IP is kept.
+ */
+export interface SenderHistoryFacts {
+  classification: SenderRelationshipClass;
+  /** Days of mail-flow records examined, burst window included */
+  lookbackDays: number;
+  /** Length of the burst window (it always ends at lookup time), in hours */
+  burstWindowHours: number;
+  /** Mail from the address before the burst window */
+  history: {
+    messages: BoundedCount;
+    recipients: BoundedCount;
+    /** UTC date (YYYY-MM-DD) of the earliest message found in the lookback */
+    firstSeen?: string;
+  };
+  /** Mail the organization sent TO the address before the burst window */
+  twoWay: {
+    messages: BoundedCount;
+    internalSenders: BoundedCount;
+  };
+  /** Mail from the address inside the burst window */
+  burst: {
+    messages: BoundedCount;
+    recipients: BoundedCount;
+    /** Burst recipients with no mail from the address in the history period; null when history was cut short */
+    newRecipients: BoundedCount | null;
+  };
+  sendingIps: {
+    /** Distinct sending IPs in the burst window */
+    burst: number;
+    /** How many of those also appear in the history period */
+    seenInHistory: number;
+    /** False when history was cut short, so `seenInHistory` is a minimum */
+    historyComplete: boolean;
+  };
+  /** The same history for every address on the sender's domain; absent for free-mail domains */
+  domain?: {
+    messages: BoundedCount;
+    recipients: BoundedCount;
+    firstSeen?: string;
+  };
+  /** True when any count above was cut short by a row cap */
+  truncated: boolean;
 }
 
 /**

@@ -85,11 +85,25 @@ export interface TraceWindow {
   receivedTo: Date;
 }
 
-interface TraceOptions {
+export interface TraceOptions {
   /** Most rows to return (default 1000, at most 5000) */
   maxItems?: number;
+  /** Most pages to request (default and ceiling 5): each page is one of the tenant's 100 requests */
+  maxPages?: number;
+  /** Per-attempt timeout, overriding the client's */
+  timeoutMs?: number;
+  /** Caller's deadline: cancels the request in flight and stops retries and paging */
+  signal?: AbortSignal;
   /** Injected for tests; defaults to the current time */
   now?: Date;
+}
+
+function resolveMaxPages(requested: number | undefined): number {
+  const value = requested ?? TRACE_MAX_PAGES;
+  if (!Number.isInteger(value) || value < 1 || value > TRACE_MAX_PAGES) {
+    throw new Error(`maxPages must be an integer between 1 and ${TRACE_MAX_PAGES}`);
+  }
+  return value;
 }
 
 /**
@@ -115,7 +129,9 @@ async function listTraces(
   const result = await client.getPaged(TRACE_PATH, {
     query: { filter, top: maxItems },
     maxItems,
-    maxPages: TRACE_MAX_PAGES,
+    maxPages: resolveMaxPages(options.maxPages),
+    timeoutMs: options.timeoutMs,
+    signal: options.signal,
   });
   return {
     items: parseItems(client, TRACE_PATH, MessageTraceSchema, result.items).map(toTrace),
@@ -207,6 +223,53 @@ export async function listMessageTracesBySender(
       throw new Error('subjectMatch must be contains, startsWith or endsWith');
   }
   return listTraces(client, filter, args);
+}
+
+export interface TraceByRecipientArgs extends TraceOptions, TraceWindow {
+  recipientAddress: string;
+}
+
+/**
+ * Who sent mail to one recipient address in a time window. With an external
+ * address this finds the organization's own outbound mail to it.
+ */
+export async function listMessageTracesByRecipient(
+  client: GraphClient,
+  args: TraceByRecipientArgs
+): Promise<BoundedResult<MessageTrace>> {
+  assertTraceWindow(args, args.now);
+  return listTraces(
+    client,
+    odataFilter`receivedDateTime ge ${odataSeconds(args.receivedFrom)} and receivedDateTime le ${odataSeconds(args.receivedTo, 'ceil')} and recipientAddress eq ${args.recipientAddress}`,
+    args
+  );
+}
+
+export interface TraceBySenderDomainArgs extends TraceOptions, TraceWindow {
+  /** Bare domain (`example.net`), matched as the end of the sender address after `@` */
+  senderDomain: string;
+}
+
+/**
+ * Mail from any address on one domain in a time window
+ */
+export async function listMessageTracesBySenderDomain(
+  client: GraphClient,
+  args: TraceBySenderDomainArgs
+): Promise<BoundedResult<MessageTrace>> {
+  assertTraceWindow(args, args.now);
+  if (
+    typeof args.senderDomain !== 'string' ||
+    !args.senderDomain ||
+    args.senderDomain.includes('@')
+  ) {
+    throw new Error('senderDomain must be a bare domain name');
+  }
+  return listTraces(
+    client,
+    odataFilter`receivedDateTime ge ${odataSeconds(args.receivedFrom)} and receivedDateTime le ${odataSeconds(args.receivedTo, 'ceil')} and endswith(senderAddress, ${`@${args.senderDomain}`})`,
+    args
+  );
 }
 
 /** `<id@host>` to `id@host`; anything else is returned unchanged */

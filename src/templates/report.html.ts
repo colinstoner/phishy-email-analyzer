@@ -5,6 +5,7 @@
 
 import { AnalysisResult, ExtractedEmailData, EmailAttachment } from '../types';
 import { normalizeConfidence } from '../services/ai/provider.interface';
+import { formatSenderHistoryLines } from '../utils/sender-history.format';
 
 /** Maximum length for email body display */
 const MAX_BODY_LENGTH = 10000;
@@ -55,6 +56,11 @@ export interface ReportOptions {
     reasons: string[];
   };
 }
+
+/** Shown with the sender-relationship counts so they are not read as a clearance */
+const SENDER_HISTORY_CAVEAT =
+  'Counts from message trace, matched on the sender address the email claims. A known sender is not ' +
+  'evidence of safety: a taken-over mailbox has the same history.';
 
 /**
  * Per-verdict presentation for the employee report: a label, a color tone, a
@@ -670,6 +676,7 @@ function buildOriginalEmailSection(emailData: ExtractedEmailData): string {
             <div class="original-email">
                 <h2>Original Email for IT Review</h2>
                 ${forwardedHeadersSection}
+                ${buildSenderHistorySection(emailData)}
 
                 <div class="email-section email-content">
                     <h3>Original Email Content</h3>
@@ -696,6 +703,27 @@ function buildOriginalEmailSection(emailData: ExtractedEmailData): string {
 }
 
 /**
+ * Sender-relationship counts for the IT-review part of the report. Counts,
+ * dates and the classification only — no recipient addresses and no IPs,
+ * because the reporter receives this same email.
+ */
+function buildSenderHistorySection(emailData: ExtractedEmailData): string {
+  if (!emailData.senderHistory) {
+    return '';
+  }
+  let rows = '';
+  for (const [label, value] of formatSenderHistoryLines(emailData.senderHistory)) {
+    rows += `<tr><td>${escapeHtml(label)}</td><td>${escapeHtml(value)}</td></tr>`;
+  }
+  return `
+                <div class="email-section email-headers email-sender-history">
+                    <h3>Sender Relationship (organization mail-flow records)</h3>
+                    <table>${rows}</table>
+                    <p class="no-items">${escapeHtml(SENDER_HISTORY_CAVEAT)}</p>
+                </div>`;
+}
+
+/**
  * Build the original email section for plain text report
  */
 function buildOriginalEmailTextSection(emailData: ExtractedEmailData): string {
@@ -707,6 +735,17 @@ function buildOriginalEmailTextSection(emailData: ExtractedEmailData): string {
   lines.push('ORIGINAL EMAIL FOR IT REVIEW');
   lines.push(divider);
   lines.push('');
+
+  // Sender relationship (counts only)
+  if (emailData.senderHistory) {
+    lines.push('Sender Relationship (organization mail-flow records):');
+    lines.push(subDivider);
+    for (const [label, value] of formatSenderHistoryLines(emailData.senderHistory)) {
+      lines.push(`  ${label}: ${value}`);
+    }
+    lines.push(`  Note: ${SENDER_HISTORY_CAVEAT}`);
+    lines.push('');
+  }
 
   // Headers
   lines.push('Security-Relevant Headers:');

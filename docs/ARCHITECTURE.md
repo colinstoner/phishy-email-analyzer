@@ -79,7 +79,7 @@ The SES verdicts describe the hop that delivered the reply to Phishy — which i
 
 ## Microsoft Graph (optional foundation)
 
-`src/services/graph/` lets Phishy call Microsoft Graph on the organization's own Microsoft 365 tenant. It is off by default, and today it is a **foundation only**: authentication, credential loading and an HTTP client. Nothing in the email-processing path calls it yet — features that do (fetching a reporter's original message, checking who else received an email) build on it separately.
+`src/services/graph/` lets Phishy call Microsoft Graph on the organization's own Microsoft 365 tenant. It is off by default: authentication, credential loading, an HTTP client and read operations. Features in the email-processing path build on it behind their own flags — today the sender-relationship check below; fetching a reporter's original message and checking who else received an email are separate work.
 
 | Piece | File | Role |
 |---|---|---|
@@ -88,6 +88,7 @@ The SES verdicts describe the hop that delivered the reply to Phishy — which i
 | Request building | `graph.request.ts` | `graphPath` and `odataFilter` tagged templates — the only way data enters a path or a `$filter` |
 | HTTP client | `graph.client.ts` | `getJson` / `getBytes` / `getText` / `postJson` / `getPaged` against a fixed base URL |
 | Read operations | `mail.operations.ts`, `trace.operations.ts`, `directory.operations.ts` | small typed GET-only functions (find a message by Internet message ID or sender + window, search, headers, MIME, last-verb, message trace, users, licence capabilities); every result is capped and reports truncation; cross-mailbox and trace lookups return metadata only |
+| Sender-relationship check | `sender.history.ts` | before analysis, message-trace counts about the claimed external sender (see below) |
 | Probe CLI | `src/cli/graph-probe*.ts` | `npm run graph:probe` — an operator's local, read-only check of which of those calls work in their tenant ([GRAPH_PROBE.md](GRAPH_PROBE.md)); not part of the pipeline |
 
 Trust rules (CLAUDE.md invariant 6):
@@ -97,6 +98,31 @@ Trust rules (CLAUDE.md invariant 6):
 - **Mailbox content is hostile data.** Response bodies are never logged. Content read from any mailbox other than the reporter's own is metadata-only toward the model and logs.
 - **Reads and writes are separate identities.** A client holds exactly one credential. Configuration has a `read` app registration today; a `write` registration, when one exists, is a different app with its own certificate and its own client, so a read path can never obtain a write token. Any write to the tenant additionally requires security-team approval through the authenticated command channel.
 - **Secrets stay secret.** The private key, client assertion and access token never appear in logs or error messages; errors carry only status, Graph error code, request id and a path template with data segments blanked.
+
+### Sender-relationship check
+
+Off by default (`graph.senderHistory.enabled`). It targets one case the rest of the pipeline cannot see: a known external contact's mailbox is taken over, so the mail authenticates and the sender is familiar, but it suddenly reaches far more people than that sender ever wrote to.
+
+```
+processEmailEvent
+  campaign cache miss
+    └─ SenderHistoryService.lookupForEmail(emailData)        code only, GET only
+         claimed From → validated address → external?        (else: skipped)
+         per-instance cache (sha256 of the address, 5 min)
+         message trace, 10-day windows × {from address, to address, from domain}
+           in parallel, page-capped, one deadline (default 8 s)
+         computeSenderHistoryFacts → counts + classification
+    └─ emailData.senderHistory ──▶ prompt (VERIFIED block) ──▶ fuseRisk ──▶ report
+```
+
+- **A relationship never lowers risk.** Trust is what the attacker borrows. The prompt block says so; `fuseRisk` reads only `established_with_anomalous_fanout`, and only to add a reason and raise the score to a floor (after the allowlist cap, so the cap cannot undo it). No classification can reduce a score or turn a verdict benign, and a test asserts that across every verdict and class. The reporter is never told a sender is "known".
+- **Provenance.** The counts are Phishy's own computation from the organization's records, so they are a VERIFIED block. They are *about* the address the email claims, which is hostile text: that address is not repeated in the block and stays in the CLAIMED section. The block holds numbers, dates and an enum — no recipient address, no IP.
+- **Hostile input.** The claimed address must be a single plain-ASCII address before anything is queried, enters the filter only through `odataFilter`, and is never logged. The email's claimed date only widens the burst window, by a bounded amount.
+- **Bounded and disclosed.** Fixed windows, a row and page cap per window, a concurrency cap, a per-instance request allowance and one deadline. A count cut short by a cap is "at least N" everywhere it appears, and fan-out is not judged against a truncated history.
+- **Fails open to today's behaviour.** Timeout, 403 or any failed window yields no facts (never partial counts), a metric, and an unchanged analysis.
+- **One report.** The reporter and the security team receive the same email, so the report shows the reporter at most one plain sentence (only on anomalous fan-out) and puts counts and the classification in the "Original Email for IT Review" part. Nothing is persisted.
+
+Thresholds and request counts are in [CONFIGURATION.md](CONFIGURATION.md#sender-relationship-check-optional).
 
 ## Feature flags
 
@@ -109,6 +135,7 @@ Everything optional is off by default and independently enableable:
 | `PHISHY_CAMPAIGN_CACHE_ENABLED` | verdict reuse | intelligence DB + migration 003 |
 | `PHISHY_EMAIL_COMMANDS_ENABLED` | security-team replies | intelligence DB + migration 002 |
 | `PHISHY_AGENTIC_ENABLED` | tool-loop analysis + AI command parsing | nothing (tools appear as their backends do) |
-| `PHISHY_GRAPH_ENABLED` | Microsoft Graph access (foundation only — no feature uses it yet) | Entra app registration with a certificate; outbound HTTPS to Microsoft |
+| `PHISHY_GRAPH_ENABLED` | Microsoft Graph access (a foundation; each feature on it has its own flag) | Entra app registration with a certificate; outbound HTTPS to Microsoft |
+| `PHISHY_GRAPH_SENDER_HISTORY_ENABLED` | sender-relationship check (message trace) | Graph + `ExchangeMessageTrace.Read.All` |
 
 See [CONFIGURATION.md](CONFIGURATION.md) for the full reference.

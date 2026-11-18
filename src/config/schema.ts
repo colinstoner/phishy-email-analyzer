@@ -149,6 +149,30 @@ const GraphCredentialConfigSchema = z.object({
   certificate: z.string().optional(),
 });
 
+/**
+ * Sender-relationship check: before analysis, read the organization's own
+ * message trace for the claimed external sender and hand the model (and the
+ * report) counts about that relationship. Only effective when `graph.enabled`
+ * is true. Needs `ExchangeMessageTrace.Read.All` on the read registration.
+ */
+const GraphSenderHistoryConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  /** Days of mail-flow records to examine (message trace keeps 90) */
+  lookbackDays: z.number().int().min(14).max(90).default(30),
+  /** Hours before the email's time treated as the burst, not as history */
+  burstWindowHours: z.number().int().min(1).max(72).default(24),
+  /** Overall deadline for one lookup; on expiry analysis proceeds without it */
+  budgetMs: z.number().int().min(1000).max(30000).default(8000),
+  /** Also compute history for the sender's whole domain (never for free-mail domains) */
+  includeDomain: z.boolean().default(true),
+  /** Extra free-mail domains, added to the built-in list */
+  freeMailDomains: z.array(z.string()).default([]),
+  /** Fewest distinct burst recipients that can count as anomalous fan-out */
+  fanoutMinRecipients: z.number().int().min(2).max(1000).default(10),
+  /** Burst recipients must be at least this many times the history recipients */
+  fanoutMultiplier: z.number().min(1).max(100).default(3),
+});
+
 const GraphConfigSchema = z
   .object({
     enabled: z.boolean().default(false),
@@ -156,6 +180,7 @@ const GraphConfigSchema = z
     tenantId: z.string().optional(),
     /** App registration holding read-only application permissions */
     read: GraphCredentialConfigSchema.optional(),
+    senderHistory: GraphSenderHistoryConfigSchema.optional(),
   })
   .superRefine((data, ctx) => {
     if (!data.enabled) {
@@ -232,6 +257,7 @@ export type CommandsConfig = z.infer<typeof CommandsConfigSchema>;
 export type AgenticConfig = z.infer<typeof AgenticConfigSchema>;
 export type GraphConfig = z.infer<typeof GraphConfigSchema>;
 export type GraphCredentialConfig = z.infer<typeof GraphCredentialConfigSchema>;
+export type GraphSenderHistoryConfig = z.infer<typeof GraphSenderHistoryConfigSchema>;
 
 /**
  * Partial configuration for merging
