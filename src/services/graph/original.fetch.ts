@@ -27,6 +27,7 @@ import { createLogger } from '../../utils/logger';
 import { OriginalFetchOutcome, emitOriginalFetchMetric } from '../../utils/metrics';
 import { domainMatches, extractEmailAddress } from '../../utils/validation';
 import { GraphClient } from './graph.client';
+import { MAX_CLAIMED_TIME_LENGTH, MAX_SUBJECT_LENGTH } from './graph.limits';
 import { GraphAuthError, GraphError } from './graph.errors';
 import { MessageSummary, findMessagesBySender, getMessageHeaders } from './mail.operations';
 
@@ -53,9 +54,6 @@ const DELIVERY_SLACK_MS = 3 * HOUR_MS;
 /** UTC offsets run from -12:00 to +14:00 */
 const MAX_OFFSET_WEST_MS = 12 * HOUR_MS;
 const MAX_OFFSET_EAST_MS = 14 * HOUR_MS;
-const MAX_CLAIMED_TIME_LENGTH = 120;
-/** Longest subject a mailbox stores; a longer claim cannot match exactly */
-const MAX_SUBJECT_LENGTH = 255;
 /** Two per location is enough to tell "exactly one" from "more than one" */
 const CANDIDATES_PER_LOCATION = 2;
 
@@ -401,6 +399,38 @@ function describeFailure(error: unknown): { reason: string; fields: Record<strin
   return { reason: 'unexpected', fields: {} };
 }
 
+/** What a lookup searches with, once the claimed values have been read */
+export interface PreparedOriginalFetch {
+  /** The claimed sender's address alone, without display name */
+  senderAddress: string;
+  claimedTime: ClaimedSentTime;
+  subject?: string;
+}
+
+/**
+ * Read the claimed sender, sent time and subject of a request, or say why
+ * there is nothing to search with (a `skipped` result). Pure: no request is
+ * made. Shared by the lookup itself and by a caller that hands the lookup to
+ * the Graph broker, so both skip on exactly the same inputs.
+ */
+export function prepareOriginalFetch(
+  request: Pick<OriginalFetchRequest, 'claimedFrom' | 'claimedSent' | 'claimedSubject'>
+): { skip: OriginalFetchResult } | { prepared: PreparedOriginalFetch } {
+  const senderAddress = claimedSenderAddress(request.claimedFrom);
+  if (!senderAddress) {
+    return { skip: { outcome: 'skipped', reason: 'no_claimed_sender' } };
+  }
+  const claimedTime = parseClaimedSentTime(request.claimedSent ?? '');
+  if (!claimedTime) {
+    return { skip: { outcome: 'skipped', reason: 'no_claimed_time' } };
+  }
+  const subject = request.claimedSubject?.trim() || undefined;
+  if (subject !== undefined && subject.length > MAX_SUBJECT_LENGTH) {
+    return { skip: { outcome: 'skipped', reason: 'subject_too_long' } };
+  }
+  return { prepared: { senderAddress, claimedTime, subject } };
+}
+
 /**
  * Look for the original of a forwarded message in the reporter's mailbox.
  * Never throws: any failure, timeout, missing input or non-unique match is
@@ -411,18 +441,11 @@ export async function fetchOriginalMessage(
   request: OriginalFetchRequest,
   options: OriginalFetchOptions = {}
 ): Promise<OriginalFetchResult> {
-  const senderAddress = claimedSenderAddress(request.claimedFrom);
-  if (!senderAddress) {
-    return { outcome: 'skipped', reason: 'no_claimed_sender' };
+  const read = prepareOriginalFetch(request);
+  if ('skip' in read) {
+    return read.skip;
   }
-  const claimedTime = parseClaimedSentTime(request.claimedSent ?? '');
-  if (!claimedTime) {
-    return { outcome: 'skipped', reason: 'no_claimed_time' };
-  }
-  const subject = request.claimedSubject?.trim() || undefined;
-  if (subject !== undefined && subject.length > MAX_SUBJECT_LENGTH) {
-    return { outcome: 'skipped', reason: 'subject_too_long' };
-  }
+  const { senderAddress, claimedTime, subject } = read.prepared;
 
   const budgetMs = options.budgetMs ?? ORIGINAL_FETCH_BUDGET_MS;
   const deadline = Date.now() + budgetMs;
@@ -445,6 +468,16 @@ export async function fetchOriginalMessage(
   }
 }
 
+/**
+ * Runs one lookup. Directly it is `fetchOriginalMessage` over a Graph
+ * client; in broker mode it is an invocation of the Graph broker. Either
+ * way it must not throw, and what it returns is hostile data.
+ */
+export type OriginalMessageFetcher = (
+  request: OriginalFetchRequest,
+  options: OriginalFetchOptions
+) => Promise<OriginalFetchResult>;
+
 /** The one parser capability enrichment needs (`EmailParserService` provides it) */
 export interface RetrievedOriginalSink {
   attachRetrievedOriginal(emailData: ExtractedEmailData, original: RetrievedOriginal): void;
@@ -465,6 +498,29 @@ export async function enrichWithOriginalMessage(
   safeDomains: string[],
   options: OriginalFetchOptions = {}
 ): Promise<OriginalFetchResult> {
+  return enrichWithOriginalVia(
+    (request, fetchOptions) => fetchOriginalMessage(client, request, fetchOptions),
+    parser,
+    msg,
+    emailData,
+    safeDomains,
+    options
+  );
+}
+
+/**
+ * `enrichWithOriginalMessage` with the lookup itself supplied by the caller.
+ * Everything that decides whose mailbox is read, what is attached and what
+ * is measured is here, so it is the same whichever way the lookup is made.
+ */
+export async function enrichWithOriginalVia(
+  fetchOriginal: OriginalMessageFetcher,
+  parser: RetrievedOriginalSink,
+  msg: EmailMessage,
+  emailData: ExtractedEmailData,
+  safeDomains: string[],
+  options: OriginalFetchOptions = {}
+): Promise<OriginalFetchResult> {
   const startedAt = Date.now();
   let result: OriginalFetchResult;
   try {
@@ -472,8 +528,7 @@ export async function enrichWithOriginalMessage(
     result =
       mailbox === undefined
         ? { outcome: 'skipped', reason: 'reporter_not_confirmed' }
-        : await fetchOriginalMessage(
-            client,
+        : await fetchOriginal(
             {
               mailbox,
               claimedFrom: emailData.forwardedHeaders['Original-From'],

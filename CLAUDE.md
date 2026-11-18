@@ -42,6 +42,8 @@ All five must pass before a commit. CI runs them on Node 18/20/22.
 ```
 src/
   handlers/lambda.handler.ts        entry point; service wiring + per-email pipeline
+  handlers/graph.broker.handler.ts  second function (outside the VPC): typed Graph read operations
+  graph-broker.ts                   bundle entry point of the Graph broker function
   services/email/parser.service.ts  trust boundary: events → labeled email facts
   services/ai/prompt.builder.ts     provenance-labeled, nonce-fenced prompt
   services/ai/agentic/              tool loop + the four bounded tools

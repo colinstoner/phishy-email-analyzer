@@ -51,6 +51,8 @@
   },
   "graph": {
     "enabled": false,
+    "mode": "direct",
+    "brokerFunctionName": "phishy-graph-broker",
     "tenantId": "00000000-0000-0000-0000-000000000000",
     "read": {
       "clientId": "11111111-1111-1111-1111-111111111111",

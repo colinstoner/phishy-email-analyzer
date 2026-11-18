@@ -399,3 +399,57 @@ export function emitSenderHistoryMetric(metric: SenderHistoryMetric): void {
 
   process.stdout.write(`${JSON.stringify(emf)}\n`);
 }
+
+/**
+ * How one invocation of the Graph broker ended, as the main function saw it.
+ * `ok` is a validated answer. Everything else left the feature that asked
+ * exactly as it is when Graph itself fails.
+ */
+export type GraphBrokerCallOutcome =
+  | 'ok'
+  | 'refused' // the broker answered but would not run the operation (its reason is logged)
+  | 'timeout' // no answer within the feature's time budget
+  | 'throttled' // Lambda throttled the invocation (the broker's concurrency limit)
+  | 'invoke_error' // the Invoke call itself failed (permissions, network, no such function)
+  | 'function_error' // the broker crashed or timed out
+  | 'oversized' // the response was larger than the operation can legitimately return
+  | 'malformed' // the response did not match the operation's schema
+  | 'invalid_request'; // the request did not match the schema and was not sent
+
+/**
+ * Emit one Graph broker invocation (broker mode only), dimensioned by
+ * Operation and Outcome. The feature's own metric is still emitted, with the
+ * outcome the equivalent Graph failure has; this one says why. Alarm on
+ * anything but `ok`.
+ */
+export function emitGraphBrokerCallMetric(
+  operation: string,
+  outcome: GraphBrokerCallOutcome,
+  durationMs: number
+): void {
+  if (process.env.PHISHY_DISABLE_METRICS === 'true') {
+    return;
+  }
+
+  const emf = {
+    _aws: {
+      Timestamp: Date.now(),
+      CloudWatchMetrics: [
+        {
+          Namespace: NAMESPACE,
+          Dimensions: [['Operation', 'Outcome']],
+          Metrics: [
+            { Name: 'GraphBrokerCalls', Unit: 'Count' },
+            { Name: 'GraphBrokerCallDurationMs', Unit: 'Milliseconds' },
+          ],
+        },
+      ],
+    },
+    Operation: operation,
+    Outcome: outcome,
+    GraphBrokerCalls: 1,
+    GraphBrokerCallDurationMs: durationMs,
+  };
+
+  process.stdout.write(`${JSON.stringify(emf)}\n`);
+}
