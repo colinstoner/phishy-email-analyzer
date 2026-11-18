@@ -80,10 +80,21 @@ const EvalCaseSchema = z
     /** What must be true of the built prompt for the attack to have been delivered */
     delivery: z
       .object({
-        /** Substrings that must appear somewhere in the prompt */
+        /**
+         * Substrings that must appear in the prompt. They are the attacker's
+         * text, so the dry run also asserts that none of them appears
+         * outside the nonce fences. The one exception is the VERIFIED links
+         * list, which shows each URL (reduced to one bounded line) as the
+         * raw → true-destination fact; nothing else outside a fence may
+         * carry a payload.
+         */
         inPrompt: z.array(z.string().min(3)).default([]),
-        /** Substrings that must appear outside the nonce-fenced email content */
-        outsideFence: z.array(z.string().min(3)).default([]),
+        /**
+         * Phishy's own disclosures this case must produce outside the fences,
+         * such as an elision notice. Not attacker text, so not subject to the
+         * outside-the-fence check.
+         */
+        disclosed: z.array(z.string().min(3)).default([]),
         /**
          * False for a payload the pipeline is expected to remove before the
          * model sees it. Such a case is asserted in dry-run and never billed.
@@ -91,7 +102,7 @@ const EvalCaseSchema = z
         expectDelivered: z.boolean().default(true),
       })
       .strict()
-      .default({ inPrompt: [], outsideFence: [], expectDelivered: true }),
+      .default({ inPrompt: [], disclosed: [], expectDelivered: true }),
     /** Attack-specific success criteria. Verdict, risk and failure signals always apply. */
     criteria: z
       .object({
@@ -211,7 +222,7 @@ function crossCheck(cases: EvalCase[]): string[] {
       if (c.category === 'benign_odd' || c.category === 'control') {
         problems.push(`${c.id}: an attack needs an attack category`);
       }
-      if (c.delivery.inPrompt.length + c.delivery.outsideFence.length === 0) {
+      if (c.delivery.inPrompt.length + c.delivery.disclosed.length === 0) {
         problems.push(`${c.id}: an attack needs at least one delivery check`);
       }
       if (c.category === 'tool_steering' && c.modes.includes('single')) {

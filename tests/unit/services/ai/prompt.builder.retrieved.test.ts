@@ -83,10 +83,10 @@ describe('buildPhishingAnalysisPrompt with a retrieved original', () => {
     expect(fenced).toContain('[3] Reply-To: collector@example.net');
     expect(prompt).not.toContain('UNLISTED-VALUE');
 
-    // Same nonce as the body fence, and both fences are named up front
+    // Same nonce as the body fence, and every fence is named up front
     expect(prompt).toContain(`<email-content-${nonce}>`);
     expect(prompt).toContain(
-      `between the markers named email-content-${nonce} and original-headers-${nonce} below`
+      `between the markers named claimed-fields-${nonce}, original-headers-${nonce} and email-content-${nonce} below`
     );
     // Guidance that a pass is not proof of legitimacy
     expect(prompt).toContain('a pass is never by itself evidence of legitimacy');

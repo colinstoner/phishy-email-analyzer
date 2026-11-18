@@ -1,201 +1,87 @@
 /**
- * Email Signature Analysis Utility
- * Extracts role/title information from email signatures for risk assessment
+ * Recipient context: what Phishy can say about the employee who reported the
+ * email, for risk assessment (finance, HR and executive staff are the usual
+ * BEC targets).
+ *
+ * It is derived ONLY from the reporter's own address — `originalForwarder`,
+ * which the parser accepts only on a safe domain. It is never derived from
+ * the body of the report: the body is mostly the suspicious email, and a
+ * signature found there is the ATTACKER's signature, not the employee's (an
+ * earlier version read "Title:" lines from the body and copied them into the
+ * prompt outside the fence). Every value this module renders is a fixed
+ * string from the tables below; nothing from the email is echoed.
  */
 
 export interface RecipientContext {
+  /** A fixed department label, from the address's local part */
   detectedRole?: string;
-  detectedTitle?: string;
   isHighValueTarget: boolean;
-  roleIndicators: string[];
 }
 
 /**
- * High-value target roles - common BEC/phishing targets
+ * Departmental mailbox local parts and the department they indicate. Matched
+ * against the whole local part, so `kit@` is not `it@`.
  */
-const HIGH_VALUE_ROLES = [
-  'accounts payable',
-  'accounts receivable',
-  'payroll',
-  'finance',
-  'accounting',
-  'controller',
-  'treasurer',
-  'cfo',
-  'coo',
-  'ceo',
-  'president',
-  'executive',
-  'hr',
-  'human resources',
-  'benefits',
-  'it',
-  'information technology',
-  'procurement',
-  'purchasing',
-  'legal',
-  'compliance',
-];
-
-/**
- * Title patterns to extract from signatures
- */
-const TITLE_PATTERNS = [
-  // "Title: Something" or "Role: Something"
-  /(?:title|role|position):\s*([^\n|,]+)/i,
-  // "Name | Title" or "Name – Title"
-  /\|\s*([^|\n]+(?:manager|director|vp|vice president|chief|officer|coordinator|specialist|analyst|administrator|lead|head|supervisor)[^|\n]*)/i,
-  /[–—-]\s*([^–—\-\n]+(?:manager|director|vp|vice president|chief|officer|coordinator|specialist|analyst|administrator|lead|head|supervisor)[^–—\-\n]*)/i,
-  // Standalone title line (common formats)
-  /^((?:senior\s+|junior\s+|sr\.?\s+|jr\.?\s+)?(?:accounts?\s+payable|accounts?\s+receivable|payroll|finance|accounting|hr|human\s+resources|it|procurement|purchasing)\s*(?:manager|director|coordinator|specialist|clerk|administrator|assistant)?)\s*$/im,
-  /^((?:senior\s+|junior\s+|sr\.?\s+|jr\.?\s+)?(?:manager|director|vp|vice\s+president|chief\s+\w+\s+officer|controller|treasurer|coordinator|specialist|analyst|administrator|lead|head|supervisor)[^\n]{0,30})\s*$/im,
-];
-
-/**
- * Department indicators in email addresses
- */
-const EMAIL_DEPT_PATTERNS: Record<string, string> = {
-  'ap@': 'Accounts Payable',
-  'ar@': 'Accounts Receivable',
-  'payroll@': 'Payroll',
-  'finance@': 'Finance',
-  'accounting@': 'Accounting',
-  'hr@': 'Human Resources',
-  'humanresources@': 'Human Resources',
-  'it@': 'IT',
-  'helpdesk@': 'IT',
-  'procurement@': 'Procurement',
-  'purchasing@': 'Purchasing',
-  'legal@': 'Legal',
-  'compliance@': 'Compliance',
-  'benefits@': 'Benefits/HR',
+const DEPARTMENT_MAILBOXES: Record<string, string> = {
+  ap: 'Accounts Payable',
+  ar: 'Accounts Receivable',
+  payroll: 'Payroll',
+  finance: 'Finance',
+  accounting: 'Accounting',
+  hr: 'Human Resources',
+  humanresources: 'Human Resources',
+  it: 'IT',
+  helpdesk: 'IT',
+  procurement: 'Procurement',
+  purchasing: 'Purchasing',
+  legal: 'Legal',
+  compliance: 'Compliance',
+  benefits: 'Benefits/HR',
 };
 
+/** Departments commonly targeted by BEC / phishing */
+const HIGH_VALUE_DEPARTMENTS = new Set([
+  'Accounts Payable',
+  'Accounts Receivable',
+  'Payroll',
+  'Finance',
+  'Accounting',
+  'Human Resources',
+  'IT',
+  'Procurement',
+  'Purchasing',
+  'Legal',
+  'Compliance',
+  'Benefits/HR',
+]);
+
 /**
- * Analyze email content for recipient role/title information
+ * Recipient context from the reporter's address alone.
  */
-export function analyzeRecipientContext(
-  emailText: string,
-  recipientEmail?: string
-): RecipientContext {
-  const roleIndicators: string[] = [];
-  let detectedRole: string | undefined;
-  let detectedTitle: string | undefined;
-
-  // Check email address for department hints
-  if (recipientEmail) {
-    const emailLower = recipientEmail.toLowerCase();
-    for (const [pattern, dept] of Object.entries(EMAIL_DEPT_PATTERNS)) {
-      if (emailLower.includes(pattern)) {
-        detectedRole = dept;
-        roleIndicators.push(`Email address indicates ${dept} department`);
-        break;
-      }
-    }
-  }
-
-  // Extract signature block (usually last portion of email)
-  const signatureBlock = extractSignatureBlock(emailText);
-
-  if (signatureBlock) {
-    // Try to extract title from signature
-    for (const pattern of TITLE_PATTERNS) {
-      const match = signatureBlock.match(pattern);
-      if (match?.[1]) {
-        const title = match[1].trim();
-        if (title.length > 2 && title.length < 100) {
-          detectedTitle = title;
-          roleIndicators.push(`Signature contains title: "${title}"`);
-          break;
-        }
-      }
-    }
-
-    // Look for role keywords in signature
-    const signatureLower = signatureBlock.toLowerCase();
-    for (const role of HIGH_VALUE_ROLES) {
-      if (signatureLower.includes(role)) {
-        detectedRole ??= role.charAt(0).toUpperCase() + role.slice(1);
-        roleIndicators.push(`Signature mentions: ${role}`);
-        break;
-      }
-    }
-  }
-
-  // Determine if high-value target
-  const isHighValueTarget = determineHighValueTarget(detectedRole, detectedTitle);
+export function analyzeRecipientContext(reporterAddress?: string): RecipientContext {
+  const local = (reporterAddress ?? '').trim().toLowerCase().split('@')[0] ?? '';
+  const detectedRole = Object.prototype.hasOwnProperty.call(DEPARTMENT_MAILBOXES, local)
+    ? DEPARTMENT_MAILBOXES[local]
+    : undefined;
 
   return {
     detectedRole,
-    detectedTitle,
-    isHighValueTarget,
-    roleIndicators,
+    isHighValueTarget: detectedRole !== undefined && HIGH_VALUE_DEPARTMENTS.has(detectedRole),
   };
 }
 
 /**
- * Extract the signature block from email text
- * Signatures typically appear after common delimiters
- */
-function extractSignatureBlock(text: string): string | null {
-  if (!text) return null;
-
-  // Common signature delimiters
-  const delimiters = [
-    /^--\s*$/m,
-    /^_{3,}$/m,
-    /^-{3,}$/m,
-    /\bregards,?\s*$/im,
-    /\bsincerely,?\s*$/im,
-    /\bthanks,?\s*$/im,
-    /\bthank\s+you,?\s*$/im,
-    /\bbest,?\s*$/im,
-    /\bcheers,?\s*$/im,
-  ];
-
-  let signatureStart = text.length;
-
-  for (const delimiter of delimiters) {
-    const match = text.match(delimiter);
-    if (match?.index !== undefined && match.index < signatureStart) {
-      signatureStart = match.index;
-    }
-  }
-
-  // If no delimiter found, check last ~500 chars
-  if (signatureStart === text.length) {
-    signatureStart = Math.max(0, text.length - 500);
-  }
-
-  const signature = text.slice(signatureStart);
-  return signature.length > 10 ? signature : null;
-}
-
-/**
- * Determine if the detected role/title indicates a high-value target
- */
-function determineHighValueTarget(role?: string, title?: string): boolean {
-  const combined = `${role ?? ''} ${title ?? ''}`.toLowerCase();
-
-  return HIGH_VALUE_ROLES.some(hvr => combined.includes(hvr));
-}
-
-/**
- * Format recipient context for prompt inclusion
+ * Format recipient context for the prompt. Null when there is nothing to say.
  */
 export function formatRecipientContextForPrompt(context: RecipientContext): string | null {
-  if (!context.detectedRole && !context.detectedTitle && !context.isHighValueTarget) {
+  if (!context.detectedRole && !context.isHighValueTarget) {
     return null;
   }
 
-  const lines: string[] = ['--- RECIPIENT CONTEXT ---'];
-
-  if (context.detectedTitle) {
-    lines.push(`Detected Title: ${context.detectedTitle}`);
-  }
+  const lines: string[] = ["--- RECIPIENT CONTEXT (from the reporting employee's own address) ---"];
 
   if (context.detectedRole) {
-    lines.push(`Detected Department: ${context.detectedRole}`);
+    lines.push(`Department mailbox: ${context.detectedRole}`);
   }
 
   if (context.isHighValueTarget) {
