@@ -4,14 +4,20 @@
  */
 
 import axios, { AxiosError } from 'axios';
-import {
-  AIProvider,
-  AnalysisOptions,
-  ProviderHealth,
-  parseAnalysisResponse,
-} from './provider.interface';
+import { AIProvider, AnalysisOptions, ProviderHealth } from './provider.interface';
 import { buildPhishingAnalysisPrompt } from './prompt.builder';
-import { ConversationRequest, ConversationResponse, ContentBlock } from './conversation.types';
+import {
+  ConversationMessage,
+  ConversationRequest,
+  ConversationResponse,
+} from './conversation.types';
+import { EffortLevel, effortForModel } from './model.capabilities';
+import {
+  ModelTurn,
+  analyzeSingleShot,
+  completeSingleShot,
+  normalizeModelResponse,
+} from './model.response';
 import { AnalysisResult, ExtractedEmailData } from '../../types';
 import { createLogger } from '../../utils/logger';
 import { withRetry, isRetryableHttpError } from '../../utils/retry';
@@ -25,32 +31,66 @@ const ANTHROPIC_API_ENDPOINT = 'https://api.anthropic.com/v1/messages';
  * Supported Anthropic Claude models
  *
  * Primary recommendations:
- * - CLAUDE_OPUS_4_8: Most capable model — best detection quality (default)
- * - CLAUDE_SONNET_4_6: Best balance of quality, speed, and cost
- * - CLAUDE_HAIKU_4_5: Fastest option for high-volume scenarios
+ * - CLAUDE_OPUS_5_5: current Opus — best detection quality per dollar (default)
+ * - CLAUDE_SONNET_5_5: balance of quality, speed, and cost
+ * - CLAUDE_HAIKU_5_5: fastest and cheapest, for high-volume scenarios
+ * - CLAUDE_FABLE_5_2: highest capability tier, at twice the Opus 5.5 price
  *
- * Note: Claude 3.x models are retired and return 404 from the API; the
- * previous 4.5 entries here carried invalid date suffixes and never worked.
+ * IDs are fixed aliases: never append a date suffix. Claude 3.x models are
+ * retired and return 404 from the API.
  */
 export const ANTHROPIC_CLAUDE_MODELS = {
   // Current models (recommended)
+  CLAUDE_OPUS_5_5: 'claude-opus-5-5',
+  CLAUDE_SONNET_5_5: 'claude-sonnet-5-5',
+  CLAUDE_HAIKU_5_5: 'claude-haiku-5-5',
+  CLAUDE_FABLE_5_2: 'claude-fable-5-2',
+  // Previous releases (still active)
+  CLAUDE_OPUS_5: 'claude-opus-5',
+  CLAUDE_SONNET_5: 'claude-sonnet-5',
+  CLAUDE_FABLE_5_1: 'claude-fable-5-1',
+  CLAUDE_FABLE_5: 'claude-fable-5',
   CLAUDE_OPUS_4_8: 'claude-opus-4-8',
   CLAUDE_SONNET_4_6: 'claude-sonnet-4-6',
   CLAUDE_HAIKU_4_5: 'claude-haiku-4-5',
-  // Previous generation (still active)
   CLAUDE_OPUS_4_5: 'claude-opus-4-5',
+  // Deprecated (retires 2026-11-30)
   CLAUDE_SONNET_4_5: 'claude-sonnet-4-5',
 } as const;
 
-const DEFAULT_MODEL = ANTHROPIC_CLAUDE_MODELS.CLAUDE_OPUS_4_8;
-const DEFAULT_MAX_TOKENS = 4096;
+const DEFAULT_MODEL = ANTHROPIC_CLAUDE_MODELS.CLAUDE_OPUS_5_5;
+/** Where a refused request is retried once. Opus 4.8 runs a narrower classifier set. */
+const DEFAULT_REFUSAL_FALLBACK_MODEL = ANTHROPIC_CLAUDE_MODELS.CLAUDE_OPUS_4_8;
+/**
+ * Thinking is always on for Opus 5.5 and counts toward max_tokens, so the
+ * limit has to hold the thinking as well as the JSON verdict.
+ */
+const DEFAULT_MAX_TOKENS = 16000;
 const DEFAULT_TIMEOUT_MS = 60000;
+const DEFAULT_EFFORT: EffortLevel = 'medium';
+
+/** Health probe budget: room to think briefly; any HTTP 200 counts as healthy. */
+const HEALTH_CHECK_MAX_TOKENS = 1024;
 
 export interface AnthropicConfig {
   apiKey: string;
   model?: string;
   maxTokens?: number;
   timeout?: number;
+  /** Sent as output_config.effort to models that accept it */
+  effort?: EffortLevel;
+  /** Model a refused request is retried on once. Empty string disables the retry. */
+  refusalFallbackModel?: string;
+}
+
+interface MessagesRequest {
+  model: string;
+  messages: ConversationMessage[];
+  maxTokens: number;
+  timeout: number;
+  effort: EffortLevel;
+  system?: string;
+  tools?: ConversationRequest['tools'];
 }
 
 export class AnthropicProvider implements AIProvider {
@@ -60,6 +100,8 @@ export class AnthropicProvider implements AIProvider {
   private apiKey: string;
   private maxTokens: number;
   private timeout: number;
+  private effort: EffortLevel;
+  private refusalFallbackModel: string;
   private profile?: EnterpriseProfile;
   private essentialHeadersExtractor: (headers: Record<string, string>) => Record<string, string>;
 
@@ -72,6 +114,8 @@ export class AnthropicProvider implements AIProvider {
     this.model = config.model ?? DEFAULT_MODEL;
     this.maxTokens = config.maxTokens ?? DEFAULT_MAX_TOKENS;
     this.timeout = config.timeout ?? DEFAULT_TIMEOUT_MS;
+    this.effort = config.effort ?? DEFAULT_EFFORT;
+    this.refusalFallbackModel = config.refusalFallbackModel ?? DEFAULT_REFUSAL_FALLBACK_MODEL;
     this.profile = profile;
     this.essentialHeadersExtractor = essentialHeadersExtractor;
   }
@@ -83,8 +127,6 @@ export class AnthropicProvider implements AIProvider {
     emailData: ExtractedEmailData,
     options?: AnalysisOptions
   ): Promise<AnalysisResult> {
-    const startTime = Date.now();
-
     logger.info('Starting email analysis with Anthropic', {
       model: this.model,
       subject: emailData.subject.substring(0, 50),
@@ -93,206 +135,140 @@ export class AnthropicProvider implements AIProvider {
     const essentialHeaders = this.essentialHeadersExtractor(emailData.headers);
     const prompt = buildPhishingAnalysisPrompt(emailData, essentialHeaders, this.profile);
 
-    const { text: responseText, usage } = await this.sendPromptWithUsage(prompt, options);
-    const processingTimeMs = Date.now() - startTime;
-
-    const result = parseAnalysisResponse(responseText, this.name, this.model, processingTimeMs);
-
-    // Add token usage to result for cost tracking
-    if (usage) {
-      result.tokenUsage = usage;
-    }
+    const result = await analyzeSingleShot({
+      provider: this.name,
+      model: this.model,
+      refusalFallbackModel: this.refusalFallbackModel,
+      invoke: model => this.sendSingleShot(model, prompt, options),
+    });
 
     logger.info('Email analysis completed', {
+      analysisFailed: result.analysisFailed ?? false,
       isPhishing: result.isPhishing,
       confidence: result.confidence,
-      processingTimeMs,
+      model: result.model,
+      processingTimeMs: result.processingTimeMs,
     });
 
     return result;
   }
 
   /**
-   * Run one turn of a tool-capable conversation against the Messages API
+   * Run one turn of a tool-capable conversation against the Messages API.
+   * A refusal or a truncated turn is returned (see `stopReason`), not thrown:
+   * the caller decides what it means for the conversation.
    */
   async converse(
     request: ConversationRequest,
     options?: AnalysisOptions
   ): Promise<ConversationResponse> {
-    const maxTokens = request.maxTokens ?? options?.maxTokens ?? this.maxTokens;
-    const timeout = options?.timeout ?? this.timeout;
-
     logger.info('Anthropic conversation turn', {
       model: this.model,
       messages: request.messages.length,
       tools: request.tools?.length ?? 0,
     });
 
+    const turn = await this.callMessagesApi({
+      model: this.model,
+      messages: request.messages,
+      maxTokens: request.maxTokens ?? options?.maxTokens ?? this.maxTokens,
+      timeout: options?.timeout ?? this.timeout,
+      effort: options?.effort ?? this.effort,
+      system: request.system,
+      tools: request.tools,
+    });
+
+    return {
+      content: turn.content,
+      rawContent: turn.rawContent,
+      stopReason: turn.stopReason,
+      refusalCategory: turn.refusalCategory,
+      usage: turn.usage,
+    };
+  }
+
+  /**
+   * Send a raw prompt to Anthropic API. Throws ModelRefusalError when the
+   * model (and the refusal-fallback model) declines, and
+   * TruncatedResponseError when the reply hits max_tokens.
+   */
+  async sendPrompt(prompt: string, options?: AnalysisOptions): Promise<string> {
+    const completion = await completeSingleShot({
+      provider: this.name,
+      model: this.model,
+      refusalFallbackModel: this.refusalFallbackModel,
+      invoke: model => this.sendSingleShot(model, prompt, options),
+    });
+    return completion.text;
+  }
+
+  private sendSingleShot(
+    model: string,
+    prompt: string,
+    options?: AnalysisOptions
+  ): Promise<ModelTurn> {
+    const maxTokens = options?.maxTokens ?? this.maxTokens;
+
+    logger.debug('Sending prompt to Anthropic API', {
+      model,
+      promptLength: prompt.length,
+      maxTokens,
+    });
+
+    return this.callMessagesApi({
+      model,
+      messages: [{ role: 'user', content: prompt }],
+      maxTokens,
+      timeout: options?.timeout ?? this.timeout,
+      effort: options?.effort ?? this.effort,
+    });
+  }
+
+  /**
+   * POST one Messages API request, with retries for transient failures.
+   *
+   * No `thinking` field is sent: Opus 5.5 always thinks and rejects
+   * `disabled`, and omitting the field is valid on every model. No sampling
+   * parameters and no `tool_choice` are sent either — current models reject
+   * non-default values.
+   */
+  private callMessagesApi(request: MessagesRequest): Promise<ModelTurn> {
+    const body: Record<string, unknown> = {
+      model: request.model,
+      messages: request.messages,
+      max_tokens: request.maxTokens,
+    };
+    if (request.system) {
+      body.system = request.system;
+    }
+    if (request.tools?.length) {
+      body.tools = request.tools;
+    }
+    const effort = effortForModel(request.model, request.effort);
+    if (effort) {
+      body.output_config = { effort };
+    }
+
     return withRetry(
       async () => {
         try {
-          const body: Record<string, unknown> = {
-            model: this.model,
-            messages: request.messages,
-            max_tokens: maxTokens,
-          };
-          if (request.system) {
-            body.system = request.system;
-          }
-          if (request.tools?.length) {
-            body.tools = request.tools;
-          }
-
           const response = await axios.post(ANTHROPIC_API_ENDPOINT, body, {
             headers: {
               'Content-Type': 'application/json',
               'x-api-key': this.apiKey,
               'anthropic-version': '2023-06-01',
             },
-            timeout,
+            timeout: request.timeout,
           });
 
-          const rawContent = response.data?.content;
-          if (!Array.isArray(rawContent)) {
-            throw new Error('Unexpected response format from Anthropic API');
-          }
-
-          const content: ContentBlock[] = [];
-          for (const block of rawContent as Array<Record<string, unknown>>) {
-            if (block.type === 'text' && typeof block.text === 'string') {
-              content.push({ type: 'text', text: block.text });
-            } else if (
-              block.type === 'tool_use' &&
-              typeof block.id === 'string' &&
-              typeof block.name === 'string'
-            ) {
-              content.push({
-                type: 'tool_use',
-                id: block.id,
-                name: block.name,
-                input: (block.input as Record<string, unknown>) ?? {},
-              });
-            }
-          }
-
-          const apiUsage = response.data?.usage;
-          const usage =
-            typeof apiUsage?.input_tokens === 'number' &&
-            typeof apiUsage?.output_tokens === 'number'
-              ? {
-                  inputTokens: apiUsage.input_tokens,
-                  outputTokens: apiUsage.output_tokens,
-                  totalTokens: apiUsage.input_tokens + apiUsage.output_tokens,
-                }
-              : undefined;
-
-          return {
-            content,
-            stopReason: response.data?.stop_reason as string | undefined,
-            usage,
-          };
-        } catch (error) {
-          if (axios.isAxiosError(error)) {
-            const axiosError = error as AxiosError;
-            if (axiosError.response?.status === 401) {
-              throw new Error('Invalid Anthropic API key');
-            }
-            if (axiosError.response?.status === 400) {
-              throw new Error(
-                `Anthropic API bad request: ${JSON.stringify(axiosError.response.data)}`
-              );
-            }
-            throw new Error(
-              `Anthropic API error: ${axiosError.response?.status ?? 'unknown'} - ${axiosError.message}`
-            );
-          }
-          throw error;
-        }
-      },
-      {
-        maxRetries: 3,
-        baseDelayMs: 1000,
-        shouldRetry: error => {
-          if (error.message.includes('401') || error.message.includes('400')) {
-            return false;
-          }
-          return isRetryableHttpError(error);
-        },
-      }
-    );
-  }
-
-  /**
-   * Send a raw prompt to Anthropic API
-   */
-  async sendPrompt(prompt: string, options?: AnalysisOptions): Promise<string> {
-    const result = await this.sendPromptWithUsage(prompt, options);
-    return result.text;
-  }
-
-  /**
-   * Send a raw prompt to Anthropic API and return both text and usage data
-   */
-  private async sendPromptWithUsage(
-    prompt: string,
-    options?: AnalysisOptions
-  ): Promise<{
-    text: string;
-    usage?: { inputTokens: number; outputTokens: number; totalTokens: number };
-  }> {
-    const maxTokens = options?.maxTokens ?? this.maxTokens;
-    const timeout = options?.timeout ?? this.timeout;
-
-    logger.debug('Sending prompt to Anthropic API', {
-      model: this.model,
-      promptLength: prompt.length,
-      maxTokens,
-    });
-
-    return withRetry(
-      async () => {
-        try {
-          const response = await axios.post(
-            ANTHROPIC_API_ENDPOINT,
-            {
-              model: this.model,
-              messages: [{ role: 'user', content: prompt }],
-              max_tokens: maxTokens,
-            },
-            {
-              headers: {
-                'Content-Type': 'application/json',
-                'x-api-key': this.apiKey,
-                'anthropic-version': '2023-06-01',
-              },
-              timeout,
-            }
-          );
-
-          const content = response.data?.content?.[0]?.text;
-          if (!content) {
-            throw new Error('Unexpected response format from Anthropic API');
-          }
-
-          let usage: { inputTokens: number; outputTokens: number; totalTokens: number } | undefined;
-          const apiUsage = response.data?.usage;
-          if (
-            typeof apiUsage?.input_tokens === 'number' &&
-            typeof apiUsage?.output_tokens === 'number'
-          ) {
-            usage = {
-              inputTokens: apiUsage.input_tokens,
-              outputTokens: apiUsage.output_tokens,
-              totalTokens: apiUsage.input_tokens + apiUsage.output_tokens,
-            };
-            logger.info('Anthropic token usage', { ...usage, model: this.model });
-          }
-
-          logger.debug('Received response from Anthropic API', {
-            responseLength: content.length,
+          const turn = normalizeModelResponse(response.data, {
+            provider: this.name,
+            model: request.model,
           });
-
-          return { text: content as string, usage };
+          if (turn.usage) {
+            logger.info('Anthropic token usage', { ...turn.usage, model: request.model });
+          }
+          return turn;
         } catch (error) {
           if (axios.isAxiosError(error)) {
             const axiosError = error as AxiosError;
@@ -325,8 +301,12 @@ export class AnthropicProvider implements AIProvider {
         maxRetries: 3,
         baseDelayMs: 1000,
         shouldRetry: error => {
-          // Don't retry auth or bad request errors
-          if (error.message.includes('401') || error.message.includes('400')) {
+          // Don't retry auth errors, bad requests, or malformed responses
+          if (
+            error.message.includes('Invalid Anthropic API key') ||
+            error.message.includes('bad request') ||
+            error.message.includes('Unexpected response format')
+          ) {
             return false;
           }
           return isRetryableHttpError(error);
@@ -344,8 +324,7 @@ export class AnthropicProvider implements AIProvider {
     }
 
     try {
-      // Quick health check with minimal prompt
-      await this.sendPrompt('Reply with "ok"', { maxTokens: 10, timeout: 10000 });
+      await this.ping();
       return true;
     } catch {
       return false;
@@ -359,7 +338,7 @@ export class AnthropicProvider implements AIProvider {
     const startTime = Date.now();
 
     try {
-      await this.sendPrompt('Reply with "ok"', { maxTokens: 10, timeout: 10000 });
+      await this.ping();
 
       return {
         available: true,
@@ -374,6 +353,19 @@ export class AnthropicProvider implements AIProvider {
         lastChecked: new Date(),
       };
     }
+  }
+
+  /**
+   * Minimal round trip. Any HTTP 200 means the provider is reachable — the
+   * reply's text is not read, since a thinking model may spend a small
+   * max_tokens budget before writing any.
+   */
+  private async ping(): Promise<void> {
+    await this.sendSingleShot(this.model, 'Reply with "ok"', {
+      maxTokens: HEALTH_CHECK_MAX_TOKENS,
+      timeout: 10000,
+      effort: 'low',
+    });
   }
 
   /**

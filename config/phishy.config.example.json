@@ -3,16 +3,18 @@
     "provider": "anthropic",
     "anthropic": {
       "apiKey": "sk-ant-your-api-key-here",
-      "model": "claude-opus-4-8",
-      "maxTokens": 4096,
+      "model": "claude-opus-5-5",
+      "maxTokens": 16000,
       "timeout": 60000
     },
     "bedrock": {
       "region": "us-east-1",
-      "modelId": "global.anthropic.claude-opus-4-8",
-      "maxTokens": 4096,
+      "modelId": "global.anthropic.claude-opus-5-5",
+      "maxTokens": 16000,
       "timeout": 60000
     },
+    "effort": "medium",
+    "refusalFallbackModel": "claude-opus-4-8",
     "fallbackProvider": "bedrock"
   },
   "email": {

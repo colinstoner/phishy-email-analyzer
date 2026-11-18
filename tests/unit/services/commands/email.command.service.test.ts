@@ -7,6 +7,8 @@ import {
   parseVerdictCommand,
   extractFreshText,
 } from '../../../../src/services/commands/email.command.service';
+import axios from 'axios';
+import { AnthropicProvider } from '../../../../src/services/ai/anthropic.provider';
 import { EmailMessage, ExtractedEmailData } from '../../../../src/types';
 
 const ANALYSIS_ID = '3f2b8a1c-0d4e-4f6a-9b2c-7e8d1a5f3c9b';
@@ -308,6 +310,92 @@ describe('EmailCommandService', () => {
       const result = await service.process(msg, makeEmailData(msg));
 
       expect(result.action).toBe('help_sent');
+    });
+
+    it('budgets max_tokens for thinking and asks for low effort', async () => {
+      const { aiParser, service } = makeServiceWithAI('{"verdict": "none"}');
+      const msg = makeMsg({ text: 'so what do you reckon?' });
+
+      await service.process(msg, makeEmailData(msg));
+
+      const options = aiParser.sendPrompt.mock.calls[0][1] as Record<string, unknown>;
+      expect(options.maxTokens).toBeGreaterThanOrEqual(1024);
+      expect(options.effort).toBe('low');
+      expect(options).not.toHaveProperty('temperature');
+    });
+
+    describe('through a real provider (HTTP mocked)', () => {
+      const THINKING = { type: 'thinking', thinking: '', signature: 'sig-cmd-1' };
+      let post: jest.SpyInstance;
+
+      function makeServiceWithProvider() {
+        const { db, notifier } = makeFakes();
+        const provider = new AnthropicProvider({ apiKey: 'test-key' }, headers => headers);
+        const service = new EmailCommandService(
+          db as never,
+          notifier as never,
+          SECURITY_TEAM,
+          provider
+        );
+        return { db, service };
+      }
+
+      beforeEach(() => {
+        post = jest.spyOn(axios, 'post');
+      });
+
+      it('reads the verdict from the text block after a thinking block', async () => {
+        post.mockResolvedValue({
+          data: {
+            content: [THINKING, { type: 'text', text: '{"verdict": "false_positive"}' }],
+            stop_reason: 'end_turn',
+          },
+        });
+        const { db, service } = makeServiceWithProvider();
+        const msg = makeMsg({
+          text: 'Checked with accounting, that vendor switched banks last week. All good.',
+        });
+
+        const result = await service.process(msg, makeEmailData(msg));
+
+        expect(result.action).toBe('verdict_recorded');
+        expect(db.recordFeedback).toHaveBeenCalledWith(
+          expect.objectContaining({ verdict: 'false_positive' })
+        );
+        const body = post.mock.calls[0][1] as Record<string, unknown>;
+        expect(body.output_config).toEqual({ effort: 'low' });
+        expect(body).not.toHaveProperty('thinking');
+      });
+
+      it('records nothing when the model and its fallback refuse', async () => {
+        post.mockResolvedValue({
+          data: { content: [], stop_reason: 'refusal', stop_details: { category: 'cyber' } },
+        });
+        const { db, service } = makeServiceWithProvider();
+        const msg = makeMsg({ text: 'so what do you reckon?' });
+
+        const result = await service.process(msg, makeEmailData(msg));
+
+        expect(post).toHaveBeenCalledTimes(2);
+        expect(result.action).toBe('help_sent');
+        expect(db.recordFeedback).not.toHaveBeenCalled();
+      });
+
+      it('records nothing when the reply is truncated mid-answer', async () => {
+        post.mockResolvedValue({
+          data: {
+            content: [THINKING, { type: 'text', text: '{"verdict": "confirmed_phishing"}' }],
+            stop_reason: 'max_tokens',
+          },
+        });
+        const { db, service } = makeServiceWithProvider();
+        const msg = makeMsg({ text: 'so what do you reckon?' });
+
+        const result = await service.process(msg, makeEmailData(msg));
+
+        expect(result.action).toBe('help_sent');
+        expect(db.recordFeedback).not.toHaveBeenCalled();
+      });
     });
   });
 });

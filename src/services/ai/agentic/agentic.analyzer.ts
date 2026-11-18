@@ -6,6 +6,12 @@
  * verdict the standard analysis produces. The loop is hard-capped — if the
  * model never settles on a verdict, the caller falls back to the standard
  * single-shot analysis.
+ *
+ * The conversation is append-only. The system prompt and tool list are fixed
+ * for the whole loop, earlier messages are never edited, and each assistant
+ * turn goes back exactly as the API returned it, thinking blocks included.
+ * Thinking blocks are signed against the conversation prefix that produced
+ * them, so any edit to history would invalidate them.
  */
 
 import { createLogger } from '../../../utils/logger';
@@ -19,6 +25,7 @@ import {
   responseText,
   responseToolUses,
 } from '../conversation.types';
+import { ModelRefusalError, TruncatedResponseError } from '../model.response';
 import { AgenticToolExecutor } from './tool.executor';
 
 const logger = createLogger('agentic-analyzer');
@@ -94,6 +101,26 @@ export class AgenticAnalyzer {
         usage.inputTokens += response.usage.inputTokens;
         usage.outputTokens += response.usage.outputTokens;
         usage.totalTokens += response.usage.totalTokens;
+        if (response.usage.thinkingTokens !== undefined) {
+          usage.thinkingTokens = (usage.thinkingTokens ?? 0) + response.usage.thinkingTokens;
+        }
+      }
+
+      // A refusal ends the loop. The caller falls back to the single-shot
+      // path, which builds a fresh request from the prompt — this
+      // conversation's thinking blocks are never replayed to another model.
+      if (response.stopReason === 'refusal') {
+        throw new ModelRefusalError(
+          `${provider.model} declined the request during agentic analysis (category: ${response.refusalCategory ?? 'unspecified'})`,
+          response.refusalCategory ?? null
+        );
+      }
+      // A truncated turn is incomplete whether it holds half a verdict or
+      // half a tool call; neither may be acted on.
+      if (response.stopReason === 'max_tokens') {
+        throw new TruncatedResponseError(
+          `${provider.model} hit the max_tokens limit during agentic analysis`
+        );
       }
 
       const toolUses = responseToolUses(response);
@@ -109,6 +136,9 @@ export class AgenticAnalyzer {
           provider.model,
           Date.now() - startTime
         );
+        if (result.analysisFailed) {
+          throw new Error(`Agentic analysis produced no usable verdict: ${result.failureReason}`);
+        }
         result.tokenUsage = usage.totalTokens > 0 ? usage : undefined;
         result.toolsUsed = toolsUsed;
 
@@ -128,8 +158,9 @@ export class AgenticAnalyzer {
         );
       }
 
-      // Execute every tool call in this round and feed the results back
-      messages.push({ role: 'assistant', content: response.content });
+      // Execute every tool call in this round and feed the results back. The
+      // assistant turn is appended verbatim (rawContent), thinking included.
+      messages.push({ role: 'assistant', content: response.rawContent ?? response.content });
       const toolResults: ContentBlockParam[] = [];
       for (const toolUse of toolUses) {
         toolsUsed.push(toolUse.name);

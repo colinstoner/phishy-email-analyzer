@@ -118,6 +118,60 @@ describe('PhishyConfigSchema', () => {
     });
   });
 
+  describe('AI model defaults', () => {
+    it('defaults the Anthropic provider to Claude Opus 5.5 with a 16000-token limit', () => {
+      const result = validateConfig({
+        ...validConfig,
+        ai: { provider: 'anthropic', anthropic: { apiKey: 'test-key' } },
+      });
+
+      expect(result.ai.anthropic?.model).toBe('claude-opus-5-5');
+      expect(result.ai.anthropic?.maxTokens).toBe(16000);
+      expect(result.ai.anthropic?.timeout).toBe(60000);
+    });
+
+    it('defaults the Bedrock provider to the Opus 5.5 inference profile', () => {
+      const result = validateConfig({ ...validConfig, ai: { provider: 'bedrock', bedrock: {} } });
+
+      expect(result.ai.bedrock?.modelId).toBe('global.anthropic.claude-opus-5-5');
+      expect(result.ai.bedrock?.maxTokens).toBe(16000);
+    });
+
+    it('defaults effort to medium and leaves the refusal fallback to the provider', () => {
+      const result = validateConfig(validConfig);
+
+      expect(result.ai.effort).toBe('medium');
+      expect(result.ai.refusalFallbackModel).toBeUndefined();
+    });
+
+    it('accepts every effort level and rejects anything else', () => {
+      for (const effort of ['low', 'medium', 'high', 'xhigh', 'max']) {
+        const result = validateConfig({ ...validConfig, ai: { ...validConfig.ai, effort } });
+        expect(result.ai.effort).toBe(effort);
+      }
+
+      const invalid = safeValidateConfig({
+        ...validConfig,
+        ai: { ...validConfig.ai, effort: 'extreme' },
+      });
+      expect(invalid.success).toBe(false);
+    });
+
+    it('accepts a refusal fallback model, including an empty string to disable it', () => {
+      const set = validateConfig({
+        ...validConfig,
+        ai: { ...validConfig.ai, refusalFallbackModel: 'claude-opus-5' },
+      });
+      expect(set.ai.refusalFallbackModel).toBe('claude-opus-5');
+
+      const disabled = validateConfig({
+        ...validConfig,
+        ai: { ...validConfig.ai, refusalFallbackModel: '' },
+      });
+      expect(disabled.ai.refusalFallbackModel).toBe('');
+    });
+  });
+
   describe('Email configuration validation', () => {
     it('should require valid sender email', () => {
       const config = {

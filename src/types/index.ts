@@ -87,8 +87,15 @@ export interface LinkFact {
  */
 export interface TokenUsage {
   inputTokens: number;
+  /** Billed output tokens. Includes thinking tokens on models that think. */
   outputTokens: number;
   totalTokens: number;
+  /**
+   * The share of outputTokens spent on thinking, when the API reports it
+   * (`usage.output_tokens_details.thinking_tokens`). Already counted in
+   * outputTokens — never add it on top.
+   */
+  thinkingTokens?: number;
 }
 
 /**
