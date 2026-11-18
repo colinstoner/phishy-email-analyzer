@@ -49,6 +49,15 @@ Parameters:
       once the same attack is reported by multiple people in a short window
       (>=3 reports, >=2 recipients, within 4 hours). Requires intelligence to be
       enabled (a database) and CampaignAlertDistribution to be set.
+  ReportButtonEnabled:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Default: 'false'
+    Description: >
+      When true, Outlook Report-button submissions delivered to Phishy are
+      handled silently: phishing reports are analyzed and only the security
+      team is notified (when the verdict warrants it); junk / not-junk reports
+      are skipped. The reporter is never emailed.
   CampaignAlertDistribution:
     Type: String
     Default: ''
@@ -120,6 +129,7 @@ Conditions:
     - !Condition UseIntelligence
     - !Equals [!Ref CampaignAlertsEnabled, 'true']
     - !Not [!Equals [!Ref CampaignAlertDistribution, '']]
+  UseReportButton: !Equals [!Ref ReportButtonEnabled, 'true']
 
 Resources:
   EmailBucket:
@@ -201,6 +211,7 @@ Resources:
           PHISHY_DB_CONNECTION: !If [UseIntelligence, !Ref IntelligenceDbSecretArn, !Ref AWS::NoValue]
           PHISHY_CAMPAIGN_ALERTS_ENABLED: !If [UseCampaignAlerts, 'true', !Ref AWS::NoValue]
           PHISHY_CAMPAIGN_ALERTS_DISTRIBUTION: !If [UseCampaignAlerts, !Ref CampaignAlertDistribution, !Ref AWS::NoValue]
+          PHISHY_REPORT_BUTTON_ENABLED: !If [UseReportButton, 'true', !Ref AWS::NoValue]
       VpcConfig: !If
         - UseIntelligence
         - SecurityGroupIds:

@@ -47,5 +47,8 @@
   "commands": {
     "enabled": false
   },
+  "reportButton": {
+    "enabled": false
+  },
   "logLevel": "info"
 }

@@ -198,5 +198,15 @@ describe('PhishyConfigSchema', () => {
       const result = validateConfig(config);
       expect(result.intelligence?.type).toBe('dynamodb');
     });
+
+    it('should leave Outlook Report-button intake off unless enabled', () => {
+      expect(validateConfig(validConfig).reportButton).toBeUndefined();
+      expect(validateConfig({ ...validConfig, reportButton: {} }).reportButton?.enabled).toBe(
+        false
+      );
+      expect(
+        validateConfig({ ...validConfig, reportButton: { enabled: true } }).reportButton?.enabled
+      ).toBe(true);
+    });
   });
 });
