@@ -116,7 +116,77 @@ Parameters:
       (about USD 22/month). Set to false if the VPC already has these
       endpoints (only one private-DNS endpoint per service is allowed per
       VPC) or a NAT gateway. The VPC must also have an S3 gateway endpoint or
-      NAT route - the Lambda fetches raw emails from S3.
+      NAT route - the Lambda fetches raw emails from S3. With GraphEnabled a
+      Lambda endpoint is added too (about USD 7/month per subnet), so the
+      function can invoke the Graph broker.
+  GraphEnabled:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Default: 'false'
+    Description: >
+      Optional Microsoft Graph access to your own Microsoft 365 tenant
+      (read-only). When true the stack adds a second function, the Graph
+      broker, outside the VPC: it holds the Graph certificate and runs the
+      lookups, and the main function (which parses untrusted email) only
+      invokes it. Requires GraphTenantId, GraphReadClientId and
+      GraphCertificateSecretArn. On its own this changes nothing: turn on the
+      features below.
+  GraphTenantId:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^[A-Za-z0-9.-]{1,253}$'
+    Description: Directory (tenant) ID of your Microsoft 365 tenant (a GUID), or one of its verified domains. Required when GraphEnabled is true.
+  GraphReadClientId:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    Description: Application (client) ID of the read-only Entra app registration. Required when GraphEnabled is true.
+  GraphCertificateSecretArn:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+$'
+    Description: >
+      ARN of the Secrets Manager secret holding the read app's private key and
+      certificate (see docs/CONFIGURATION.md). Only the Graph broker's role can
+      read it. Required when GraphEnabled is true.
+  GraphOriginalFetchEnabled:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Default: 'false'
+    Description: Read a forwarded email's real headers from the reporter's own mailbox before analysis. Needs GraphEnabled.
+  GraphBlastRadiusEnabled:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Default: 'false'
+    Description: After a malicious verdict, tell the security team who else received the message. Needs GraphEnabled.
+  GraphSenderHistoryEnabled:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Default: 'false'
+    Description: Before analysis, check the claimed sender's history with the organization in message trace. Needs GraphEnabled.
+  GraphBrokerReservedConcurrency:
+    Type: Number
+    Default: 5
+    MinValue: 0
+    MaxValue: 100
+    Description: >
+      Most Graph broker instances that can run at once. Each instance keeps its
+      own request allowance toward your tenant's message-trace limit, so this
+      bounds what Phishy can ask of Microsoft during a flood of reports;
+      lookups beyond it are skipped and analysis proceeds without them. Set to
+      0 to reserve nothing (required if the account's concurrency quota is too
+      small to reserve from). Used only when GraphEnabled is true.
+
+Rules:
+  GraphSettingsPresent:
+    RuleCondition: !Equals [!Ref GraphEnabled, 'true']
+    Assertions:
+      - Assert: !Not [!Equals [!Ref GraphTenantId, '']]
+        AssertDescription: GraphTenantId is required when GraphEnabled is true
+      - Assert: !Not [!Equals [!Ref GraphReadClientId, '']]
+        AssertDescription: GraphReadClientId is required when GraphEnabled is true
+      - Assert: !Not [!Equals [!Ref GraphCertificateSecretArn, '']]
+        AssertDescription: GraphCertificateSecretArn is required when GraphEnabled is true
 
 Conditions:
   UseAnthropic: !Equals [!Ref AIProvider, anthropic]
@@ -142,6 +212,27 @@ Conditions:
     - !Equals [!Ref CampaignAlertsEnabled, 'true']
     - !Not [!Equals [!Ref CampaignAlertDistribution, '']]
   UseReportButton: !Equals [!Ref ReportButtonEnabled, 'true']
+  # The GraphSettingsPresent rule rejects GraphEnabled without the secret ARN,
+  # so the second clause never decides anything at deploy time; it states the
+  # same dependency where the resources that use the ARN are conditioned.
+  UseGraph: !And
+    - !Equals [!Ref GraphEnabled, 'true']
+    - !Not [!Equals [!Ref GraphCertificateSecretArn, '']]
+  UseGraphOriginalFetch: !And
+    - !Condition UseGraph
+    - !Equals [!Ref GraphOriginalFetchEnabled, 'true']
+  UseGraphBlastRadius: !And
+    - !Condition UseGraph
+    - !Equals [!Ref GraphBlastRadiusEnabled, 'true']
+  UseGraphSenderHistory: !And
+    - !Condition UseGraph
+    - !Equals [!Ref GraphSenderHistoryEnabled, 'true']
+  ReserveGraphBrokerConcurrency: !And
+    - !Condition UseGraph
+    - !Not [!Equals [!Ref GraphBrokerReservedConcurrency, 0]]
+  CreateLambdaEndpoint: !And
+    - !Condition CreateEndpoints
+    - !Condition UseGraph
 
 Resources:
   EmailBucket:
@@ -225,6 +316,14 @@ Resources:
           PHISHY_CAMPAIGN_ALERTS_ENABLED: !If [UseCampaignAlerts, 'true', !Ref AWS::NoValue]
           PHISHY_CAMPAIGN_ALERTS_DISTRIBUTION: !If [UseCampaignAlerts, !Ref CampaignAlertDistribution, !Ref AWS::NoValue]
           PHISHY_REPORT_BUTTON_ENABLED: !If [UseReportButton, 'true', !Ref AWS::NoValue]
+          # Graph: this function only invokes the broker. It is given no
+          # tenant ID, client ID or certificate, and no access to the secret.
+          PHISHY_GRAPH_ENABLED: !If [UseGraph, 'true', !Ref AWS::NoValue]
+          PHISHY_GRAPH_MODE: !If [UseGraph, broker, !Ref AWS::NoValue]
+          PHISHY_GRAPH_BROKER_FUNCTION: !If [UseGraph, !Ref GraphBrokerFunction, !Ref AWS::NoValue]
+          PHISHY_GRAPH_ORIGINAL_FETCH_ENABLED: !If [UseGraphOriginalFetch, 'true', !Ref AWS::NoValue]
+          PHISHY_GRAPH_BLAST_RADIUS_ENABLED: !If [UseGraphBlastRadius, 'true', !Ref AWS::NoValue]
+          PHISHY_GRAPH_SENDER_HISTORY_ENABLED: !If [UseGraphSenderHistory, 'true', !Ref AWS::NoValue]
       VpcConfig: !If
         - UseIntelligence
         - SecurityGroupIds:
@@ -270,6 +369,103 @@ Resources:
                   - secretsmanager:GetSecretValue
                 Resource: !Ref IntelligenceDbSecretArn
           - !Ref AWS::NoValue
+        - !If
+          - UseGraph
+          - Statement:
+              - Sid: InvokeGraphBroker
+                Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !GetAtt GraphBrokerFunction.Arn
+          - !Ref AWS::NoValue
+
+  # The Graph broker: the only function that talks to Microsoft Graph and the
+  # only one that can read the Graph certificate. It is deliberately NOT
+  # attached to the VPC (it needs the internet route the main function must
+  # not have) and has no trigger: no function URL, API or event source. The
+  # main function invokes it directly with one of three typed requests; see
+  # docs/ARCHITECTURE.md, "Graph broker".
+  GraphBrokerFunction:
+    Type: AWS::Serverless::Function
+    Condition: UseGraph
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: false
+        Target: es2022
+        EntryPoints:
+          - src/graph-broker.ts
+        External:
+          - '@aws-sdk/*'
+    Properties:
+      Handler: graph-broker.handler
+      Runtime: nodejs22.x
+      Architectures: [x86_64]
+      # It holds a few hundred mailbox-lookup results at most
+      MemorySize: 512
+      # The blast-radius lookup may run for its whole time budget (up to 150s)
+      # and keeps 20s of the function's remaining time in reserve, so 180s
+      # covers every allowed budget. The main function stops waiting at its
+      # own budget regardless.
+      Timeout: 180
+      # A ceiling on concurrent Graph work: every instance has its own
+      # allowance toward the tenant's message-trace limit. Throttled
+      # invocations fail open in the main function.
+      ReservedConcurrentExecutions: !If
+        - ReserveGraphBrokerConcurrency
+        - !Ref GraphBrokerReservedConcurrency
+        - !Ref AWS::NoValue
+      Role: !GetAtt GraphBrokerRole.Arn
+      LoggingConfig:
+        LogGroup: !Ref GraphBrokerLogGroup
+      Environment:
+        Variables:
+          PHISHY_GRAPH_ENABLED: 'true'
+          PHISHY_GRAPH_TENANT_ID: !Ref GraphTenantId
+          PHISHY_GRAPH_READ_CLIENT_ID: !Ref GraphReadClientId
+          # The ARN, not the certificate: fetched on the first Graph call
+          PHISHY_GRAPH_READ_CERTIFICATE: !Ref GraphCertificateSecretArn
+          # The broker refuses an operation whose feature is off here
+          PHISHY_GRAPH_ORIGINAL_FETCH_ENABLED: !Ref GraphOriginalFetchEnabled
+          PHISHY_GRAPH_BLAST_RADIUS_ENABLED: !Ref GraphBlastRadiusEnabled
+          PHISHY_GRAPH_SENDER_HISTORY_ENABLED: !Ref GraphSenderHistoryEnabled
+
+  GraphBrokerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: UseGraph
+    Properties:
+      RetentionInDays: 90
+
+  # Least privilege, stated in full: write to its own log group and read the
+  # one certificate secret. No S3, SES, Bedrock, database secret or VPC
+  # access, and nothing that writes to anything but its log.
+  GraphBrokerRole:
+    Type: AWS::IAM::Role
+    Condition: UseGraph
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: graph-broker
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: WriteOwnLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt GraphBrokerLogGroup.Arn
+              - Sid: ReadGraphCertificate
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref GraphCertificateSecretArn
 
   LambdaSecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -344,6 +540,20 @@ Resources:
       SecurityGroupIds:
         - !Ref EndpointSecurityGroup
 
+  # Lets the VPC-attached main function invoke the Graph broker (the Lambda
+  # API) without internet access. The broker itself is outside the VPC.
+  LambdaEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateLambdaEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.lambda'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: !Split [',', !Ref SubnetIds]
+      SecurityGroupIds:
+        - !Ref EndpointSecurityGroup
+
   SESInvokePermission:
     Type: AWS::Lambda::Permission
     Properties:
@@ -385,6 +595,10 @@ Outputs:
   FunctionArn:
     Description: Phishy Lambda function ARN
     Value: !GetAtt PhishyFunction.Arn
+  GraphBrokerFunctionArn:
+    Condition: UseGraph
+    Description: Graph broker function ARN (invoked only by the Phishy function)
+    Value: !GetAtt GraphBrokerFunction.Arn
   EmailBucketName:
     Description: Bucket where SES stores raw emails
     Value: !Ref EmailBucket
