@@ -103,6 +103,19 @@ const CommandsConfigSchema = z.object({
 });
 
 /**
+ * Outlook Report-button intake configuration schema
+ * When the organization's Microsoft 365 "user reported settings" deliver
+ * Report-button submissions to Phishy, recognize them and handle them
+ * silently: phishing reports are analyzed and recorded and only the security
+ * team is told (when the verdict warrants it); junk / not-junk reports are
+ * skipped. The reporter is never emailed. Off by default — without it a
+ * button report is treated like any other forward.
+ */
+const ReportButtonConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+});
+
+/**
  * Agentic analysis configuration schema
  * Runs analysis as a bounded tool-use loop: Claude may consult Phishy's own
  * threat intelligence (known indicators, campaign history, URL inspection,
@@ -209,6 +222,7 @@ export const PhishyConfigSchema = z.object({
   campaignAlerts: CampaignAlertConfigSchema.optional(),
   campaignCache: CampaignCacheConfigSchema.optional(),
   commands: CommandsConfigSchema.optional(),
+  reportButton: ReportButtonConfigSchema.optional(),
   agentic: AgenticConfigSchema.optional(),
   graph: GraphConfigSchema.optional(),
   logLevel: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
@@ -232,6 +246,7 @@ export type CommandsConfig = z.infer<typeof CommandsConfigSchema>;
 export type AgenticConfig = z.infer<typeof AgenticConfigSchema>;
 export type GraphConfig = z.infer<typeof GraphConfigSchema>;
 export type GraphCredentialConfig = z.infer<typeof GraphCredentialConfigSchema>;
+export type ReportButtonConfig = z.infer<typeof ReportButtonConfigSchema>;
 
 /**
  * Partial configuration for merging

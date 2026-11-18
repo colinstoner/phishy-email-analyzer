@@ -139,6 +139,25 @@ Requires the intelligence database and `migrations/002_analysis_feedback.sql`.
 |----------|---------|-------------|
 | `PHISHY_EMAIL_COMMANDS_ENABLED` | `false` | Process security-team replies as commands |
 
+### Outlook Report Button Intake
+
+Microsoft 365 can deliver a copy of every message an employee reports with Outlook's built-in **Report** button to a mailbox of your choice (Defender portal → Settings → Email & collaboration → User reported settings → *Send reported messages to*). If those reports reach Phishy's address, this flag makes Phishy recognize them and handle them **silently** — the employee clicked a button and is not waiting for an answer, so their experience does not change:
+
+- **Reported as Phishing** — analyzed, stored, and counted toward campaign detection exactly like a forward. The reporter is **not** emailed. The security team (`SECURITY_TEAM_DISTRIBUTION`) receives the report only when the verdict is malicious or suspicious, or when the analysis could not be completed.
+- **Reported as Junk / Not junk** — counted and skipped. No analysis, no email.
+
+Forwards to Phishy are unaffected: the person who forwards still gets their answer.
+
+A button report carries the reported email as an attachment with its full original headers, so the analysis sees the real `Authentication-Results`. The wrapper's machine-generated body (a dump of the reported email's headers) is discarded and never presented to the model as the employee's note.
+
+Every report emits a `UserReports` CloudWatch metric (dimension `ReportedAs`). Delivery depends on a Microsoft 365 setting Phishy cannot see, so alarm on that metric going quiet.
+
+With the flag off (the default), a button report that reaches Phishy is treated like any other forward — it is analyzed and the reporter gets a reply.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PHISHY_REPORT_BUTTON_ENABLED` | `false` | Handle Outlook Report-button submissions silently |
+
 ### Microsoft Graph (Optional)
 
 Phishy can authenticate to Microsoft Graph on your own Microsoft 365 tenant. This is a **foundation**: enabling it does not change how emails are analyzed — no feature calls Graph yet. It exists so that later features (retrieving a reporter's original message, checking who else received an email) have a safe, already-reviewed way to reach the tenant. Leave it off unless you are preparing for those. See [ARCHITECTURE.md](ARCHITECTURE.md#microsoft-graph-optional-foundation) for the trust rules.

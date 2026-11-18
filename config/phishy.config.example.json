@@ -55,5 +55,8 @@
       "certificate": "arn:aws:secretsmanager:us-east-1:123456789012:secret:phishy/graph-read-AbCdEf"
     }
   },
+  "reportButton": {
+    "enabled": false
+  },
   "logLevel": "info"
 }

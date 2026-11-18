@@ -43,6 +43,12 @@ Phishy is an AWS Lambda that receives employee-forwarded emails via SES, analyze
 - **Adversarial bounding.** Body truncation keeps head+tail (padding can't hide the payload); the link budget fills round-robin across registrable domains; every elision is disclosed to the model.
 - **Boundary validation.** External (API Gateway) payloads pass a Zod schema that strips trust-bearing fields — `authVerdicts` and `s3Location` only exist when derived from SES receipts.
 
+## Two kinds of report
+
+A **forward** is a question: the employee gets a report back. An **Outlook Report-button submission** (opt-in, `PHISHY_REPORT_BUTTON_ENABLED`) is not — the employee clicked a button and moved on — so Phishy never replies to the reporter. Phishing reports run the same pipeline and reach only the security team, and only when the verdict warrants it; junk / not-junk reports are counted and skipped.
+
+Button reports are recognized in the parser (`services/email/user.report.ts`) from the wrapper's machine-generated subject, on SES-delivered mail only — the external payload schema strips the marker. The marker is not authentication and grants nothing: recognizing a report only ever reduces what Phishy does, so forging one gains an attacker nothing. The wrapper body (a dump of the reported email's headers) is discarded rather than labeled `REPORTED`; the attached original is parsed like any forward-as-attachment. Notifications go to operator-configured security addresses, never to anything derived from the message.
+
 ## Who may tell Phishy what to do
 
 Three principals, three levels of trust:
@@ -108,5 +114,6 @@ Everything optional is off by default and independently enableable:
 | `PHISHY_EMAIL_COMMANDS_ENABLED` | security-team replies | intelligence DB + migration 002 |
 | `PHISHY_AGENTIC_ENABLED` | tool-loop analysis + AI command parsing | nothing (tools appear as their backends do) |
 | `PHISHY_GRAPH_ENABLED` | Microsoft Graph access (foundation only — no feature uses it yet) | Entra app registration with a certificate; outbound HTTPS to Microsoft |
+| `PHISHY_REPORT_BUTTON_ENABLED` | silent handling of Outlook Report-button submissions | Microsoft 365 user-reported settings delivering to Phishy |
 
 See [CONFIGURATION.md](CONFIGURATION.md) for the full reference.
