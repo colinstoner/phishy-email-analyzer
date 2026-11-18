@@ -53,7 +53,7 @@ function evalCase(overrides: Partial<EvalCase> = {}): EvalCase {
     description: 'An attack used by the scorer tests.',
     forward: { style: 'inline' },
     modes: ['single', 'agentic'],
-    delivery: { inPrompt: ['x'], outsideFence: [], expectDelivered: true },
+    delivery: { inPrompt: ['x'], disclosed: [], expectDelivered: true },
     criteria: { markers: [], toolInputContains: [], toolSuppression: false },
     ...overrides,
   };
