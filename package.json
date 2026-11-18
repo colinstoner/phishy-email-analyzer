@@ -5,10 +5,12 @@
   "main": "index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "phishy-try": "dist/cli/try.js"
+    "phishy-try": "dist/cli/try.js",
+    "phishy-graph-probe": "dist/cli/graph-probe.js"
   },
   "scripts": {
     "try": "npm run build && node dist/cli/try.js",
+    "graph:probe": "npm run --silent build && node dist/cli/graph-probe.js",
     "build": "tsc",
     "build:watch": "tsc --watch",
     "clean": "rm -rf dist",

@@ -127,6 +127,7 @@ The analysis report includes:
 | [docs/QUICK_START.md](docs/QUICK_START.md) | 15-minute setup guide |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | How Phishy works: pipeline, trust boundaries, provenance model |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | All configuration options |
+| [docs/GRAPH_PROBE.md](docs/GRAPH_PROBE.md) | Read-only probe: which Microsoft Graph calls work in your tenant |
 | [docs/INTELLIGENCE.md](docs/INTELLIGENCE.md) | Threat intelligence features |
 | [docs/DATABASE.md](docs/DATABASE.md) | Intelligence database schema & migrations |
 | [AWS.md](AWS.md) | Detailed AWS setup (SAM and manual) |
