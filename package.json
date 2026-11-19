@@ -11,6 +11,7 @@
   "scripts": {
     "try": "npm run build && node dist/cli/try.js",
     "graph:probe": "npm run --silent build && node dist/cli/graph-probe.js",
+    "indicators:audit": "esbuild src/cli/indicator-audit.ts --bundle --platform=node --target=node22 --loader:.pem=text --log-level=warning --outfile=dist/cli-bundles/indicator-audit.cjs && node dist/cli-bundles/indicator-audit.cjs",
     "eval:injection": "esbuild src/cli/injection-eval.ts --bundle --platform=node --target=node22 --loader:.pem=text --log-level=warning --outfile=dist/eval/injection-eval.cjs && node dist/eval/injection-eval.cjs",
     "build": "tsc",
     "build:watch": "tsc --watch",

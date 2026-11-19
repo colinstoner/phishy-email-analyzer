@@ -187,15 +187,6 @@ function sanitizeAssessment(parsed: AIAnalysisResponse): ThreatAssessment | unde
   };
 }
 
-/** Map a 0-100 risk score to the legacy confidence label for display/back-compat */
-function riskScoreToConfidence(score: number): string {
-  if (score >= 85) return 'Very High';
-  if (score >= 60) return 'High';
-  if (score >= 35) return 'Medium';
-  if (score >= 15) return 'Low';
-  return 'Very Low';
-}
-
 /**
  * Keep only well-formed IOC nominations; the model occasionally improvises
  * shapes and a bad entry must not poison the indicator store.
@@ -344,8 +335,10 @@ export function parseAnalysisResponse(
   const isPhishing = assessment
     ? MALICIOUS_VERDICTS.includes(assessment.verdict)
     : parsed.isPhishing === true;
+  // Confidence is the model's certainty in its verdict, not its risk
+  // score: a certainly-legitimate email is high confidence, zero risk.
   const confidence = assessment
-    ? normalizeConfidence(riskScoreToConfidence(assessment.riskScore))
+    ? normalizeConfidence(assessment.verdictConfidence)
     : normalizeConfidence(parsed.confidence);
 
   return {

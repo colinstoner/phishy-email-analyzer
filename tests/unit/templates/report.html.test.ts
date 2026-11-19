@@ -155,6 +155,65 @@ describe('buildEmailHtml', () => {
   });
 });
 
+describe('confidence line', () => {
+  const risk = (
+    extra: Partial<NonNullable<ReportOptions['risk']>>
+  ): NonNullable<ReportOptions['risk']> => ({
+    verdict: 'legitimate',
+    riskScore: 5,
+    riskLevel: 'safe',
+    reasons: [],
+    ...extra,
+  });
+
+  it("shows the model's own confidence (a sure-legitimate email reads Very High)", () => {
+    const options = { risk: risk({ confidence: 'Very High', confidenceBasis: 'model' }) };
+    expect(buildEmailHtml(analysis({ isPhishing: false }), email(), options)).toContain(
+      'Confidence: <strong>Very High</strong>'
+    );
+    expect(buildPlainTextReport(analysis({ isPhishing: false }), email(), options)).toContain(
+      'Confidence: Very High'
+    );
+  });
+
+  it('says when the security team decided', () => {
+    const options = { risk: risk({ confidence: 'Very High', confidenceBasis: 'security_team' }) };
+    expect(buildPlainTextReport(analysis(), email(), options)).toContain(
+      "Confidence: Decided by your security team's review"
+    );
+  });
+
+  it('says when a known threat decided, instead of a number', () => {
+    const options = {
+      risk: risk({
+        verdict: 'suspicious',
+        riskScore: 68,
+        riskLevel: 'high',
+        confidence: 'High',
+        confidenceBasis: 'threat_intel',
+      }),
+    };
+    const html = buildEmailHtml(analysis(), email(), options);
+    expect(html).toContain('Based on a known threat from earlier reports');
+    expect(html).not.toContain('Confidence: <strong>High</strong>');
+  });
+
+  it('omits the line when unassessed or not provided', () => {
+    const unassessed = {
+      risk: risk({
+        verdict: 'undetermined',
+        riskScore: 0,
+        confidence: 'N/A',
+        confidenceBasis: 'unassessed',
+      }),
+    };
+    expect(buildPlainTextReport(analysis(), email(), unassessed)).not.toContain('Confidence:');
+    expect(buildPlainTextReport(analysis(), email(), becOptions)).not.toContain('Confidence:');
+    const unknown = { risk: risk({ confidence: 'Unknown', confidenceBasis: 'model' }) };
+    expect(buildPlainTextReport(analysis(), email(), unknown)).not.toContain('Confidence:');
+  });
+});
+
 describe('buildPlainTextReport', () => {
   it('mirrors the verdict, score, action, and teaching block', () => {
     const text = buildPlainTextReport(

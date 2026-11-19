@@ -373,6 +373,64 @@ describe('extractIOCs', () => {
     });
   });
 
+  describe('Indicator roles (decide strong vs weak matches later)', () => {
+    const roleOf = (iocs: ReturnType<typeof extractIOCs>, type: string, value: string): unknown =>
+      iocs.find(i => i.indicatorType === type && i.indicatorValue === value)?.metadata?.role;
+
+    it('records sender, payload and infrastructure roles from extraction', () => {
+      const emailData = createMockEmailData({
+        original_sender: 'Billing <billing@attacker.example.net>',
+        links: [
+          'https://tracker.example.org/r?url=https%3A%2F%2Flanding.example.net%2Flogin',
+          'https://direct.example.net/pay',
+        ],
+        text: 'Server 198.51.100.20',
+      });
+
+      const iocs = extractIOCs(emailData, createMockAnalysis(true));
+
+      expect(roleOf(iocs, 'email', 'billing@attacker.example.net')).toBe('sender');
+      expect(roleOf(iocs, 'domain', 'attacker.example.net')).toBe('sender');
+      expect(roleOf(iocs, 'domain', 'landing.example.net')).toBe('payload');
+      expect(roleOf(iocs, 'domain', 'tracker.example.org')).toBe('infrastructure');
+      expect(roleOf(iocs, 'url', 'https://landing.example.net/login')).toBe('payload');
+      expect(roleOf(iocs, 'url', 'https://direct.example.net/pay')).toBe('payload');
+      expect(
+        roleOf(
+          iocs,
+          'url',
+          'https://tracker.example.org/r?url=https%3A%2F%2Flanding.example.net%2Flogin'
+        )
+      ).toBe('infrastructure');
+      expect(roleOf(iocs, 'ip', '198.51.100.20')).toBe('infrastructure');
+      for (const ioc of iocs) {
+        expect(ioc.metadata?.roleSource).toBe('extraction');
+      }
+    });
+
+    it("lets the model's role override the regex heuristic for the same value", () => {
+      const emailData = createMockEmailData({
+        links: ['https://brand-login.example.com/privacy'],
+      });
+      const analysis = {
+        ...createMockAnalysis(true),
+        iocs: [
+          {
+            type: 'domain' as const,
+            value: 'brand-login.example.com',
+            role: 'infrastructure' as const,
+          },
+        ],
+      };
+
+      const iocs = extractIOCs(emailData, analysis);
+
+      const domain = iocs.find(i => i.indicatorValue === 'brand-login.example.com');
+      expect(domain?.metadata?.role).toBe('infrastructure');
+      expect(domain?.metadata?.roleSource).toBe('model');
+    });
+  });
+
   describe('Hash extraction', () => {
     it('should extract MD5 hashes', () => {
       const emailData = createMockEmailData({

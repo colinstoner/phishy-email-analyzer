@@ -21,8 +21,31 @@ export { CampaignAlertService, CampaignAlertConfig } from './campaign.service';
 
 export { extractIOCs, IOCExtractionOptions, IOCSourceContext } from './ioc.extractor';
 
-export { fuseRisk, scoreToLevel } from './risk.fusion';
-export type { FusionSignals, RiskDecision, RiskLevel } from './risk.fusion';
+export {
+  fuseRisk,
+  scoreToLevel,
+  modelVerdictOf,
+  clampToBand,
+  VERDICT_SCORE_BANDS,
+  WEAK_INDICATOR_RISK_CEILING,
+  PHISHING_SCORE_THRESHOLD,
+} from './risk.fusion';
+export type { FusionSignals, RiskDecision, RiskLevel, ConfidenceBasis } from './risk.fusion';
+
+export {
+  classifyIndicator,
+  partitionMatches,
+  indicatorRole,
+  indicatorProvenance,
+  decideIndicatorStorage,
+  withProvenance,
+} from './indicator.policy';
+export type {
+  IndicatorRole,
+  IndicatorProvenance,
+  MatchStrength,
+  MatchReason,
+} from './indicator.policy';
 
 export {
   PatternDetectorService,

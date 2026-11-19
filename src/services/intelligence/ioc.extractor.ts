@@ -78,6 +78,13 @@ export interface IOCSourceContext {
   subject: string;
 }
 
+/** Role of a domain indicator by where it was found */
+const DOMAIN_CONTEXT_ROLES: Record<string, 'sender' | 'payload' | 'infrastructure'> = {
+  sender_domain: 'sender',
+  final_url_domain: 'payload',
+  redirect_intermediary: 'infrastructure',
+};
+
 const DEFAULT_OPTIONS: IOCExtractionOptions = {
   extractUrls: true,
   extractDomains: true,
@@ -309,6 +316,10 @@ function extractUrlIOCs(
         metadata: {
           ...baseMetadata,
           extractionContext: 'url_in_content',
+          // A link that unwraps elsewhere is the hop (tracker, redirector),
+          // not the destination
+          role: chain.length > 1 ? 'infrastructure' : 'payload',
+          roleSource: 'extraction',
           ...(chain.length > 1 ? { redirectChain: chain, finalUrl: final } : {}),
         },
       });
@@ -325,7 +336,13 @@ function extractUrlIOCs(
         firstSeenAt: now,
         lastSeenAt: now,
         isActive: true,
-        metadata: { ...baseMetadata, extractionContext: 'final_url', unwrappedFrom: original },
+        metadata: {
+          ...baseMetadata,
+          extractionContext: 'final_url',
+          role: 'payload',
+          roleSource: 'extraction',
+          unwrappedFrom: original,
+        },
       });
     }
   }
@@ -410,7 +427,12 @@ function extractDomainIOCs(
       firstSeenAt: now,
       lastSeenAt: now,
       isActive: true,
-      metadata: { ...baseMetadata, extractionContext: role.context },
+      metadata: {
+        ...baseMetadata,
+        extractionContext: role.context,
+        role: DOMAIN_CONTEXT_ROLES[role.context] ?? 'infrastructure',
+        roleSource: 'extraction',
+      },
     });
   }
 
@@ -445,7 +467,12 @@ function extractIPIOCs(
       firstSeenAt: now,
       lastSeenAt: now,
       isActive: true,
-      metadata: { ...baseMetadata, extractionContext: 'ip_in_content' },
+      metadata: {
+        ...baseMetadata,
+        extractionContext: 'ip_in_content',
+        role: 'infrastructure',
+        roleSource: 'extraction',
+      },
     });
   }
 
@@ -479,7 +506,13 @@ function extractHashIOCs(
         firstSeenAt: now,
         lastSeenAt: now,
         isActive: true,
-        metadata: { ...baseMetadata, extractionContext: 'hash_in_content', hashType },
+        metadata: {
+          ...baseMetadata,
+          extractionContext: 'hash_in_content',
+          role: 'infrastructure',
+          roleSource: 'extraction',
+          hashType,
+        },
       });
     }
   }
@@ -519,7 +552,12 @@ function extractEmailIOCs(
       firstSeenAt: now,
       lastSeenAt: now,
       isActive: true,
-      metadata: { ...baseMetadata, extractionContext: 'original_sender_email' },
+      metadata: {
+        ...baseMetadata,
+        extractionContext: 'original_sender_email',
+        role: 'sender',
+        roleSource: 'extraction',
+      },
     });
   }
 
@@ -560,7 +598,12 @@ function extractAINominatedIOCs(
       firstSeenAt: now,
       lastSeenAt: now,
       isActive: true,
-      metadata: { ...baseMetadata, extractionContext: `ai_nominated:${ioc.role}` },
+      metadata: {
+        ...baseMetadata,
+        extractionContext: `ai_nominated:${ioc.role}`,
+        role: ioc.role,
+        roleSource: 'model',
+      },
     });
   }
 
@@ -588,18 +631,31 @@ export function dedupeKey(type: ThreatIndicatorRecord['indicatorType'], value: s
 }
 
 /**
- * Dedupe by type+value, keeping the highest-confidence occurrence
+ * Dedupe by type+value, keeping the highest-confidence occurrence. When the
+ * model nominated the same value, its role wins over the regex heuristic: the
+ * model saw whether a domain was the attacker's or a brand link copied in.
  */
 function dedupeIndicators(indicators: ThreatIndicatorRecord[]): ThreatIndicatorRecord[] {
   const byKey = new Map<string, ThreatIndicatorRecord>();
+  const modelRoles = new Map<string, unknown>();
   for (const indicator of indicators) {
     const key = dedupeKey(indicator.indicatorType, indicator.indicatorValue);
+    if (indicator.metadata?.roleSource === 'model') {
+      modelRoles.set(key, indicator.metadata.role);
+    }
     const existing = byKey.get(key);
     if (!existing || indicator.confidenceScore > existing.confidenceScore) {
       byKey.set(key, indicator);
     }
   }
-  return [...byKey.values()];
+  return [...byKey.entries()].map(([key, indicator]) =>
+    modelRoles.has(key) && indicator.metadata?.roleSource !== 'model'
+      ? {
+          ...indicator,
+          metadata: { ...indicator.metadata, role: modelRoles.get(key), roleSource: 'model' },
+        }
+      : indicator
+  );
 }
 
 /**

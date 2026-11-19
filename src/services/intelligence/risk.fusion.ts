@@ -17,12 +17,18 @@ import {
   SenderHistoryFacts,
 } from '../../types';
 import { ThreatIndicatorRecord, CampaignRecord, FeedbackRecord } from './database.service';
+import { partitionMatches } from './indicator.policy';
+import { normalizeConfidence } from '../ai/provider.interface';
 
 export type RiskLevel = 'critical' | 'high' | 'medium' | 'low' | 'safe';
 
 /** Signals the handler collects before fusing */
 export interface FusionSignals {
-  /** Known indicators from this email that already exist in the store */
+  /**
+   * Known indicators from this email that already exist in the store. Each is
+   * classified strong or weak (see indicator.policy.ts); only strong matches
+   * can raise the score past the weak ceiling or change a verdict.
+   */
   matchedIndicators?: ThreatIndicatorRecord[];
   /** An active campaign this email matches, if any */
   campaign?: CampaignRecord | null;
@@ -36,6 +42,8 @@ export interface FusionSignals {
    * and are never read in a way that lowers a score or clears a verdict.
    */
   senderHistory?: SenderHistoryFacts;
+  /** Clock for indicator expiry (tests) */
+  now?: Date;
 }
 
 /**
@@ -44,13 +52,67 @@ export interface FusionSignals {
  */
 export const SENDER_FANOUT_RISK_FLOOR = 35;
 
+/**
+ * Highest score weak indicator matches can lift an email to: 'medium', below
+ * the phishing threshold. Weak matches (shared infrastructure, indicators
+ * without provenance, expired ones) are context, never evidence on their own.
+ */
+export const WEAK_INDICATOR_RISK_CEILING = 40;
+
+/**
+ * Score at or above which a `suspicious` verdict is flagged as phishing for
+ * downstream gating (campaign tracking, blast radius, isPhishing). Malicious
+ * verdicts are always flagged; benign verdicts never are.
+ */
+export const PHISHING_SCORE_THRESHOLD = 55;
+
+/**
+ * Score band for each final verdict, applied after fusion so the number
+ * shown always agrees with the label. `legitimate` (0-10) and the malicious
+ * upper range follow the model's own rubric; `graymail`/`spam` follow its
+ * 10-30 but stop at 29 so the level shown stays 'low' rather than 'medium';
+ * `suspicious` spans 'medium' and 'high' but never 'critical' (critical is
+ * reserved for a malicious verdict); a malicious verdict is never below
+ * 'high'. `undetermined` has no band — its score is never shown.
+ */
+export const VERDICT_SCORE_BANDS: Readonly<
+  Record<Exclude<ThreatVerdict, 'undetermined'>, { min: number; max: number }>
+> = {
+  legitimate: { min: 0, max: 10 },
+  graymail: { min: 10, max: 29 },
+  spam: { min: 10, max: 29 },
+  suspicious: { min: 30, max: 79 },
+  bec: { min: 55, max: 100 },
+  phishing: { min: 55, max: 100 },
+  malware_delivery: { min: 55, max: 100 },
+};
+
+/** Verdicts that say the email is not an attack */
+const BENIGN_VERDICTS: readonly ThreatVerdict[] = ['legitimate', 'graymail', 'spam'];
+
+/**
+ * What the displayed confidence is based on:
+ * - `model`: the model's own certainty in its verdict
+ * - `security_team`: a security-team ruling decided the outcome
+ * - `threat_intel`: a strong indicator match or an active campaign changed
+ *   the outcome (verdict or phishing flag) the model reached
+ * - `unassessed`: the model never produced a verdict
+ */
+export type ConfidenceBasis = 'model' | 'security_team' | 'threat_intel' | 'unassessed';
+
 export interface RiskDecision {
   verdict: ThreatVerdict;
-  /** Fused 0-100 risk score */
+  /** Fused 0-100 risk score, inside the band for `verdict` */
   riskScore: number;
   riskLevel: RiskLevel;
   isPhishing: boolean;
+  /**
+   * Confidence in the outcome. The model's `verdictConfidence` mapped to a
+   * label when the model decided; 'Very High' for a security-team ruling;
+   * 'High' when a strong signal decided; 'N/A' when unassessed.
+   */
   confidence: ConfidenceLevel;
+  confidenceBasis: ConfidenceBasis;
   /** Human-readable explanation of how intelligence moved the score */
   reasons: string[];
 }
@@ -70,14 +132,6 @@ export function scoreToLevel(score: number): RiskLevel {
   if (score >= 30) return 'medium';
   if (score >= 10) return 'low';
   return 'safe';
-}
-
-function scoreToConfidence(score: number): ConfidenceLevel {
-  if (score >= 85) return 'Very High';
-  if (score >= 60) return 'High';
-  if (score >= 35) return 'Medium';
-  if (score >= 15) return 'Low';
-  return 'Very Low';
 }
 
 /**
@@ -102,6 +156,29 @@ function baseScore(result: AnalysisResult): { score: number; verdict: ThreatVerd
   return { score: CONFIDENCE_TO_SCORE[conf] ?? 50, verdict: 'suspicious' };
 }
 
+/**
+ * The model's own verdict for a result, before any intelligence is fused in.
+ * This — not the fused verdict — decides whether indicators are stored.
+ */
+export function modelVerdictOf(result: AnalysisResult): ThreatVerdict {
+  return baseScore(result).verdict;
+}
+
+/** The model's confidence in its own verdict, as a display label */
+function modelConfidence(result: AnalysisResult): ConfidenceLevel {
+  if (result.analysisFailed) return 'N/A';
+  if (result.assessment && typeof result.assessment.verdictConfidence === 'number') {
+    return normalizeConfidence(result.assessment.verdictConfidence);
+  }
+  return normalizeConfidence(result.confidence);
+}
+
+const BENIGN_LABEL: Partial<Record<ThreatVerdict, string>> = {
+  legitimate: 'a legitimate email',
+  graymail: 'legitimate bulk email',
+  spam: 'spam',
+};
+
 export function fuseRisk(result: AnalysisResult, signals: FusionSignals = {}): RiskDecision {
   const { score: initialScore, verdict: baseVerdict } = baseScore(result);
   let score = initialScore;
@@ -118,30 +195,61 @@ export function fuseRisk(result: AnalysisResult, signals: FusionSignals = {}): R
     score = Math.max(score, 95);
     const ruledVerdict = MALICIOUS_VERDICTS.includes(verdict) ? verdict : 'phishing';
     reasons.push('Your security team confirmed this campaign as phishing.');
-    return finalize(ruledVerdict, score, reasons, true);
+    return decision(ruledVerdict, score, reasons, {
+      isPhishing: true,
+      confidence: 'Very High',
+      confidenceBasis: 'security_team',
+    });
   }
   if (signals.humanVerdict === 'false_positive') {
     reasons.push('Your security team reviewed this campaign and cleared it.');
-    return finalize('legitimate', 0, reasons, false);
+    return decision('legitimate', 0, reasons, {
+      isPhishing: false,
+      confidence: 'Very High',
+      confidenceBasis: 'security_team',
+    });
   }
 
-  // 2. Known malicious indicators seen before raise the floor, scaled by how
-  //    many times the strongest has been seen in prior reports.
-  const matches = signals.matchedIndicators ?? [];
-  if (matches.length > 0) {
-    const strongest = matches.reduce((a, b) => (b.timesSeen > a.timesSeen ? b : a));
+  // 2. Known indicators. Only STRONG matches (exact URL / address / sender or
+  //    payload domain, from a model-malicious or security-confirmed report,
+  //    unexpired) raise the floor, scaled by how many distinct reported
+  //    emails the strongest was seen in.
+  const { strong, weak } = partitionMatches(signals.matchedIndicators ?? [], signals.now);
+  let intelRaised = false;
+  if (strong.length > 0) {
+    const strongest = strong.reduce((a, b) => (b.timesSeen > a.timesSeen ? b : a));
     const floor = Math.min(95, 60 + strongest.timesSeen * 8);
     if (floor > score) {
       score = floor;
+      intelRaised = true;
     }
-    const plural = matches.length === 1 ? 'indicator' : 'indicators';
     reasons.push(
-      `${matches.length} ${plural} in this email ${matches.length === 1 ? 'was' : 'were'} flagged in prior reports ` +
-        `(most-seen ${strongest.timesSeen}×).`
+      `${countPhrase(strong.length, 'link, sender or domain', 'links, senders or domains')} in this email ` +
+        `${strong.length === 1 ? 'matches a threat' : 'match threats'} confirmed in earlier reports ` +
+        `(seen in ${strongest.timesSeen} reported ${strongest.timesSeen === 1 ? 'email' : 'emails'}).`
     );
   }
 
-  // 3. An active high/critical campaign raises the floor.
+  // 3. WEAK matches are disclosed but are not evidence of an attack: they can
+  //    lift an unconfirmed (suspicious) or unassessed email to the weak
+  //    ceiling, never change a benign verdict, never reach the phishing
+  //    threshold on their own.
+  if (weak.length > 0) {
+    reasons.push(
+      `${countPhrase(weak.length, 'link or domain', 'links or domains')} in this email also appeared in ` +
+        'earlier reports, but not as confirmed attack infrastructure, so ' +
+        `${weak.length === 1 ? 'it was' : 'they were'} not treated as evidence of an attack.`
+    );
+    if (
+      strong.length === 0 &&
+      (verdict === 'suspicious' || verdict === 'undetermined') &&
+      score < WEAK_INDICATOR_RISK_CEILING
+    ) {
+      score = WEAK_INDICATOR_RISK_CEILING;
+    }
+  }
+
+  // 4. An active high/critical campaign raises the floor.
   if (signals.campaign?.isActive) {
     const campaignFloor =
       signals.campaign.riskLevel === 'critical'
@@ -151,6 +259,7 @@ export function fuseRisk(result: AnalysisResult, signals: FusionSignals = {}): R
           : 0;
     if (campaignFloor > score) {
       score = campaignFloor;
+      intelRaised = true;
     }
     if (campaignFloor > 0) {
       reasons.push(
@@ -160,20 +269,22 @@ export function fuseRisk(result: AnalysisResult, signals: FusionSignals = {}): R
     }
   }
 
-  // 4. A safe-sender allowlist match caps risk — unless intel above already
-  //    proved malice (in which case the floors above stand). Never caps an
-  //    'undetermined' result: a failed analysis must not be talked down to safe.
+  // 5. A safe-sender allowlist match caps risk — unless a strong match above
+  //    already proved malice (in which case the floors above stand). Never
+  //    caps an 'undetermined' result: a failed analysis must not be talked
+  //    down to safe. Weak matches do not block the cap.
   if (
     signals.isSafeSender &&
     !MALICIOUS_VERDICTS.includes(verdict) &&
     verdict !== 'undetermined' &&
-    matches.length === 0
+    strong.length === 0
   ) {
     score = Math.min(score, 10);
+    intelRaised = false;
     reasons.push('Reporter is on the trusted-sender allowlist.');
   }
 
-  // 5. Sender relationship. A relationship must never lower risk — trust is
+  // 6. Sender relationship. A relationship must never lower risk — trust is
   //    exactly what a mailbox takeover borrows — so only the anomalous
   //    classification is read, and only to raise: `established` (or any other
   //    class) contributes nothing, and nothing here can reduce the score or
@@ -193,9 +304,10 @@ export function fuseRisk(result: AnalysisResult, signals: FusionSignals = {}): R
     }
   }
 
-  // 6. A failed analysis stays 'undetermined' unless hard intel above escalated
+  // 7. A failed analysis stays 'undetermined' unless hard intel above escalated
   //    it. Always disclose that the email could not be assessed so the report
   //    can't read as a clean bill of health.
+  let unassessedEscalated = false;
   if (result.analysisFailed) {
     reasons.push(
       'Automated analysis could not be completed (the AI provider was temporarily unavailable), ' +
@@ -205,26 +317,87 @@ export function fuseRisk(result: AnalysisResult, signals: FusionSignals = {}): R
       // Known indicators or an active campaign flagged it even without the
       // model. We can't name the threat type, but it isn't clean.
       verdict = 'suspicious';
+      unassessedEscalated = true;
     }
   }
 
-  return finalize(verdict, score, reasons, undefined);
+  // 8. Verdict and score must agree. When a strong match or campaign raised
+  //    an email the model called benign past that verdict's band, the label
+  //    becomes 'suspicious' and the reasons say why — otherwise the band
+  //    would silently undo the raise, or the banner would read "legitimate"
+  //    next to a high score.
+  let verdictChangedByIntel = false;
+  if (intelRaised && isBenign(verdict) && score > VERDICT_SCORE_BANDS[verdict].max) {
+    reasons.push(
+      `On its content alone this looked like ${BENIGN_LABEL[verdict] ?? verdict}, but because of the ` +
+        'known threat above Phishy is treating it as suspicious.'
+    );
+    verdict = 'suspicious';
+    verdictChangedByIntel = true;
+  }
+
+  const finalScore = clampToBand(verdict, score);
+  const isPhishing = flagAsPhishing(verdict, finalScore);
+
+  // 9. Confidence. The model's own certainty in its verdict — unless
+  //    intelligence decided the outcome, in which case say so instead.
+  const modelFlagged = flagAsPhishing(baseVerdict, clampToBand(baseVerdict, initialScore));
+  const intelDecided =
+    intelRaised && (verdictChangedByIntel || unassessedEscalated || (isPhishing && !modelFlagged));
+  if (intelDecided) {
+    return decision(verdict, finalScore, reasons, {
+      isPhishing,
+      confidence: 'High',
+      confidenceBasis: 'threat_intel',
+    });
+  }
+  return decision(verdict, finalScore, reasons, {
+    isPhishing,
+    confidence: modelConfidence(result),
+    confidenceBasis: result.analysisFailed ? 'unassessed' : 'model',
+  });
 }
 
-function finalize(
+function countPhrase(count: number, singular: string, plural: string): string {
+  return count === 1 ? `1 ${singular}` : `${count} ${plural}`;
+}
+
+function isBenign(verdict: ThreatVerdict): verdict is 'legitimate' | 'graymail' | 'spam' {
+  return BENIGN_VERDICTS.includes(verdict);
+}
+
+/** Clamp a score into its verdict's band (undetermined is left as-is) */
+export function clampToBand(verdict: ThreatVerdict, score: number): number {
+  const rounded = Math.min(100, Math.max(0, Math.round(score)));
+  if (verdict === 'undetermined') return rounded;
+  const band = VERDICT_SCORE_BANDS[verdict];
+  return Math.min(band.max, Math.max(band.min, rounded));
+}
+
+/**
+ * The phishing flag follows the final verdict and score together: malicious
+ * verdicts always, a suspicious verdict at or above the threshold, a benign
+ * or undetermined verdict never.
+ */
+function flagAsPhishing(verdict: ThreatVerdict, score: number): boolean {
+  if (MALICIOUS_VERDICTS.includes(verdict)) return true;
+  return verdict === 'suspicious' && score >= PHISHING_SCORE_THRESHOLD;
+}
+
+function decision(
   verdict: ThreatVerdict,
   score: number,
   reasons: string[],
-  forcedPhishing: boolean | undefined
+  outcome: { isPhishing: boolean; confidence: ConfidenceLevel; confidenceBasis: ConfidenceBasis }
 ): RiskDecision {
   const clamped = Math.min(100, Math.max(0, Math.round(score)));
-  const isPhishing = forcedPhishing ?? (MALICIOUS_VERDICTS.includes(verdict) || clamped >= 55);
   return {
     verdict,
     riskScore: clamped,
     riskLevel: scoreToLevel(clamped),
-    isPhishing,
-    confidence: scoreToConfidence(clamped),
+    isPhishing: outcome.isPhishing,
+    confidence: outcome.confidence,
+    confidenceBasis: outcome.confidenceBasis,
     reasons,
   };
 }

@@ -374,7 +374,7 @@ describe('parseAnalysisResponse', () => {
   });
 
   describe('structured verdict', () => {
-    it('parses a verdict and derives isPhishing + confidence from risk', () => {
+    it('parses a verdict and derives isPhishing + confidence from verdictConfidence', () => {
       const response = JSON.stringify({
         summary: 'BEC attempt',
         verdict: 'bec',
@@ -392,7 +392,7 @@ describe('parseAnalysisResponse', () => {
       expect(result.assessment?.riskScore).toBe(88);
       expect(result.assessment?.threatVectors).toEqual(['wire_fraud', 'reconnaissance']);
       expect(result.isPhishing).toBe(true); // derived: bec is malicious
-      expect(result.confidence).toBe('Very High'); // derived from riskScore 88
+      expect(result.confidence).toBe('Very High'); // verdictConfidence 0.9
     });
 
     it('treats a confident-legitimate verdict as not phishing', () => {
@@ -409,7 +409,8 @@ describe('parseAnalysisResponse', () => {
 
       expect(result.assessment?.verdict).toBe('legitimate');
       expect(result.isPhishing).toBe(false);
-      expect(result.confidence).toBe('Very Low'); // low risk -> low confidence label
+      // Certain it is legitimate: high confidence, low risk (separate axes)
+      expect(result.confidence).toBe('Very High');
     });
 
     it('clamps out-of-range scores and drops unknown vectors', () => {

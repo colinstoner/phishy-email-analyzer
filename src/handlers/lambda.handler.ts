@@ -42,10 +42,13 @@ import {
   computeCampaignSignature,
   buildCachedAnalysisResult,
   fuseRisk,
+  modelVerdictOf,
   FusionSignals,
+  RiskDecision,
 } from '../services/intelligence';
+import { decideIndicatorStorage, withProvenance } from '../services/intelligence/indicator.policy';
 import { extractIOCs, IOCSourceContext } from '../services/intelligence/ioc.extractor';
-import { ThreatIndicatorRecord } from '../services/intelligence/database.service';
+import { ThreatIndicatorRecord, FeedbackRecord } from '../services/intelligence/database.service';
 import type { BlastRadiusReport } from '../services/graph/blast-radius.service';
 import { GraphGateway, createGraphGateway } from '../services/graph/graph.gateway';
 
@@ -473,6 +476,8 @@ async function processEmailEvent(
   // first report pays for a full AI analysis and the rest reuse its verdict.
   // A security-team ruling on any report in the campaign overrides the AI.
   let analysis: AnalysisResult | null = null;
+  let fromCampaignCache = false;
+  let securityVerdict: FeedbackRecord['verdict'] | undefined;
   if (config.campaignCache?.enabled && campaignSignature && services.intelligenceDb) {
     try {
       const cacheHit = await services.intelligenceDb.findCampaignVerdict(
@@ -481,6 +486,8 @@ async function processEmailEvent(
       );
       if (cacheHit) {
         analysis = buildCachedAnalysisResult(cacheHit);
+        fromCampaignCache = true;
+        securityVerdict = cacheHit.feedbackVerdict;
         emitCampaignCacheHitMetric(lastAnalysisCostUsd);
         logger.info('Campaign verdict cache hit', {
           campaignSignature,
@@ -581,15 +588,22 @@ async function processEmailEvent(
         isSafelistUser
       )
     : {};
+  // The model's own verdict, captured before fusion: it — not a score that
+  // fusion raised — decides whether this email's indicators are stored.
+  const modelVerdict = modelVerdictOf(analysis);
   const riskDecision = fuseRisk(analysis, {
     ...fusionSignals,
     senderHistory: emailData.senderHistory,
+    // A security-team ruling on this campaign rides on the cache hit
+    humanVerdict: securityVerdict,
   });
   if (riskDecision.reasons.length) {
     logger.info('Risk fusion applied', {
       verdict: riskDecision.verdict,
       riskScore: riskDecision.riskScore,
       riskLevel: riskDecision.riskLevel,
+      confidenceBasis: riskDecision.confidenceBasis,
+      modelVerdict,
       reasons: riskDecision.reasons,
     });
   }
@@ -651,17 +665,38 @@ async function processEmailEvent(
         }
       }
 
-      // Store the IOCs already extracted above, but only for a malicious
-      // verdict (the fused isPhishing). Stamp them with this analysis ID.
-      if (riskDecision.isPhishing) {
-        logger.info('Extracted IOCs', { count: extractedIOCs.length, analysisId });
-
+      // Store the IOCs already extracted above only when the MODEL's own
+      // verdict is malicious (fresh analysis) or the security team confirmed
+      // the campaign — never because fusion raised the score, which is what
+      // let indicators breed indicators. Each carries its provenance, and the
+      // campaign signature as report key so repeat reports, thread replies
+      // and campaign copies count once in times_seen.
+      const storage = decideIndicatorStorage({
+        modelVerdict,
+        analysisFailed: analysis.analysisFailed,
+        fromCampaignCache,
+        humanVerdict: securityVerdict,
+      });
+      logger.info('Indicator storage decision', {
+        store: storage.store,
+        reason: storage.reason,
+        count: extractedIOCs.length,
+        analysisId,
+      });
+      if (storage.store && storage.provenance) {
+        const provenance = storage.provenance;
+        const reportKey = campaignSignature ?? messageId;
         for (const ioc of extractedIOCs) {
           try {
-            await services.intelligenceDb.upsertIndicator({
-              ...ioc,
-              metadata: { ...ioc.metadata, sourceAnalysisId: analysisId },
-            });
+            await services.intelligenceDb.upsertIndicator(
+              withProvenance(ioc, {
+                provenance,
+                sourceVerdict:
+                  provenance === 'security_confirmed' ? 'confirmed_phishing' : modelVerdict,
+                sourceAnalysisId: analysisId,
+              }),
+              { reportKey }
+            );
           } catch (iocError) {
             logger.warn('Failed to store IOC', {
               type: ioc.indicatorType,
@@ -726,12 +761,7 @@ async function processEmailEvent(
   if (userReport) {
     return finishSilentUserReport(msg, emailData, analysis, config, services, {
       storedAnalysisId,
-      risk: {
-        verdict: riskDecision.verdict,
-        riskScore: riskDecision.riskScore,
-        riskLevel: riskDecision.riskLevel,
-        reasons: riskDecision.reasons,
-      },
+      risk: reportRisk(riskDecision),
       isPhishing: riskDecision.isPhishing,
       lookupBlastRadius,
     });
@@ -749,12 +779,7 @@ async function processEmailEvent(
     // matched back to this analysis (the email command channel)
     const reportOptions: ReportOptions = {
       ...(storedAnalysisId ? { analysisId: storedAnalysisId } : {}),
-      risk: {
-        verdict: riskDecision.verdict,
-        riskScore: riskDecision.riskScore,
-        riskLevel: riskDecision.riskLevel,
-        reasons: riskDecision.reasons,
-      },
+      risk: reportRisk(riskDecision),
     };
 
     // With blast radius, the lookup runs inside sendReports, after the
@@ -1110,6 +1135,18 @@ function isValidEmailRecipient(email: string): boolean {
     !email.includes('noreply') &&
     !email.includes('no-reply')
   );
+}
+
+/** The fused decision as the report renders it */
+function reportRisk(decision: RiskDecision): NonNullable<ReportOptions['risk']> {
+  return {
+    verdict: decision.verdict,
+    riskScore: decision.riskScore,
+    riskLevel: decision.riskLevel,
+    reasons: decision.reasons,
+    confidence: decision.confidence,
+    confidenceBasis: decision.confidenceBasis,
+  };
 }
 
 /**

@@ -25,7 +25,21 @@ psql "$DATABASE_URL" -f migrations/001_initial_schema.sql
 One row per analyzed email: sender, subject, verdict (`is_phishing`, `confidence_score`, `risk_level`), the full AI analysis as JSONB, indicators found, VIP-impersonation flag, and which provider/model produced it. `message_id` powers deduplication (`hasBeenAnalyzed`).
 
 ### `threat_indicators`
-Deduplicated IOCs (domains, IPs, URLs, emails, hashes, file names, subject patterns) extracted from analyses. Keyed by `(indicator_type, indicator_hash)` where the hash is SHA-256 of `type:lowercased-value`; re-sightings bump `times_seen`, refresh `last_seen_at`, and escalate `severity`/`confidence_score` (never downgrade). Supports expiry via `expires_at` and soft-deactivation via `is_active`.
+Deduplicated IOCs (domains, IPs, URLs, emails, hashes, file names, subject patterns) extracted from analyses. Keyed by `(indicator_type, indicator_hash)` where the hash is SHA-256 of `type:lowercased-value`; re-sightings refresh `last_seen_at` and escalate `severity`/`confidence_score` (never downgrade). Supports expiry via `expires_at` and soft-deactivation via `is_active`.
+
+Indicators are written only for a model-malicious verdict from a fresh analysis or a security-team confirmation (see [INTELLIGENCE.md](INTELLIGENCE.md#which-indicators-count)). `times_seen` counts **distinct reported emails**: each write carries a report key (the campaign signature), and a key already in `metadata.reportKeys` does not count again, so a repeat report of the same email, a reply in its thread or a copy from the same campaign leaves it unchanged. The `metadata` JSONB carries, besides the source fields (`sourceAnalysisId`, `sourceMessageId`, `extractionContext`, ...):
+
+| Key | Meaning |
+|---|---|
+| `provenance` | `model_malicious` or `security_confirmed`; absent on rows written before this was recorded |
+| `sourceVerdict` | the model verdict (`bec`, `phishing`, `malware_delivery`) or `confirmed_phishing` that caused the write |
+| `role`, `roleSource` | `sender` / `payload` / `infrastructure`, and whether the model or the extractor assigned it. A recorded `sender`/`payload` role is never downgraded |
+| `reportKeys` | the last 50 report keys counted in `times_seen` |
+| `legacyTimesSeen` | a pre-existing row's old count, kept when its first keyed write restarts `times_seen` at 1 |
+| `securityConfirmed`, `securityCleared` | set by security-team feedback; a cleared indicator never counts as a strong match |
+| `deactivatedBy`, `deactivatedRule`, `deactivatedAt` | set when `npm run indicators:audit -- --apply` deactivated the row; removed by `--restore` |
+
+No migration: all of this lives in the existing `metadata` column, and rows without it are read as legacy (weak) indicators.
 
 ### `campaigns`
 Flood/campaign detection. Emails are grouped by a 16-char SHA-256 signature of `sender_domain + normalized subject` (numbers and punctuation stripped, so "Invoice #4821" and "Invoice #4822" match). Tracks detection count, unique recipients, and escalating risk level. An employee alert fires when a campaign reaches ≥3 detections across ≥2 recipients within 4 hours at high/critical risk, throttled to once per 24h via `alert_sent_at`.
