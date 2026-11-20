@@ -801,8 +801,29 @@ describe('APPROVE WARNING without a reference (bound to the email replied to)', 
       detail: { messageId: 'ses-1', proposed: [proposed(store, 'remove_messages')!.id] },
     });
     const reply = await service.handleBareWarningApproval(['ses-1'], TEAM[0]);
-    expect(reply.body[0]).toContain('did not propose a warning');
+    expect(reply.body[0]).toContain('is not the one that proposes the warning');
     expect(employeeEmails(sent)).toEqual([]);
+  });
+});
+
+describe('APPROVE WARNING without a reference: says what the state is', () => {
+  it('says the warning was already approved, by whom, when nothing is left to approve', async () => {
+    const { service, sent, store, advance } = setup();
+    await service.handleCampaignReport(reportInput());
+    await service.handleBareWarningApproval(['ses-1'], 'soc@example.com');
+    const warned = employeeEmails(sent).length;
+    advance(31 * 60_000);
+    const more = reportInput();
+    more.match = { ...more.match, detectionCount: 4, shouldAlert: false };
+    await service.handleCampaignReport(more);
+    const update = store.audit.filter(e => e.event === 'incident_email_sent').pop();
+    const reply = await service.handleBareWarningApproval(
+      [update?.detail?.messageId as string],
+      TEAM[0]
+    );
+    expect(reply.heading).toBe('Phishy did not carry out an approval');
+    expect(reply.body[0]).toContain('already approved by soc@example.com');
+    expect(employeeEmails(sent)).toHaveLength(warned);
   });
 });
 
