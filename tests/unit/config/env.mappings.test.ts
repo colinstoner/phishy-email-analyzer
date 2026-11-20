@@ -91,7 +91,12 @@ const PLAUSIBLE: Record<string, string> = {
 };
 
 /** The schema's list-valued fields reachable from the environment */
-const LIST_VARS = ['SAFE_DOMAINS', 'SAFE_SENDERS', 'SECURITY_TEAM_DISTRIBUTION', 'SAFE_SENDER_SECURITY'];
+const LIST_VARS = [
+  'SAFE_DOMAINS',
+  'SAFE_SENDERS',
+  'SECURITY_TEAM_DISTRIBUTION',
+  'SAFE_SENDER_SECURITY',
+];
 
 describe('ENV_MAPPINGS', () => {
   const saved: Record<string, string | undefined> = {};
