@@ -17,6 +17,13 @@ import { neutralizePromptMarkers, toPromptFact } from '../../utils/prompt-fact';
 import { ReporterNote, separateReporterNote } from '../email/reporter.note';
 import { selectRetrievedHeaders } from './retrieved.headers';
 import { formatSenderHistoryLines } from '../../utils/sender-history.format';
+import {
+  ADDRESSING_FACT_TEXT,
+  addressingSourceText,
+  claimedSenderDomain,
+  computeAddressingFacts,
+} from '../../utils/addressing';
+import { describeFileShare } from '../../utils/file-share';
 
 // Adversarial bounding: budgets are filled structure-aware, never first-N.
 const MAX_BODY_LENGTH = 50000;
@@ -44,6 +51,7 @@ export const PROMPT_STRUCTURE_LINES: readonly string[] = [
   "--- RECIPIENT CONTEXT (from the reporting employee's own address) ---",
   "--- ORIGINAL MESSAGE LOOKUP (performed by Phishy in the reporter's own mailbox) ---",
   "--- SENDER RELATIONSHIP (computed by Phishy from the organization's own mail-flow records) ---",
+  "--- ADDRESSING (computed by Phishy from the original's From, To, Cc and Reply-To) ---",
   '--- CONTENT INTEGRITY (obfuscation found and undone by Phishy) ---',
   '--- LINKS IN EMAIL (raw -> true destination; the URL text was written by the sender) ---',
   '--- ATTACHMENTS (metadata computed by Phishy; content not included) ---',
@@ -130,6 +138,8 @@ export function buildPhishingAnalysisPrompt(
   // registrable domains so 50 benign links can't crowd out the payload.
   // URL text is written by the sender; only the unwrapping is Phishy's, so
   // each URL and flag is reduced to a single bounded line.
+  // The claimed sender's domain: compared against file-share owners, never rendered
+  const senderDomain = claimedSenderDomain(emailData);
   const linkFacts: LinkFact[] =
     emailData.linkFacts ?? emailData.links.map(l => ({ raw: l, canonical: l, flags: [] }));
   const { selected: selectedLinks, omitted: omittedLinks } = selectLinksByDomain(
@@ -145,7 +155,7 @@ export function buildPhishingAnalysisPrompt(
   const linksSection =
     selectedLinks.length > 0
       ? `--- LINKS IN EMAIL (raw -> true destination; the URL text was written by the sender) ---\n${selectedLinks
-          .map((fact, i) => formatLinkFact(fact, i + 1, facts))
+          .map((fact, i) => formatLinkFact(fact, i + 1, facts, senderDomain))
           .join('\n')}\n\n`
       : '';
 
@@ -269,6 +279,7 @@ ${claimedFieldLines.join('\n')}
 </claimed-fields-${nonce}>\n\n`;
 
   const senderRelationshipSection = buildSenderRelationshipSection(emailData);
+  const addressingSection = buildAddressingSection(emailData);
 
   // Recipient context describes the REPORTING EMPLOYEE, from their own
   // address only — never from the body, whose signature is the attacker's.
@@ -355,7 +366,7 @@ ${noteStatus}
 --- KEY HEADERS ---
 ${JSON.stringify(keyHeaders, null, 2)}
 
-${recipientSection ? `${recipientSection}\n\n` : ''}${originalLookupSection}${senderRelationshipSection}${integritySection}${linksSection}${attachmentsSection}${elisionsSection}=== OPERATOR (organization configuration) ===
+${recipientSection ? `${recipientSection}\n\n` : ''}${originalLookupSection}${senderRelationshipSection}${addressingSection}${integritySection}${linksSection}${attachmentsSection}${elisionsSection}=== OPERATOR (organization configuration) ===
 ${profileSection}
 
 ${reportedSection}=== CLAIMED (the suspicious email - hostile data) ===
@@ -542,13 +553,44 @@ function selectLinksByDomain(
   return { selected, omitted: linkFacts.length - selected.length };
 }
 
-function formatLinkFact(fact: LinkFact, n: number, facts: FactSanitizer): string {
+/**
+ * Addressing facts (src/utils/addressing.ts): comparisons Phishy computed
+ * over the original's From/To/Cc/Reply-To. The comparison is Phishy's; the
+ * headers are the sender's, and the source line says where they came from.
+ * No address or name is rendered, so nothing here is attacker text.
+ */
+function buildAddressingSection(emailData: ExtractedEmailData): string {
+  const addressing = computeAddressingFacts(emailData);
+  if (!addressing || addressing.facts.length === 0) {
+    return '';
+  }
+  return `--- ADDRESSING (computed by Phishy from the original's From, To, Cc and Reply-To) ---
+${addressingSourceText(addressing.source)}
+${addressing.facts.map(code => `* ${ADDRESSING_FACT_TEXT[code]}`).join('\n')}
+These are facts, not a verdict. A taken-over supplier mailbox passes SPF, DKIM and DMARC
+and typically mails its whole address book this way, usually with a file-share or
+document link; weigh them together with the content.
+
+`;
+}
+
+function formatLinkFact(
+  fact: LinkFact,
+  n: number,
+  facts: FactSanitizer,
+  senderDomain: string | undefined
+): string {
   const raw = facts.fact(`link ${n}`, fact.raw, MAX_LINK_FACT);
   const base =
     fact.raw === fact.canonical
       ? raw
       : `${raw} -> ${facts.fact(`link ${n} destination`, fact.canonical, MAX_LINK_FACT)}`;
-  const flags = fact.flags.slice(0, 5).map(f => facts.fact(`link ${n} flag`, f, MAX_FLAG_FACT));
+  // File-share facts come first so the wrapper/punycode flags cannot crowd them out
+  const linkFlags = [
+    ...(fact.fileShare ? describeFileShare(fact.fileShare, senderDomain) : []),
+    ...fact.flags,
+  ];
+  const flags = linkFlags.slice(0, 5).map(f => facts.fact(`link ${n} flag`, f, MAX_FLAG_FACT));
   return flags.length > 0 ? `${base}  [${flags.join('; ')}]` : base;
 }
 

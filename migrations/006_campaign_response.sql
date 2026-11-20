@@ -1,4 +1,4 @@
--- Migration 005: Campaign response
+-- Migration 006: Campaign response
 --
 -- Incidents, response actions and their append-only audit trail, for
 -- campaign response (PHISHY_CAMPAIGN_RESPONSE_ENABLED): the security team's
@@ -14,7 +14,7 @@
 -- Uses campaigns (001) and joins email_analyses.campaign_signature (003) when
 -- a "false positive" verdict closes an incident.
 --
--- Apply with:  psql "$DATABASE_URL" -f migrations/005_campaign_response.sql
+-- Apply with:  psql "$DATABASE_URL" -f migrations/006_campaign_response.sql
 --
 -- NOTE: unlike the 001 baseline, this migration is NOT auto-applied by the
 -- application. Without it, campaign response logs an instructive warning and

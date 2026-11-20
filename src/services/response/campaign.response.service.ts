@@ -236,7 +236,7 @@ export class CampaignResponseService {
       return await this.update(existing, input);
     } catch (error) {
       if (error instanceof ResponseStoreUnavailableError) {
-        // Migration 005 missing: exactly the campaign alert without campaign response
+        // Migration 006 missing: exactly the campaign alert without campaign response
         if (input.match.shouldAlert) {
           await this.deps.legacyAlert(input.match);
         }
@@ -918,7 +918,7 @@ export class CampaignResponseService {
           return {
             heading: 'Phishy could not act on that approval',
             body: [
-              `Campaign response is not available: apply migrations/005_campaign_response.sql.`,
+              `Campaign response is not available: apply migrations/006_campaign_response.sql.`,
             ],
           };
         }

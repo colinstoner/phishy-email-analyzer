@@ -7,6 +7,7 @@ import {
   emitAnalysisRefusalMetric,
   emitUserReportMetric,
   emitOriginalFetchMetric,
+  emitFanoutScanMetric,
   AIUsageMetric,
 } from '../../../src/utils/metrics';
 
@@ -235,6 +236,73 @@ describe('emitOriginalFetchMetric', () => {
   it('emits nothing when PHISHY_DISABLE_METRICS=true', () => {
     process.env.PHISHY_DISABLE_METRICS = 'true';
     emitOriginalFetchMetric('found', 1);
+    expect(stdoutSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('emitFanoutScanMetric', () => {
+  let stdoutSpy: jest.SpyInstance;
+  const originalDisable = process.env.PHISHY_DISABLE_METRICS;
+
+  beforeEach(() => {
+    stdoutSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    delete process.env.PHISHY_DISABLE_METRICS;
+  });
+
+  afterEach(() => {
+    stdoutSpy.mockRestore();
+    process.env.PHISHY_DISABLE_METRICS = originalDisable;
+  });
+
+  it('writes one raw EMF line with every scan metric, dimensioned by outcome', () => {
+    emitFanoutScanMetric({
+      outcome: 'ok',
+      durationMs: 5321,
+      rowsScanned: 812,
+      candidates: 2,
+      flagged: 1,
+      alertsSent: 1,
+      incomplete: true,
+      traceRequests: 9,
+    });
+    expect(stdoutSpy).toHaveBeenCalledTimes(1);
+    const doc = JSON.parse(stdoutSpy.mock.calls[0][0] as string);
+    expect(doc._aws.CloudWatchMetrics[0].Dimensions).toEqual([['Outcome']]);
+    expect(doc._aws.CloudWatchMetrics[0].Metrics.map((m: { Name: string }) => m.Name)).toEqual([
+      'FanoutScans',
+      'FanoutScanDurationMs',
+      'FanoutScanRowsScanned',
+      'FanoutScanCandidates',
+      'FanoutScanFlags',
+      'FanoutScanAlertsSent',
+      'FanoutScanIncomplete',
+      'FanoutScanTraceRequests',
+    ]);
+    expect(doc).toMatchObject({
+      Outcome: 'ok',
+      FanoutScans: 1,
+      FanoutScanDurationMs: 5321,
+      FanoutScanRowsScanned: 812,
+      FanoutScanCandidates: 2,
+      FanoutScanFlags: 1,
+      FanoutScanAlertsSent: 1,
+      FanoutScanIncomplete: 1,
+      FanoutScanTraceRequests: 9,
+    });
+  });
+
+  it('emits nothing when PHISHY_DISABLE_METRICS=true', () => {
+    process.env.PHISHY_DISABLE_METRICS = 'true';
+    emitFanoutScanMetric({
+      outcome: 'skipped_running',
+      durationMs: 1,
+      rowsScanned: 0,
+      candidates: 0,
+      flagged: 0,
+      alertsSent: 0,
+      incomplete: false,
+      traceRequests: 0,
+    });
     expect(stdoutSpy).not.toHaveBeenCalled();
   });
 });

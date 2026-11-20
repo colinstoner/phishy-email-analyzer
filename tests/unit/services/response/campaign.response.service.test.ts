@@ -607,7 +607,7 @@ describe('database absent or migration missing', () => {
       approve('send_warning', 'PHY-AAAA-AAAA-AAAA-AAAA'),
       TEAM[0]
     );
-    expect(reply.body[0]).toContain('005_campaign_response.sql');
+    expect(reply.body[0]).toContain('006_campaign_response.sql');
   });
 });
 

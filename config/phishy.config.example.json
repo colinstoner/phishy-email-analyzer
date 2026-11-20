@@ -90,6 +90,16 @@
       "budgetMs": 8000,
       "fanoutMinRecipients": 15,
       "fanoutMultiplier": 3
+    },
+    "fanoutScan": {
+      "enabled": false,
+      "overlapMinutes": 10,
+      "maxWindowMinutes": 60,
+      "maxPages": 4,
+      "maxCandidates": 3,
+      "requestAllowancePer5Min": 20,
+      "budgetMs": 60000,
+      "dedupeHours": 24
     }
   },
   "reportButton": {

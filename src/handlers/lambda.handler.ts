@@ -54,6 +54,7 @@ import { GraphGateway, createGraphGateway } from '../services/graph/graph.gatewa
 import { CampaignResponseService } from '../services/response/campaign.response.service';
 import { ResponseStore } from '../services/response/response.store';
 import type { CampaignMatch, CampaignRecord } from '../services/intelligence/database.service';
+import { isScheduledTaskCandidate } from './scheduled.event';
 
 const logger = createLogger('lambda-handler');
 
@@ -97,6 +98,13 @@ let cachedServices: {
  */
 export async function handler(event: SESEvent, _context: Context): Promise<APIGatewayProxyResult> {
   logger.info('=== PHISHY STARTING ===');
+
+  // A scheduled-task event is never email: the unified handler routes it
+  // to `scheduled.handler.ts`; reaching this handler directly it is refused
+  if (isScheduledTaskCandidate(event)) {
+    logger.warn('Scheduled-task event reached the email handler; ignored');
+    return createResponse(400, { success: false, error: 'not an email event' });
+  }
 
   try {
     // Initialize services
@@ -157,6 +165,26 @@ export async function handler(event: SESEvent, _context: Context): Promise<APIGa
     });
     return createResponse(200, { success: false, error: String(error) });
   }
+}
+
+/**
+ * The initialized services a scheduled task needs (`scheduled.handler.ts`):
+ * the same configuration, notifier, database and Graph gateway the email
+ * pipeline uses, built once per instance
+ */
+export async function scheduledTaskServices(): Promise<{
+  config: PhishyConfig;
+  sesNotifier: SESNotifier;
+  intelligenceDb?: IntelligenceDatabaseService;
+  graph: GraphGateway;
+}> {
+  const { config, services } = await initializeServices();
+  return {
+    config,
+    sesNotifier: services.sesNotifier,
+    intelligenceDb: services.intelligenceDb,
+    graph: services.graph,
+  };
 }
 
 /**
@@ -1149,6 +1177,17 @@ function checkForDuplicate(
   return null;
 }
 
+/** Is this From address one of the configured security team's? (For skipping only, never for authorization.) */
+function isSecurityTeamSender(from: string | undefined, config: PhishyConfig): boolean {
+  const address = extractEmailAddress(from ?? '')?.toLowerCase();
+  return (
+    !!address &&
+    config.notification.securityTeamDistribution.some(
+      member => member.trim().toLowerCase() === address
+    )
+  );
+}
+
 /**
  * Validate email for processing
  */
@@ -1157,7 +1196,11 @@ function validateEmail(emailData: ExtractedEmailData, config: PhishyConfig): Pro
   if (
     emailData.subject?.includes('Phishy Analysis') ||
     emailData.subject?.includes('Phishing Analysis') ||
-    emailData.subject?.includes('[Phishy incident ')
+    // A reply in an incident thread. Only the security team receives those
+    // emails, so the skip applies only to its members: anyone else's message
+    // with this subject (a forwarded email that imitates it) is analyzed.
+    (emailData.subject?.includes('[Phishy incident ') === true &&
+      isSecurityTeamSender(emailData.from_email, config))
   ) {
     logger.info('Skipping analysis email');
     return { status: 'skipped', reason: 'already_analyzed' };

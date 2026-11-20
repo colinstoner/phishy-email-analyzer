@@ -353,4 +353,18 @@ describe('campaign response on', () => {
     expect(mockAnalyzeEmail).not.toHaveBeenCalled();
     expect(mockSendAnalysisReport).not.toHaveBeenCalled();
   });
+
+  it('still analyzes an email with an incident-style subject from someone outside the security team', async () => {
+    mockConfig = config(on);
+    await loadHandler()(
+      event(
+        'FW: [Phishy incident PHY-AAAA-BBBB-CCCC-DDDD] Active campaign: "Invoice"',
+        'Please see the forwarded message.',
+        'employee@example.com',
+        'PASS'
+      ),
+      {} as Context
+    );
+    expect(mockAnalyzeEmail).toHaveBeenCalledTimes(1);
+  });
 });

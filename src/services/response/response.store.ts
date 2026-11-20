@@ -1,5 +1,5 @@
 /**
- * Campaign response persistence (migration 005, applied manually).
+ * Campaign response persistence (migration 006, applied manually).
  *
  * Three tables: `campaign_incidents`, `response_actions` and the append-only
  * `response_action_audit`. Every statement is parameterized. A missing table
@@ -32,7 +32,7 @@ import { emptyReach } from './scope';
 
 const logger = createLogger('campaign-response-store');
 
-export const RESPONSE_MIGRATION = '005_campaign_response.sql';
+export const RESPONSE_MIGRATION = '006_campaign_response.sql';
 
 /** Anything that runs one parameterized statement */
 export interface Queryable {
@@ -371,7 +371,7 @@ export class ResponseStore {
     return rows.map(mapAction);
   }
 
-  /** Append one audit row. The table rejects UPDATE and DELETE (migration 005). */
+  /** Append one audit row. The table rejects UPDATE and DELETE (migration 006). */
   async appendAudit(entry: AuditEntry): Promise<void> {
     await this.run(
       `INSERT INTO response_action_audit (incident_id, action_id, event, actor, detail)

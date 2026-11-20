@@ -56,8 +56,8 @@ Tags each analysis with its flood-detection campaign signature, powering the **c
 ### `analysis_feedback` *(migration 002 — not auto-created)*
 Security-team verdicts on analyses, submitted by replying to Phishy's reports (the email command channel). One row per analysis (`UNIQUE(analysis_id)`); resubmission updates in place so a correction wins. Feedback also adjusts `threat_indicators` confidence through IOC provenance (`metadata.sourceAnalysisId`). Migration 002 additionally adds `email_analyses.report_message_id`, which links each outbound report to its analysis so replies can be matched via `In-Reply-To`. Apply `migrations/002_analysis_feedback.sql` before setting `PHISHY_EMAIL_COMMANDS_ENABLED=true`.
 
-### Campaign response *(migration 005 — not auto-created)*
-`migrations/005_campaign_response.sql` adds three tables for [campaign response](ARCHITECTURE.md#campaign-response-optional) (`PHISHY_CAMPAIGN_RESPONSE_ENABLED`). Without them, campaign response logs `apply migrations/005_campaign_response.sql` and the campaign alert behaves exactly as with campaign response off (any query that hits a missing table or column, `42P01`/`42703`, degrades this way).
+### Campaign response *(migration 006 — not auto-created)*
+`migrations/006_campaign_response.sql` adds three tables for [campaign response](ARCHITECTURE.md#campaign-response-optional) (`PHISHY_CAMPAIGN_RESPONSE_ENABLED`). Without them, campaign response logs `apply migrations/006_campaign_response.sql` and the campaign alert behaves exactly as with campaign response off (any query that hits a missing table or column, `42P01`/`42703`, degrades this way).
 
 - **`campaign_incidents`** — one row per campaign Phishy is responding to (`UNIQUE(campaign_signature)`, so concurrent reports open one incident). `reference` is the unguessable `PHY-…` code in the incident email. `trigger_source` is `reports` or `fanout_scan`; `status` is `open`, `false_positive` or `closed`. `summary` (JSONB) holds the verdict, risk score, reasons, the model's description of the lure, the subject and claimed sender (hostile strings, shown defanged), the timeline and the reporters' addresses. `reach` (JSONB) is the blast radius merged across the incident's lookups: recipient addresses, folder, read/replied/forwarded, and the mailbox directory IDs and Graph message IDs a removal may name. `thread_message_id` is the first incident email's SES message ID (updates reply to it); `last_update_sent_at`, `notified_report_count` and `notified_recipient_count` drive the update rate limit.
 - **`response_actions`** — what Phishy proposed or did: `action_type` (`send_warning`, `remove_messages`), `status` (`proposed`, `approved`, `completed`, `dry_run_completed`, `expired`, `cancelled`, `failed`), `authorization_mode` (`approve` or `auto`), the code-computed `scope` (JSONB: recipients for a warning; mailbox IDs, exact message IDs and caps for a removal) with its SHA-256 `scope_hash`, `expires_at`, the authenticated `approved_by` and `approved_at`, `executor` (`ses_warning`, `dry_run_removal`) and `result` (JSONB: who was emailed, or the dry run's counts). Approval is a conditional `UPDATE … WHERE status = 'proposed' AND expires_at > NOW()`, which is what makes approving twice a no-op.
@@ -76,6 +76,11 @@ SELECT a.created_at, a.event, a.actor, a.detail
   FROM response_action_audit a JOIN campaign_incidents ci ON ci.id = a.incident_id
  WHERE ci.reference = 'PHY-XXXX-XXXX-XXXX-XXXX' ORDER BY a.id;
 ```
+### `fanout_scan_state` and `fanout_scan_waves` *(migration 005 — not auto-created)*
+State for the [scheduled fan-out scan](ARCHITECTURE.md#scheduled-fan-out-scan) (`graph.fanoutScan`); nothing else uses them. Apply `migrations/005_fanout_scan.sql` before setting `PHISHY_GRAPH_FANOUT_SCAN_ENABLED=true`. Without them the scan does not run: every scheduled invocation logs that the migration is missing and emits `FanoutScans` with `Outcome=migration_missing` (a missing table or column, `42P01` / `42703`, is caught; email analysis is unaffected).
+
+- `fanout_scan_state` is a single row (`id = 1`): the **scan lock** (`lock_token`, `lock_until`: a scan takes it with one conditional upsert and skips if another scan holds an unexpired lease; the lease is the invocation's remaining time plus 30 s, so a crashed scan's lock expires on its own), **where the last window ended** (`last_window_end`; advanced only when a window was read and every flag in it handled, so a failed scan's window is read again), and the **request log** (`recent_requests`, a JSON array of `{at, requests}` for the last five minutes: the scans' shared message-trace allowance).
+- `fanout_scan_waves` has one row per alerted wave: `wave_key` (SHA-256 of the sender address and the normalized subject), the `reference` quoted in the alert (`FANOUT-` and 10 hex digits), the sender address and subject (hostile mail-flow text, always bound as parameters), first and last sighting, the recipient count the last alert reported (`alerted_recipients`) and the most any scan saw (`max_recipients`), how many alerts went out, and the SES message ID of the latest one (`report_message_id`, for matching replies). A row whose `last_seen_at` is within `dedupeHours` is the same wave: a later sighting updates it and alerts again only if the wave at least doubled and grew by at least `fanoutMinRecipients`. A claim whose email could not be sent is undone, so the next scan alerts. No recipient address is stored.
 
 ## Privacy & Retention
 
@@ -84,8 +89,9 @@ The database stores sender addresses, subjects, recipient addresses (in `campaig
 ```sql
 DELETE FROM email_analyses WHERE created_at < NOW() - INTERVAL '180 days';
 DELETE FROM ai_usage       WHERE created_at < NOW() - INTERVAL '180 days';
+DELETE FROM fanout_scan_waves WHERE last_seen_at < NOW() - INTERVAL '180 days';
 ```
 
-With campaign response (migration 005), `campaign_incidents.reach` and `response_actions.scope`/`result` also hold the organization's recipient addresses and Graph mailbox/message IDs. The audit table is append-only by design; retiring old audit history is a deliberate DBA action (drop the trigger, delete, recreate it), not something a cleanup job should do silently.
+With campaign response (migration 006), `campaign_incidents.reach` and `response_actions.scope`/`result` also hold the organization's recipient addresses and Graph mailbox/message IDs. The audit table is append-only by design; retiring old audit history is a deliberate DBA action (drop the trigger, delete, recreate it), not something a cleanup job should do silently.
 
 Safelisted users are never written to the intelligence database (see [INTELLIGENCE.md](INTELLIGENCE.md)).

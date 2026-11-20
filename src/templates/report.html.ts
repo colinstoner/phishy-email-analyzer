@@ -846,7 +846,7 @@ function blastRadiusLines(report: BlastRadiusReport): string[] {
  * addresses are the organization's own, but they and the sender/subject
  * come from mail flow: everything is escaped.
  */
-function buildBlastRadiusHtml(report: BlastRadiusReport): string {
+export function buildBlastRadiusHtml(report: BlastRadiusReport): string {
   if (report.status === 'unavailable') {
     return `
             <div class="analysis blast-radius">
@@ -887,7 +887,7 @@ function buildBlastRadiusHtml(report: BlastRadiusReport): string {
 }
 
 /** Blast-radius section (plain text) for the security team's copy */
-function buildBlastRadiusText(report: BlastRadiusReport): string[] {
+export function buildBlastRadiusText(report: BlastRadiusReport): string[] {
   if (report.status === 'unavailable') {
     return [`Security team only: ${report.note ?? 'Blast radius lookup could not be completed.'}`];
   }
@@ -914,7 +914,7 @@ function buildBlastRadiusText(report: BlastRadiusReport): string[] {
 /**
  * Escape HTML special characters
  */
-function escapeHtml(text: string): string {
+export function escapeHtml(text: string): string {
   const htmlEntities: Record<string, string> = {
     '&': '&amp;',
     '<': '&lt;',

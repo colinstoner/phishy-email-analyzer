@@ -158,7 +158,7 @@ describe('ResponseStore', () => {
         ResponseStoreUnavailableError
       );
       await expect(store.listActions('i1')).rejects.toThrow(
-        'apply migrations/005_campaign_response.sql'
+        'apply migrations/006_campaign_response.sql'
       );
       warn.mockRestore();
     }
@@ -194,9 +194,9 @@ describe('ResponseStore', () => {
   });
 });
 
-describe('migration 005', () => {
+describe('migration 006', () => {
   const sql = readFileSync(
-    join(__dirname, '../../../../migrations/005_campaign_response.sql'),
+    join(__dirname, '../../../../migrations/006_campaign_response.sql'),
     'utf8'
   );
 
