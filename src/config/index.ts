@@ -66,6 +66,19 @@ const ENV_MAPPINGS: Record<string, string> = {
   PHISHY_CAMPAIGN_ALERTS_ENABLED: 'campaignAlerts.enabled',
   PHISHY_CAMPAIGN_ALERTS_DISTRIBUTION: 'campaignAlerts.distributionList',
 
+  // Campaign response (incident email, targeted warning, approved actions)
+  PHISHY_CAMPAIGN_RESPONSE_ENABLED: 'campaignResponse.enabled',
+  PHISHY_CAMPAIGN_RESPONSE_AUDIENCE: 'campaignResponse.audience',
+  PHISHY_CAMPAIGN_RESPONSE_EMPLOYEE_WARNING: 'campaignResponse.employeeWarning',
+  PHISHY_CAMPAIGN_RESPONSE_LIST_WARNING: 'campaignResponse.distributionWarning',
+  PHISHY_CAMPAIGN_RESPONSE_APPROVAL_TTL_HOURS: 'campaignResponse.approvalTtlHours',
+  PHISHY_CAMPAIGN_RESPONSE_MAX_WARNINGS: 'campaignResponse.maxWarningsPerCampaign',
+  PHISHY_CAMPAIGN_RESPONSE_MAX_REMOVAL_MAILBOXES: 'campaignResponse.maxRemovalMailboxes',
+  PHISHY_CAMPAIGN_RESPONSE_MAX_REMOVAL_MESSAGES: 'campaignResponse.maxRemovalMessages',
+  PHISHY_CAMPAIGN_RESPONSE_UPDATE_INTERVAL_MINUTES: 'campaignResponse.updateIntervalMinutes',
+  PHISHY_CAMPAIGN_RESPONSE_CLICKED_INSTRUCTIONS: 'campaignResponse.alreadyClickedInstructions',
+  PHISHY_CAMPAIGN_RESPONSE_TIME_ZONE: 'campaignResponse.timeZone',
+
   // Campaign verdict cache
   PHISHY_CAMPAIGN_CACHE_ENABLED: 'campaignCache.enabled',
   PHISHY_CAMPAIGN_CACHE_TTL_HOURS: 'campaignCache.ttlHours',

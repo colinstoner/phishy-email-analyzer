@@ -28,12 +28,15 @@
 import { z } from 'zod';
 import {
   DELIVERY_STATUS_PATTERN,
+  DIRECTORY_ID_PATTERN,
+  GRAPH_ITEM_ID_PATTERN,
   IP_SHAPE,
   MAX_ADDRESS_LENGTH,
   MAX_CLAIMED_TIME_LENGTH,
   MAX_LISTED_RECIPIENTS,
   MAX_MESSAGE_HEADERS,
   MAX_REPORTED_BURST_IPS,
+  MAX_REPORTED_COPY_IDS,
   MAX_SUBJECT_LENGTH,
   MESSAGE_ID_PATTERN,
 } from './graph.limits';
@@ -463,6 +466,13 @@ const BlastRadiusRecipientSchema = z.strictObject({
   response: z.enum(['replied', 'forwarded', 'none', 'unknown']).optional(),
   lastVerbCode: z.number().int().optional(),
   copies: Count.optional(),
+  // The identifiers a campaign-response action may name (campaign response)
+  mailboxId: z.string().regex(DIRECTORY_ID_PATTERN).optional(),
+  messageIds: z
+    .array(z.string().regex(GRAPH_ITEM_ID_PATTERN))
+    .max(MAX_REPORTED_COPY_IDS)
+    .optional(),
+  receivedAt: IsoInstant.optional(),
 });
 
 const BlastRadiusReportSchema = z.strictObject({

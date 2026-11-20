@@ -405,6 +405,17 @@ export class IntelligenceDatabaseService {
   }
 
   /**
+   * Run one parameterized statement. For services that keep their own
+   * tables (campaign response, migration 006); errors, including 42P01 and
+   * 42703, reach the caller unchanged.
+   */
+  async runQuery(text: string, params: unknown[]): Promise<{ rows: Record<string, unknown>[] }> {
+    await this.initialize();
+    const result = await this.pool.query(text, params);
+    return { rows: result.rows as Record<string, unknown>[] };
+  }
+
+  /**
    * Store an email analysis result
    */
   async storeAnalysis(record: EmailAnalysisRecord): Promise<string> {

@@ -105,6 +105,63 @@ const CampaignAlertConfigSchema = z.object({
   distributionList: z.string().email().optional(),
 });
 
+/** Default "if you already clicked" text in the employee warning */
+export const DEFAULT_ALREADY_CLICKED_INSTRUCTIONS =
+  'If you clicked a link in it, opened an attachment, or entered your password, contact your IT or security team straight away and change your password. You will not be in trouble: reporting it quickly is what limits the damage.';
+
+/**
+ * Campaign response configuration schema
+ * What Phishy does once a campaign crosses the alert threshold: an incident
+ * email for the security team, a warning to the people who actually received
+ * the attack (from blast radius) and proposed response actions approved over
+ * the command channel. Off by default; off means the campaign alert behaves
+ * exactly as before. Requires campaign alerts, the intelligence database and
+ * migration 006.
+ */
+const CampaignResponseConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  /**
+   * Who is warned: the distribution list (`campaignAlerts.distributionList`,
+   * the behaviour without campaign response), the recipients blast radius
+   * found, or both.
+   */
+  audience: z.enum(['distribution', 'recipients', 'both']).default('distribution'),
+  /** The targeted warning to recipients: approved by the security team first, sent at once, or never */
+  employeeWarning: z.enum(['off', 'approve', 'auto']).default('approve'),
+  /** The distribution-list broadcast: sent at once (as before), approved first, or never */
+  distributionWarning: z.enum(['off', 'approve', 'auto']).default('auto'),
+  /** How long a proposed action can be approved */
+  approvalTtlHours: z.number().positive().max(72).default(4),
+  /** Most employee emails (warnings and thank-you notes) one campaign may send */
+  maxWarningsPerCampaign: z.number().int().min(1).max(1000).default(100),
+  /** Most mailboxes and messages one removal action may name */
+  maxRemovalMailboxes: z.number().int().min(1).max(5000).default(500),
+  maxRemovalMessages: z.number().int().min(1).max(10000).default(1000),
+  /** Shortest gap between incident updates to the security team */
+  updateIntervalMinutes: z.number().int().min(1).max(1440).default(30),
+  /** The organization's own "if you already clicked" instructions (plain text) */
+  alreadyClickedInstructions: z
+    .string()
+    .min(1)
+    .max(1000)
+    .default(DEFAULT_ALREADY_CLICKED_INSTRUCTIONS),
+  /** IANA time zone the warning's times are written in */
+  timeZone: z
+    .string()
+    .default('UTC')
+    .refine(
+      zone => {
+        try {
+          new Intl.DateTimeFormat('en-US', { timeZone: zone });
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      { message: 'campaignResponse.timeZone must be an IANA time zone such as Europe/London' }
+    ),
+});
+
 /**
  * Email commands configuration schema
  * Lets the security team reply to Phishy's reports (or email Phishy
@@ -382,6 +439,7 @@ export const PhishyConfigSchema = z.object({
   profile: z.string().optional(), // Profile ID or S3 path
   intelligence: IntelligenceConfigSchema.optional(),
   campaignAlerts: CampaignAlertConfigSchema.optional(),
+  campaignResponse: CampaignResponseConfigSchema.optional(),
   campaignCache: CampaignCacheConfigSchema.optional(),
   commands: CommandsConfigSchema.optional(),
   reportButton: ReportButtonConfigSchema.optional(),
@@ -404,6 +462,7 @@ export type StorageConfig = z.infer<typeof StorageConfigSchema>;
 export type IntelligenceConfig = z.infer<typeof IntelligenceConfigSchema>;
 export type CampaignAlertConfig = z.infer<typeof CampaignAlertConfigSchema>;
 export type CampaignCacheConfig = z.infer<typeof CampaignCacheConfigSchema>;
+export type CampaignResponseConfig = z.infer<typeof CampaignResponseConfigSchema>;
 export type CommandsConfig = z.infer<typeof CommandsConfigSchema>;
 export type AgenticConfig = z.infer<typeof AgenticConfigSchema>;
 export type GraphConfig = z.infer<typeof GraphConfigSchema>;

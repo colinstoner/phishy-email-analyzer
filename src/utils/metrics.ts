@@ -551,3 +551,60 @@ export function emitFanoutScanMetric(metric: FanoutScanMetric): void {
   // Raw EMF on stdout, bypassing the logger so `_aws` stays at the JSON root
   process.stdout.write(`${JSON.stringify(emf)}\n`);
 }
+
+/**
+ * What happened in campaign response. Each name is its own metric:
+ * - `CampaignWarningsSent` / `CampaignThanksSent`: employee emails sent
+ *   (dimension `Audience`: `recipients` or `distribution`)
+ * - `CampaignWarningsSkipped`: recipients not emailed (dimension `Reason`)
+ * - `CampaignWarningSendFailures`: SES refused or failed a send
+ * - `CampaignIncidentsOpened` (dimension `Trigger`), `CampaignIncidentUpdates`
+ * - `ResponseActionsProposed`, `ResponseActionApprovals`,
+ *   `ResponseActionApprovalsRejected` (dimension `Reason`),
+ *   `ResponseActionsExpired`, `ResponseActionsDryRun`
+ *   (all dimensioned by `ActionType`)
+ */
+export type CampaignResponseMetricName =
+  | 'CampaignWarningsSent'
+  | 'CampaignThanksSent'
+  | 'CampaignWarningsSkipped'
+  | 'CampaignWarningSendFailures'
+  | 'CampaignIncidentsOpened'
+  | 'CampaignIncidentUpdates'
+  | 'ResponseActionsProposed'
+  | 'ResponseActionApprovals'
+  | 'ResponseActionApprovalsRejected'
+  | 'ResponseActionsExpired'
+  | 'ResponseActionsDryRun';
+
+/**
+ * Emit one campaign-response count. Dimension values are fixed words chosen
+ * by code (an action type, an audience, a reason), never data.
+ */
+export function emitCampaignResponseMetric(
+  name: CampaignResponseMetricName,
+  count: number,
+  dimensions: Record<string, string> = {}
+): void {
+  if (process.env.PHISHY_DISABLE_METRICS === 'true' || count <= 0) {
+    return;
+  }
+  const keys = Object.keys(dimensions);
+
+  const emf = {
+    _aws: {
+      Timestamp: Date.now(),
+      CloudWatchMetrics: [
+        {
+          Namespace: NAMESPACE,
+          Dimensions: keys.length > 0 ? [keys, []] : [[]],
+          Metrics: [{ Name: name, Unit: 'Count' }],
+        },
+      ],
+    },
+    ...dimensions,
+    [name]: count,
+  };
+
+  process.stdout.write(`${JSON.stringify(emf)}\n`);
+}
