@@ -135,6 +135,7 @@ npm test
 npm run lint
 npm run format:check
 npm run eval:injection -- --dry-run --model x   # builds and checks every eval prompt; no model call
+npm run package        # the Lambda zips SAM would build, for a deployment without SAM (dist/lambda/)
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the project layout and pull-request process.

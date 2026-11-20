@@ -199,18 +199,16 @@ A lifecycle rule expiring `emails/` after 90 days (as the template does) keeps t
 
 ### 5. Prepare Lambda Code
 
-Build the function the way the SAM template does, as one esbuild bundle (the plain `npm run build` output cannot run on Lambda: it does not bundle the RDS certificate file the database module imports, so it fails at load):
+Build the function the way the SAM template does, as one esbuild bundle (same entry point, target, externals and `.pem` loader as `template.yaml`):
 
 ```bash
 git clone https://github.com/colinstoner/phishy-email-analyzer.git
 cd phishy-email-analyzer
 npm ci
-npx esbuild src/index.ts --bundle --platform=node --target=node22 \
-  --loader:.pem=text '--external:@aws-sdk/*' --outfile=dist/lambda/index.js
-(cd dist/lambda && zip ../../function.zip index.js)
+npm run package
 ```
 
-Upload `function.zip` to the function and set the handler to `index.handler`. The AWS SDK is left out of the bundle because the Node.js 22 runtime provides it.
+This writes `dist/lambda/phishy.zip` (one file, `index.js`). Upload it to the function and set the handler to `index.handler`; or, once the function exists, let the script upload it: `npm run deploy -- phishy` (the function name is the argument, or `PHISHY_DEPLOY_FUNCTION`; it runs `aws lambda update-function-code`). The AWS SDK is left out of the bundle because the Node.js 22 runtime provides it. The same command also writes `dist/lambda/graph-broker.zip` (handler `graph-broker.handler`) for a hand-built Graph broker; `npm run deploy -- phishy --broker <broker-function-name>` updates both. Do not upload the `npm run build` output: it is the compiled library without its dependencies.
 
 ### 6. Configure Lambda Function
 
@@ -344,7 +342,7 @@ For production environments:
 - Verify all environment variables are set correctly
 - Check IAM permissions
 - Keep the timeout at 180 seconds (the Bedrock retry budget needs it)
-- A `Cannot find module './rds-global-bundle.pem'` error means the package was built with `tsc` rather than the esbuild bundle in step 5
+- A `Cannot find module` error means the function was not packaged with `npm run package` (step 5), which bundles every dependency into one `index.js`
 - Check that the `S3_BUCKET_NAME` environment variable matches your actual S3 bucket name
 
 ### No Analysis Emails Sent
