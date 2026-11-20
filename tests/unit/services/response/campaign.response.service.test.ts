@@ -272,7 +272,12 @@ describe('opening an incident', () => {
     expect(sent[0].text).toContain(`APPROVE REMOVAL ${removal?.reference}`);
     expect(sent[0].text).toContain('false positive');
     expect(sent[0].text).toContain('Analysis ID: 3f2b8a1c-0d4e-4f6a-9b2c-7e8d1a5f3c9b');
-    expect(store.events()).toEqual(['incident_opened', 'action_proposed', 'action_proposed']);
+    expect(store.events()).toEqual([
+      'incident_opened',
+      'action_proposed',
+      'action_proposed',
+      'incident_email_sent',
+    ]);
     expect(markCampaignAlerted).toHaveBeenCalledWith('campaign-1');
     expect(store.incidents[0].threadMessageId).toBe('ses-1');
   });
@@ -731,6 +736,73 @@ describe('removal notice (only after a real removal: the write tier is not built
     expect(action?.status).toBe('completed');
     expect(action?.result?.notified).toEqual([]);
     expect(action?.result?.noticesFailed).toBe(4);
+  });
+});
+
+describe('APPROVE WARNING without a reference (bound to the email replied to)', () => {
+  it('approves the one warning proposed in the incident email being answered', async () => {
+    const { service, sent, store } = setup();
+    await service.handleCampaignReport(reportInput());
+    const warning = proposed(store, 'send_warning')!;
+    expect(store.audit.find(e => e.event === 'incident_email_sent')?.detail).toMatchObject({
+      messageId: 'ses-1',
+      proposed: expect.arrayContaining([warning.id]),
+    });
+
+    const reply = await service.handleBareWarningApproval(['ses-1'], 'SOC@example.com');
+    expect(reply.heading).toBe('Done: approval carried out');
+    expect(employeeEmails(sent)).toHaveLength(3);
+    expect(store.actions.find(a => a.id === warning.id)).toMatchObject({
+      status: 'completed',
+      approvedBy: 'soc@example.com',
+    });
+    // The removal proposed in the same email is untouched
+    expect(proposed(store, 'remove_messages')).toBeDefined();
+  });
+
+  it('refuses a reply to an older email whose proposal has been replaced', async () => {
+    const { service, sent, advance } = setup();
+    await service.handleCampaignReport(reportInput());
+    advance(31 * 60_000);
+    const more = reportInput();
+    more.match = { ...more.match, detectionCount: 4, shouldAlert: false };
+    more.blastRadius = blast([recipient(5)]);
+    await service.handleCampaignReport(more);
+
+    const stale = await service.handleBareWarningApproval(['ses-1'], TEAM[0]);
+    expect(stale.body.join('\n')).toContain('replaced by a newer one');
+    expect(employeeEmails(sent)).toEqual([]);
+
+    // A reply to the update itself approves the proposal that update showed
+    const current = await service.handleBareWarningApproval(['ses-2'], TEAM[0]);
+    expect(current.heading).toBe('Done: approval carried out');
+    expect(employeeEmails(sent).length).toBeGreaterThan(0);
+  });
+
+  it('refuses when the reply is not to an incident email, and for a non-member', async () => {
+    const { service, sent } = setup();
+    await service.handleCampaignReport(reportInput());
+    for (const ids of [[], ['ses-unknown']]) {
+      const reply = await service.handleBareWarningApproval(ids, TEAM[0]);
+      expect(reply.heading).toBe('Phishy did not carry out an approval');
+      expect(reply.body.join('\n')).toContain('could not match your reply');
+    }
+    const outsider = await service.handleBareWarningApproval(['ses-1'], 'mallory@example.com');
+    expect(outsider.body[0]).toBe('You are not on the security team.');
+    expect(employeeEmails(sent)).toEqual([]);
+  });
+
+  it('refuses when the email replied to proposed no warning', async () => {
+    const { service, sent, store } = setup();
+    await service.handleCampaignReport(reportInput());
+    const entry = store.audit.findIndex(e => e.event === 'incident_email_sent');
+    store.audit[entry] = Object.freeze({
+      ...store.audit[entry],
+      detail: { messageId: 'ses-1', proposed: [proposed(store, 'remove_messages')!.id] },
+    });
+    const reply = await service.handleBareWarningApproval(['ses-1'], TEAM[0]);
+    expect(reply.body[0]).toContain('did not propose a warning');
+    expect(employeeEmails(sent)).toEqual([]);
   });
 });
 

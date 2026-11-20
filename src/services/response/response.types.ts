@@ -183,6 +183,7 @@ export interface RemovalCounts {
 export type AuditEvent =
   | 'incident_opened'
   | 'incident_updated'
+  | 'incident_email_sent'
   | 'incident_false_positive'
   | 'action_proposed'
   | 'action_approved'

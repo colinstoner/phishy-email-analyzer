@@ -173,7 +173,7 @@ Requires the intelligence database and `migrations/002_analysis_feedback.sql`.
 |----------|---------|-------------|
 | `PHISHY_EMAIL_COMMANDS_ENABLED` | `false` | Process security-team replies as commands |
 
-With [campaign response](#campaign-response-optional) on, the channel also accepts **approvals** of proposed actions. Those are never interpreted by the model and never matched loosely: only a line of its own reading `APPROVE WARNING <reference>` or `APPROVE REMOVAL <reference>`, in your own new text (not the quoted history), with the reference printed next to that action in the incident email. Approving twice does nothing twice.
+With [campaign response](#campaign-response-optional) on, the channel also accepts **approvals** of proposed actions. Those are never interpreted by the model and never matched loosely: only a line of its own reading `APPROVE WARNING <reference>` or `APPROVE REMOVAL <reference>`, in your own new text (not the quoted history), with the reference printed next to that action in the incident email. For the warning only there is a short form, for replying from a phone: a reply to an incident email whose own new text has a line that is exactly `APPROVE WARNING` approves the one warning that exact email proposed. It is matched by the reply's `In-Reply-To`, so a reply to an older email whose proposal has since been replaced approves nothing, and a reply Phishy cannot match to an incident email it sent is refused. Removal always needs its reference. Approving twice does nothing twice.
 
 ### Campaign Response (Optional)
 

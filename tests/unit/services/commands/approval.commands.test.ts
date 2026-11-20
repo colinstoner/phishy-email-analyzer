@@ -56,6 +56,9 @@ function setup(withResponder = true) {
     handleApprovals: jest
       .fn()
       .mockResolvedValue({ heading: 'Done: approval carried out', body: ['Warned 3.'] }),
+    handleBareWarningApproval: jest
+      .fn()
+      .mockResolvedValue({ heading: 'Done: approval carried out', body: ['Warned 2.'] }),
     onVerdict: jest
       .fn()
       .mockResolvedValue(
@@ -92,6 +95,41 @@ describe('approvals through the command channel', () => {
     expect(notifier.sendEmail.mock.calls[0][0]).toBe('soc@example.com');
     expect(notifier.sendEmail.mock.calls[0][3]).toContain('Warned 3.');
     expect(ai.sendPrompt).not.toHaveBeenCalled(); // never a model's reading
+  });
+
+  it('binds a bare APPROVE WARNING to the email it replies to (In-Reply-To only)', async () => {
+    const { service, responder, notifier, ai } = setup();
+    const result = await run(
+      service,
+      msg('Approve warning\n\nSent from my phone', {
+        subject: 'Re: [Phishy incident PHY-AAAA-BBBB-CCCC-DDDD] Active phishing campaign',
+        headers: {
+          'In-Reply-To': '<0100018f-update@us-west-2.amazonses.com>',
+          References:
+            '<0100018f-first@us-west-2.amazonses.com> <0100018f-update@us-west-2.amazonses.com>',
+        },
+      })
+    );
+    expect(result).toMatchObject({ handled: true, action: 'approval_processed' });
+    expect(responder.handleBareWarningApproval).toHaveBeenCalledWith(
+      ['0100018f-update'],
+      'soc@example.com'
+    );
+    expect(responder.handleApprovals).not.toHaveBeenCalled();
+    expect(notifier.sendEmail.mock.calls[0][3]).toContain('Warned 2.');
+    expect(ai.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('prefers an exact line over a bare one, and treats bare plus malformed as malformed', async () => {
+    const exact = setup();
+    await run(exact.service, msg(`approve warning\nAPPROVE WARNING ${REF}`));
+    expect(exact.responder.handleApprovals).toHaveBeenCalled();
+    expect(exact.responder.handleBareWarningApproval).not.toHaveBeenCalled();
+
+    const mixed = setup();
+    const result = await run(mixed.service, msg('approve warning\napprove removal'));
+    expect(result).toMatchObject({ handled: true, action: 'help_sent' });
+    expect(mixed.responder.handleBareWarningApproval).not.toHaveBeenCalled();
   });
 
   it('is recognized by its reference even without reply headers', async () => {

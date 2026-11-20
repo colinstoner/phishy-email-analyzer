@@ -742,7 +742,7 @@ function proposals(context: IncidentEmailContext): Proposals {
     intro = 'No action is waiting for approval.';
   } else {
     const expiry = context.proposed[0].expiresAt;
-    intro = `Reply to this email with the line shown, on a line of its own. Each approval is good until ${displayTime(expiry.toISOString(), context.timeZone) ?? expiry.toISOString()} and applies to this incident only.`;
+    intro = `Reply to this email with the line shown, on a line of its own. Each approval is good until ${displayTime(expiry.toISOString(), context.timeZone) ?? expiry.toISOString()} and applies to this incident only.${context.proposed.some(a => a.type === 'send_warning') ? ' For the warning only, a reply to this email with just the two words "approve warning" also works.' : ''}`;
   }
   const items: Proposals['items'] = context.proposed.map(action => {
     const { title, does, notIncluded } = describeProposal(action);

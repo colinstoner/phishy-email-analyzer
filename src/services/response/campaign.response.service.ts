@@ -1052,6 +1052,16 @@ export class CampaignResponseService {
       notifiedReportCount: incident.reportCount,
       notifiedRecipientCount: incident.reach.totals.recipients,
     });
+    if (result.messageId) {
+      // Which proposals this exact email carried: a reply to it with a bare
+      // APPROVE WARNING is bound to them (see `handleBareWarningApproval`)
+      await this.store.appendAudit({
+        incidentId: incident.id,
+        event: 'incident_email_sent',
+        actor: PHISHY,
+        detail: { messageId: result.messageId, proposed: content.proposed.map(a => a.id) },
+      });
+    }
     if (content.changes) {
       await this.store.appendAudit({
         incidentId: incident.id,
@@ -1185,6 +1195,80 @@ export class CampaignResponseService {
       heading: acted ? 'Done: approval carried out' : 'Phishy did not carry out an approval',
       body: body.length ? body : ['Nothing to do.'],
     };
+  }
+
+  /**
+   * A reply that says only `APPROVE WARNING`, with no reference. It is an
+   * approval only when Phishy can establish what the approver was looking
+   * at: the reply's In-Reply-To must be an incident email Phishy sent, and
+   * that email must have proposed exactly one warning. The approval is then
+   * of that proposal by its own reference, through the normal path, so a
+   * proposal that has since been replaced, expired or carried out is refused
+   * there exactly as a stale reference is. A reply to an older email can
+   * therefore never approve a newer, wider scope. Never throws.
+   */
+  async handleBareWarningApproval(
+    repliedToMessageIds: string[],
+    approver: string,
+    getRemainingMs?: () => number | undefined
+  ): Promise<ApprovalReply> {
+    const refuse = (reason: string, line: string): ApprovalReply => {
+      emitCampaignResponseMetric('ResponseActionApprovalsRejected', 1, {
+        ActionType: 'send_warning',
+        Reason: reason,
+      });
+      return {
+        heading: 'Phishy did not carry out an approval',
+        body: [
+          line,
+          'Nothing was done. Reply to the latest incident email, or use the full line it shows: APPROVE WARNING <reference>.',
+        ],
+      };
+    };
+    if (!this.isSecurityTeam(approver)) {
+      return refuse('not_security_team', 'You are not on the security team.');
+    }
+    try {
+      let email: { incidentId: string; proposed: string[] } | undefined;
+      for (const messageId of repliedToMessageIds.slice(0, 3)) {
+        email = await this.store.findIncidentEmail(messageId);
+        if (email) {
+          break;
+        }
+      }
+      if (!email) {
+        return refuse(
+          'bare_no_incident_email',
+          'APPROVE WARNING without a reference works only as a direct reply to an incident email, and Phishy could not match your reply to one.'
+        );
+      }
+      const listed = new Set(email.proposed);
+      const warnings = (await this.store.listActions(email.incidentId)).filter(
+        action => action.type === 'send_warning' && listed.has(action.id)
+      );
+      if (warnings.length !== 1) {
+        return refuse(
+          'bare_no_single_warning',
+          'The incident email you replied to did not propose a warning to approve.'
+        );
+      }
+      return await this.handleApprovals(
+        [{ verb: 'WARNING', reference: warnings[0].reference }],
+        approver,
+        getRemainingMs
+      );
+    } catch (error) {
+      if (error instanceof ResponseStoreUnavailableError) {
+        return {
+          heading: 'Phishy could not act on that approval',
+          body: [`Campaign response is not available: apply migrations/006_campaign_response.sql.`],
+        };
+      }
+      logger.error('Bare warning approval failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return refuse('bare_error', 'Phishy could not process this approval.');
+    }
   }
 
   private async reject(
