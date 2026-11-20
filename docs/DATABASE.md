@@ -56,6 +56,12 @@ Tags each analysis with its flood-detection campaign signature, powering the **c
 ### `analysis_feedback` *(migration 002 — not auto-created)*
 Security-team verdicts on analyses, submitted by replying to Phishy's reports (the email command channel). One row per analysis (`UNIQUE(analysis_id)`); resubmission updates in place so a correction wins. Feedback also adjusts `threat_indicators` confidence through IOC provenance (`metadata.sourceAnalysisId`). Migration 002 additionally adds `email_analyses.report_message_id`, which links each outbound report to its analysis so replies can be matched via `In-Reply-To`. Apply `migrations/002_analysis_feedback.sql` before setting `PHISHY_EMAIL_COMMANDS_ENABLED=true`.
 
+### `fanout_scan_state` and `fanout_scan_waves` *(migration 005 — not auto-created)*
+State for the [scheduled fan-out scan](ARCHITECTURE.md#scheduled-fan-out-scan) (`graph.fanoutScan`); nothing else uses them. Apply `migrations/005_fanout_scan.sql` before setting `PHISHY_GRAPH_FANOUT_SCAN_ENABLED=true`. Without them the scan does not run: every scheduled invocation logs that the migration is missing and emits `FanoutScans` with `Outcome=migration_missing` (a missing table or column, `42P01` / `42703`, is caught; email analysis is unaffected).
+
+- `fanout_scan_state` is a single row (`id = 1`): the **scan lock** (`lock_token`, `lock_until`: a scan takes it with one conditional upsert and skips if another scan holds an unexpired lease; the lease is the invocation's remaining time plus 30 s, so a crashed scan's lock expires on its own), **where the last window ended** (`last_window_end`; advanced only when a window was read and every flag in it handled, so a failed scan's window is read again), and the **request log** (`recent_requests`, a JSON array of `{at, requests}` for the last five minutes: the scans' shared message-trace allowance).
+- `fanout_scan_waves` has one row per alerted wave: `wave_key` (SHA-256 of the sender address and the normalized subject), the `reference` quoted in the alert (`FANOUT-` and 10 hex digits), the sender address and subject (hostile mail-flow text, always bound as parameters), first and last sighting, the recipient count the last alert reported (`alerted_recipients`) and the most any scan saw (`max_recipients`), how many alerts went out, and the SES message ID of the latest one (`report_message_id`, for matching replies). A row whose `last_seen_at` is within `dedupeHours` is the same wave: a later sighting updates it and alerts again only if the wave at least doubled and grew by at least `fanoutMinRecipients`. A claim whose email could not be sent is undone, so the next scan alerts. No recipient address is stored.
+
 ## Privacy & Retention
 
 The database stores sender addresses, subjects, recipient addresses (in `campaigns.unique_recipients`), and AI analysis output — but **not raw email bodies** (those stay in S3 under your bucket's lifecycle rules). There is currently no built-in retention job; operators subject to data-retention policies should schedule their own cleanup, e.g.:
@@ -63,6 +69,7 @@ The database stores sender addresses, subjects, recipient addresses (in `campaig
 ```sql
 DELETE FROM email_analyses WHERE created_at < NOW() - INTERVAL '180 days';
 DELETE FROM ai_usage       WHERE created_at < NOW() - INTERVAL '180 days';
+DELETE FROM fanout_scan_waves WHERE last_seen_at < NOW() - INTERVAL '180 days';
 ```
 
 Safelisted users are never written to the intelligence database (see [INTELLIGENCE.md](INTELLIGENCE.md)).

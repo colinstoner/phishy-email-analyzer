@@ -2,7 +2,7 @@
  * The Graph broker's wire format: what the main function may ask of the
  * broker, and what it may be told back.
  *
- * The interface is a closed allow-list. A request names one of three
+ * The interface is a closed allow-list. A request names one of four
  * operations and carries only that operation's typed inputs. There is no
  * path, URL, filter, query string or "call Graph" operation, and no field of
  * a request is ever used as one: the broker turns typed inputs into requests
@@ -44,6 +44,7 @@ export const GRAPH_BROKER_OPERATIONS = [
   'original_message_lookup',
   'blast_radius_lookup',
   'sender_history_lookup',
+  'fanout_scan',
 ] as const;
 export type GraphBrokerOperation = (typeof GRAPH_BROKER_OPERATIONS)[number];
 
@@ -124,6 +125,42 @@ const SenderHistoryLookupParams = z.strictObject({
   budgetMs: BudgetMs,
 });
 
+/** A DNS domain name, lower or upper case; operator configuration, used only as data */
+const DomainName = z
+  .string()
+  .max(253)
+  .regex(/^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$/);
+
+/** Widest window one fan-out scan may cover (two hours) */
+const MAX_SCAN_WINDOW_MS = 2 * 60 * 60 * 1000;
+
+const FanoutScanParams = z
+  .strictObject({
+    /** The window of mail flow to read: at most two hours wide */
+    receivedFrom: z.iso.datetime(),
+    receivedTo: z.iso.datetime(),
+    /**
+     * The organization's own domains, from the main function's
+     * configuration: what "internal recipient" and "external sender" mean.
+     * Operator data, not email data, but still only ever compared as data.
+     */
+    internalDomains: z.array(DomainName).min(1).max(100),
+    /** Trace pages (5000 rows each) the scan may read */
+    maxPages: z.number().int().min(1).max(10),
+    /** Candidates whose sender history the scan may check */
+    maxCandidates: z.number().int().min(1).max(10),
+    /** Trace requests the scan may spend, history lookups included */
+    maxRequests: z.number().int().min(1).max(100),
+    budgetMs: BudgetMs,
+  })
+  .refine(
+    params => {
+      const span = Date.parse(params.receivedTo) - Date.parse(params.receivedFrom);
+      return span > 0 && span <= MAX_SCAN_WINDOW_MS;
+    },
+    { message: 'the scan window is empty or too wide' }
+  );
+
 const version = z.literal(GRAPH_BROKER_VERSION);
 
 /**
@@ -147,6 +184,11 @@ export const GraphBrokerRequestSchema = z.discriminatedUnion('operation', [
     version,
     operation: z.literal('sender_history_lookup'),
     params: SenderHistoryLookupParams,
+  }),
+  z.strictObject({
+    version,
+    operation: z.literal('fanout_scan'),
+    params: FanoutScanParams,
   }),
 ]);
 
@@ -315,6 +357,98 @@ export const SenderHistoryLookupResultSchema = z
     };
   });
 
+const FanoutStatusCountsSchema = z.strictObject({
+  delivered: Count,
+  junk: Count,
+  quarantined: Count,
+  failed: Count,
+  other: Count,
+});
+
+const FanoutStatusWord = z.enum(['delivered', 'junk', 'quarantined', 'failed', 'other']);
+
+/** Most flags one scan may return */
+const MAX_FANOUT_FLAGS = 10;
+
+/**
+ * Result of `fanout_scan`: counts about the scan and, per flagged wave, the
+ * facts the security team's alert needs. The sender, the subject and the
+ * recipient addresses are hostile mail-flow data; the recipient list is cut
+ * to the length a blast-radius report lists, with the rest counted.
+ */
+export const FanoutScanResultSchema = z
+  .strictObject({
+    outcome: z.enum(['ok', 'forbidden', 'timeout', 'rate_limited', 'error']),
+    rowsScanned: Count,
+    inboundRows: Count,
+    pages: Count,
+    requestsUsed: Count,
+    forbiddenRetries: Count,
+    filterMismatch: z.boolean(),
+    candidates: Count,
+    candidatesChecked: Count,
+    incomplete: z.boolean(),
+    incompleteReasons: z
+      .array(
+        z.enum([
+          'page_limit',
+          'page_error',
+          'candidate_limit',
+          'request_allowance',
+          'time_budget',
+          'history_unavailable',
+        ])
+      )
+      .max(6),
+    flagged: z
+      .array(
+        z.strictObject({
+          senderAddress: MailAddress,
+          subject: z.string().max(MAX_SUBJECT_LENGTH),
+          firstSeen: z.iso.datetime(),
+          lastSeen: z.iso.datetime(),
+          windowRecipients: Count,
+          windowMessages: Count,
+          statuses: FanoutStatusCountsSchema,
+          recipients: z
+            .array(z.strictObject({ address: MailAddress, status: FanoutStatusWord }))
+            .max(10_000),
+          recipientsOmitted: Count,
+          facts: SenderHistoryFactsSchema,
+        })
+      )
+      .max(1000),
+  })
+  .transform(result => {
+    const flagged = result.flagged.slice(0, MAX_FANOUT_FLAGS).map(flag => {
+      const burstIps = flag.facts.sendingIps.burstIps;
+      const keptIps = burstIps
+        ?.filter(entry => IP_SHAPE.test(entry.ip))
+        .slice(0, MAX_REPORTED_BURST_IPS);
+      const omittedIps =
+        (flag.facts.sendingIps.burstIpsOmitted ?? 0) +
+        (burstIps ? burstIps.length - (keptIps?.length ?? 0) : 0);
+      const { burst, seenInHistory, historyComplete } = flag.facts.sendingIps;
+      return {
+        ...flag,
+        recipients: flag.recipients.slice(0, MAX_LISTED_RECIPIENTS),
+        recipientsOmitted:
+          flag.recipientsOmitted + Math.max(0, flag.recipients.length - MAX_LISTED_RECIPIENTS),
+        facts: {
+          ...flag.facts,
+          sendingIps: {
+            burst,
+            seenInHistory,
+            historyComplete,
+            ...(keptIps && keptIps.length > 0 ? { burstIps: keptIps } : {}),
+            ...(omittedIps > 0 ? { burstIpsOmitted: omittedIps } : {}),
+          },
+        },
+      };
+    });
+    return { ...result, flagged };
+  });
+
 /** Printable, bounded text written by the broker's code (notes and caveats) */
 const CodeWrittenLine = z.string().max(600);
 /** A directory or trace address: bounded, no whitespace or control characters */
@@ -398,6 +532,7 @@ export const GRAPH_BROKER_RESULT_SCHEMAS = {
   original_message_lookup: OriginalMessageLookupResultSchema,
   blast_radius_lookup: BlastRadiusLookupResultSchema,
   sender_history_lookup: SenderHistoryLookupResultSchema,
+  fanout_scan: FanoutScanResultSchema,
 } as const;
 
 export type GraphBrokerResult<Op extends GraphBrokerOperation> = z.infer<
@@ -414,6 +549,8 @@ export const GRAPH_BROKER_MAX_RESPONSE_BYTES: Record<GraphBrokerOperation, numbe
   original_message_lookup: 3 * 1024 * 1024,
   blast_radius_lookup: 512 * 1024,
   sender_history_lookup: 64 * 1024,
+  // Up to 10 flags, each with 100 recipients and a handful of numbers
+  fanout_scan: 512 * 1024,
 };
 
 /**

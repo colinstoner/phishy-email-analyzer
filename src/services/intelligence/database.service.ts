@@ -1032,6 +1032,26 @@ export class IntelligenceDatabaseService {
   }
 
   /**
+   * Parameterized queries for a feature that keeps its own tables (the
+   * fan-out scan's state, migration 005), after the baseline initialization.
+   * Callers pass every value as a parameter, never in the SQL text.
+   */
+  featureStore(): {
+    query(
+      sql: string,
+      params?: unknown[]
+    ): Promise<{ rows: Array<Record<string, unknown>>; rowCount: number | null }>;
+  } {
+    return {
+      query: async (sql, params) => {
+        await this.initialize();
+        const result = await this.pool.query(sql, params);
+        return { rows: result.rows as Array<Record<string, unknown>>, rowCount: result.rowCount };
+      },
+    };
+  }
+
+  /**
    * Link an outbound report email to its analysis so security-team replies
    * can be matched via In-Reply-To. Non-fatal if the column is missing
    * (migration 002 not yet applied).

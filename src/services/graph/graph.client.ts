@@ -88,6 +88,23 @@ export interface GraphPagingOptions extends GraphRequestOptions {
   maxItems?: number;
 }
 
+/**
+ * Where the next page of a collection is, as handed out by `getPage`. Opaque:
+ * the URL it stands for is held privately by this module, was validated as a
+ * Graph next link when it was received, and cannot be set by a caller.
+ */
+export interface GraphPageCursor {
+  readonly __graphPageCursor: true;
+}
+
+const pageCursors = new WeakMap<GraphPageCursor, { url: URL; pathTemplate: string }>();
+
+/** One page of a collection and, when Graph has more, where the next one is */
+export interface GraphPage<T> {
+  items: T[];
+  next?: GraphPageCursor;
+}
+
 export interface GraphPagedResult<T> {
   items: T[];
   /** Pages actually requested */
@@ -295,6 +312,57 @@ export class GraphClient {
 
     // The page cap was reached with a next link still outstanding
     return { items, pages, truncated: true };
+  }
+
+  /**
+   * GET one page of a collection: the first (no `cursor`) or the one a
+   * previous call's `next` points to. For callers that must treat each page
+   * as its own request (to retry one page, or to count pages against a
+   * budget). The cursor must come from a page of the same `path`; the next
+   * link it stands for was checked against the Graph origin when received.
+   */
+  async getPage<T = unknown>(
+    path: GraphPath,
+    options: GraphRequestOptions & { cursor?: GraphPageCursor } = {}
+  ): Promise<GraphPage<T>> {
+    let url: URL;
+    if (options.cursor) {
+      const held = pageCursors.get(options.cursor);
+      if (!held || held.pathTemplate !== path.template) {
+        throw this.requestError('GET', path.template, 'page cursor does not belong to this path');
+      }
+      url = held.url;
+    } else {
+      url = this.buildUrl('GET', path, options.query);
+    }
+
+    const page = await this.getJsonFromUrl<Record<string, unknown>>(url, path.template, options);
+    const values = page?.value;
+    if (!Array.isArray(values)) {
+      throw new GraphError(
+        `Graph ${this.label} GET ${path.template} failed: collection response has no value array`,
+        { kind: 'invalid_response', label: this.label, method: 'GET', pathTemplate: path.template }
+      );
+    }
+    const rawNext = page['@odata.nextLink'];
+    if (rawNext === undefined || rawNext === null) {
+      return { items: values as T[] };
+    }
+    const nextUrl = parseNextLink(rawNext);
+    if (!nextUrl) {
+      throw new GraphError(
+        `Graph ${this.label} GET ${path.template} failed: next link is not on the Graph origin; paging stopped`,
+        {
+          kind: 'unsafe_next_link',
+          label: this.label,
+          method: 'GET',
+          pathTemplate: path.template,
+        }
+      );
+    }
+    const next = Object.freeze({}) as GraphPageCursor;
+    pageCursors.set(next, { url: nextUrl, pathTemplate: path.template });
+    return { items: values as T[], next };
   }
 
   private buildUrl(method: string, path: GraphPath, query?: GraphQuery): URL {

@@ -23,3 +23,5 @@ export * from './broker.protocol';
 export * from './broker.client';
 export * from './broker.gateway';
 export * from './graph.gateway';
+export * from './fanout.scan';
+export * from './fanout.source';

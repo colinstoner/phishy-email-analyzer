@@ -53,9 +53,10 @@ const SENDER = {
 const accepts = (value: unknown): boolean => GraphBrokerRequestSchema.safeParse(value).success;
 
 describe('Graph broker requests', () => {
-  it('has exactly three operations', () => {
+  it('has exactly four operations', () => {
     expect([...GRAPH_BROKER_OPERATIONS].sort()).toEqual([
       'blast_radius_lookup',
+      'fanout_scan',
       'original_message_lookup',
       'sender_history_lookup',
     ]);

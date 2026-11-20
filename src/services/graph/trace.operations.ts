@@ -25,7 +25,7 @@
  */
 
 import { z } from 'zod';
-import { GraphClient } from './graph.client';
+import { GraphClient, GraphPageCursor } from './graph.client';
 import { GraphError } from './graph.errors';
 import { ODataFilter, graphPath, odataFilter, odataSeconds } from './graph.request';
 import { BoundedResult, assertWindow, parseItems, resolveMaxItems } from './operations.common';
@@ -305,6 +305,71 @@ export async function listMessageTracesByRecipient(
     'recipientAddress',
     args.recipientAddress
   );
+}
+
+/** Largest page `listMessageTracePage` asks for (the service's own `$top` ceiling) */
+export const TRACE_PAGE_SIZE = MAX_TRACES;
+/** Slack allowed between a row's time and the window that was asked for (whole-second filter bounds) */
+const WINDOW_TOLERANCE_MS = 1000;
+
+export interface TracePageArgs extends TraceWindow {
+  /** Rows per page (default and ceiling 5000) */
+  pageSize?: number;
+  /** From the previous page; absent for the first */
+  cursor?: GraphPageCursor;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+  now?: Date;
+}
+
+/**
+ * One page of every trace row in a time window, tenant-wide: no address
+ * predicate at all (the service ignores the only ones that could narrow this
+ * to a domain), so direction and domain are the caller's to decide row by
+ * row. One call is exactly one request, so the caller can retry a page and
+ * count pages against its own budget.
+ *
+ * The service is not trusted to have applied the date filter either: a row
+ * whose `receivedDateTime` falls outside the window (by more than the
+ * filter's one-second rounding) fails the page with `filter_not_applied`.
+ */
+export async function listMessageTracePage(
+  client: GraphClient,
+  args: TracePageArgs
+): Promise<{ items: MessageTrace[]; next?: GraphPageCursor }> {
+  assertTraceWindow(args, args.now);
+  const pageSize = resolveMaxItems(args.pageSize, TRACE_PAGE_SIZE, TRACE_PAGE_SIZE);
+  const page = await client.getPage(TRACE_PATH, {
+    query: args.cursor
+      ? undefined
+      : {
+          filter: odataFilter`receivedDateTime ge ${odataSeconds(args.receivedFrom)} and receivedDateTime le ${odataSeconds(args.receivedTo, 'ceil')}`,
+          top: pageSize,
+        },
+    cursor: args.cursor,
+    timeoutMs: args.timeoutMs,
+    signal: args.signal,
+  });
+  const items = parseItems(client, TRACE_PATH, MessageTraceSchema, page.items).map(toTrace);
+
+  const from = args.receivedFrom.getTime() - WINDOW_TOLERANCE_MS;
+  const to = args.receivedTo.getTime() + WINDOW_TOLERANCE_MS;
+  const outside = items.filter(row => {
+    const at = row.receivedDateTime ? Date.parse(row.receivedDateTime) : NaN;
+    return Number.isFinite(at) && (at < from || at > to);
+  }).length;
+  if (outside > 0) {
+    throw new GraphError(
+      `Graph ${client.label} GET ${TRACE_PATH.template} failed: ${outside} of ${items.length} rows fall outside the time window that was sent; the filter was not applied`,
+      {
+        kind: 'filter_not_applied',
+        label: client.label,
+        method: 'GET',
+        pathTemplate: TRACE_PATH.template,
+      }
+    );
+  }
+  return page.next ? { items, next: page.next } : { items };
 }
 
 /** `<id@host>` to `id@host`; anything else is returned unchanged */

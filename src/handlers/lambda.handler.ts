@@ -51,6 +51,7 @@ import { extractIOCs, IOCSourceContext } from '../services/intelligence/ioc.extr
 import { ThreatIndicatorRecord, FeedbackRecord } from '../services/intelligence/database.service';
 import type { BlastRadiusReport } from '../services/graph/blast-radius.service';
 import { GraphGateway, createGraphGateway } from '../services/graph/graph.gateway';
+import { isScheduledTaskCandidate } from './scheduled.event';
 
 const logger = createLogger('lambda-handler');
 
@@ -92,6 +93,13 @@ let cachedServices: {
  */
 export async function handler(event: SESEvent, _context: Context): Promise<APIGatewayProxyResult> {
   logger.info('=== PHISHY STARTING ===');
+
+  // A scheduled-task event is never email: the unified handler routes it
+  // to `scheduled.handler.ts`; reaching this handler directly it is refused
+  if (isScheduledTaskCandidate(event)) {
+    logger.warn('Scheduled-task event reached the email handler; ignored');
+    return createResponse(400, { success: false, error: 'not an email event' });
+  }
 
   try {
     // Initialize services
@@ -152,6 +160,26 @@ export async function handler(event: SESEvent, _context: Context): Promise<APIGa
     });
     return createResponse(200, { success: false, error: String(error) });
   }
+}
+
+/**
+ * The initialized services a scheduled task needs (`scheduled.handler.ts`):
+ * the same configuration, notifier, database and Graph gateway the email
+ * pipeline uses, built once per instance
+ */
+export async function scheduledTaskServices(): Promise<{
+  config: PhishyConfig;
+  sesNotifier: SESNotifier;
+  intelligenceDb?: IntelligenceDatabaseService;
+  graph: GraphGateway;
+}> {
+  const { config, services } = await initializeServices();
+  return {
+    config,
+    sesNotifier: services.sesNotifier,
+    intelligenceDb: services.intelligenceDb,
+    graph: services.graph,
+  };
 }
 
 /**
