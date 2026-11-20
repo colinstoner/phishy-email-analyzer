@@ -156,7 +156,7 @@ export function checkOutsideStructure(outside: string): string[] {
   const problems: string[] = [];
   const allowed = new Set(PROMPT_STRUCTURE_LINES);
   const seen = new Map<string, number>();
-  for (const line of outside.split(/\r?\n|[\r\u2028\u2029\u0085\u000b\u000c]/)) {
+  for (const line of outside.split(/\r?\n|[\r\u2028\u2029\u0085\v\f]/)) {
     if (!STRUCTURE_LINE.test(line)) {
       continue;
     }

@@ -424,6 +424,8 @@ export function prepareOriginalFetch(
   if (!claimedTime) {
     return { skip: { outcome: 'skipped', reason: 'no_claimed_time' } };
   }
+  // `||` is deliberate: an empty (or whitespace-only) subject means "no subject"
+  // eslint-disable-next-line @typescript-eslint/prefer-nullish-coalescing
   const subject = request.claimedSubject?.trim() || undefined;
   if (subject !== undefined && subject.length > MAX_SUBJECT_LENGTH) {
     return { skip: { outcome: 'skipped', reason: 'subject_too_long' } };

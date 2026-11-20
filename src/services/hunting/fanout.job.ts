@@ -234,7 +234,7 @@ export async function runFanoutScan(
 
   const recent = recentEntries(lock.recentRequests, startedAt);
   let windowEnd: Date | undefined;
-  let outcome: FanoutRunOutcome = 'error';
+  let outcome: FanoutRunOutcome;
   try {
     outcome = await scanAndAlert(deps, store, {
       settings,
