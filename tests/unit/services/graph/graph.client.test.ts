@@ -269,6 +269,25 @@ describe('GraphClient paging', () => {
     expect(result.items).toHaveLength(3);
   });
 
+  it('asks before each further page and stops, truncated, when refused', async () => {
+    const { client, fetchMock } = harness(
+      fetchSequence(page([1, 2], NEXT_1), page([3, 4], NEXT_2), page([5]))
+    );
+    let allowed = 1;
+    const beforeNextPage = jest.fn(() => allowed-- > 0);
+
+    const result = await client.getPaged<{ id: number }>(messagesPath, {
+      maxPages: 10,
+      beforeNextPage,
+    });
+
+    // Asked before page 2 (allowed) and page 3 (refused); never before page 1
+    expect(beforeNextPage).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.items.map(item => item.id)).toEqual([1, 2, 3, 4]);
+    expect(result).toMatchObject({ pages: 2, truncated: true });
+  });
+
   it('stops at the item cap and reports truncation', async () => {
     const { client, fetchMock } = harness(fetchSequence(page([1, 2, 3], NEXT_1), page([4, 5, 6])));
 

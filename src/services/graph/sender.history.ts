@@ -567,6 +567,8 @@ interface LookupStats {
   forbiddenRetries: number;
   /** A query returned rows its address filter did not select */
   filterMismatch?: boolean;
+  /** The allowance refused a further page, so a window was cut short */
+  allowanceCut?: boolean;
 }
 
 function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
@@ -604,6 +606,12 @@ export interface SenderLookupInput {
 export interface SenderLookupResult {
   facts?: SenderHistoryFacts;
   metric: SenderHistoryMetric;
+  /**
+   * True when the request allowance refused a further page of a window, so
+   * the facts (if any) are cut short by the allowance rather than by a row
+   * cap. Kept off the metric (and so off the broker's wire format).
+   */
+  allowanceCut?: boolean;
 }
 
 export class SenderHistoryService {
@@ -665,6 +673,7 @@ export class SenderHistoryService {
       facts?: SenderHistoryFacts
     ): SenderLookupResult => ({
       facts,
+      ...(stats.allowanceCut ? { allowanceCut: true } : {}),
       metric: {
         outcome,
         durationMs: Math.max(0, this.now() - startedAt),
@@ -819,6 +828,16 @@ export class SenderHistoryService {
       timeoutMs: context.budgetMs,
       signal: context.signal,
       now: new Date(context.nowMs),
+      // A further page is one more request: it is counted against the
+      // allowance before it is made, and refused (the window cut short and
+      // reported as truncated) when the allowance has no room for it
+      beforeNextPage: (): boolean => {
+        if (this.reserveRequests(1, this.now())) {
+          return true;
+        }
+        context.stats.allowanceCut = true;
+        return false;
+      },
     };
     const empty = (): TraceRows => ({ rows: [], historyTruncated: false, burstTruncated: false });
     const inbound = empty();
@@ -839,10 +858,6 @@ export class SenderHistoryService {
         assertTraceRowsMatch(this.client, result.items, field, address);
         context.stats.succeeded++;
         target.rows.push(...result.items);
-        // A second page was requested when more than one page of rows came back
-        if (result.truncated || result.items.length > TRACE_ROWS_PER_WINDOW / 2) {
-          this.noteRequests(TRACE_PAGES_PER_WINDOW - 1, this.now());
-        }
         if (result.truncated) {
           target.historyTruncated ||= window.receivedFrom.getTime() < context.burstStartMs;
           target.burstTruncated ||= window.receivedTo.getTime() >= context.burstStartMs;

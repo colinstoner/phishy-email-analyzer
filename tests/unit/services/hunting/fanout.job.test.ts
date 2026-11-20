@@ -51,6 +51,7 @@ const {
   takeoverTenant,
   traceRow,
   wave,
+  wideWindowTenant,
 } = require('../../../mocks/fanout.tenant') as Tenant;
 const { fakeGraph } = require('../../../mocks/graph.fake') as Fake;
 /* eslint-enable @typescript-eslint/no-require-imports */
@@ -394,6 +395,84 @@ describe('runFanoutScan', () => {
       // The window is not advanced: the next scan covers it
       expect(current.db.state.last_window_end?.getTime()).toBe(NOW - 5 * MINUTE);
       expect(current.db.state.lock_token).toBeNull();
+    });
+
+    describe('over a wide window', () => {
+      const traceRequests = (): number =>
+        current.graph.requests.filter(r => r.path === '/admin/exchange/tracing/messageTraces')
+          .length;
+
+      function afterGap(recent: Array<{ at: string; requests: number }> = []): void {
+        current.db.state = {
+          lock_token: null,
+          lock_until: null,
+          // Fifty minutes ago: the window reaches back the full hour
+          last_window_end: new Date(NOW - 50 * MINUTE),
+          last_started_at: null,
+          recent_requests: recent,
+        };
+      }
+
+      it('spends no more than the allowance, records exactly that, and advances past what it read', async () => {
+        current = harness(wideWindowTenant());
+        afterGap();
+        const summary = await current.run();
+
+        expect(summary).toMatchObject({
+          outcome: 'ok',
+          rowsScanned: 4497,
+          candidates: 6,
+          flagged: 1,
+          alertsSent: 1,
+        });
+        expect(summary.incomplete).toBe(true);
+        // The alert for the wave it could judge says the scan was incomplete, and why
+        const text = current.sendEmail.mock.calls[0][3] as string;
+        expect(text).toContain(
+          'Scan incomplete: more senders reached the threshold than one scan checks; the scan used its share of the message-trace request limit.'
+        );
+        expect(traceRequests()).toBe(20);
+        expect(summary.traceRequests).toBe(20);
+        expect(current.db.state?.recent_requests).toEqual([
+          { at: new Date(NOW).toISOString(), requests: 20 },
+        ]);
+        // Every row was read; only candidate checks were cut short, and
+        // reading the window again would check the same candidates first
+        expect(current.db.state?.last_window_end?.getTime()).toBe(NOW);
+        expect(scanMetrics()[0]).toMatchObject({
+          FanoutScanTraceRequests: 20,
+          FanoutScanIncomplete: 1,
+        });
+      });
+
+      it('reads the window again when the allowance ended the read before its last page', async () => {
+        // Rows from 45 minutes back, so the next (wider) window still holds them all
+        current = harness(wideWindowTenant({ windowPages: 3, startMs: NOW - 45 * MINUTE }));
+        afterGap([{ at: new Date(NOW - 2 * MINUTE).toISOString(), requests: 18 }]);
+        const cut = await current.run();
+
+        expect(cut).toMatchObject({ outcome: 'ok', incomplete: true, traceRequests: 2 });
+        expect(traceRequests()).toBe(2);
+        // Not advanced: the unread rows are not skipped
+        expect(current.db.state?.last_window_end?.getTime()).toBe(NOW - 50 * MINUTE);
+        expect(logLines.join('\n')).toContain('the next scan reads this window again');
+
+        // Six minutes later the other scans' requests have aged out
+        jest.setSystemTime(NOW + 6 * MINUTE);
+        const again = await current.run();
+        expect(again.outcome).toBe('ok');
+        expect(again.traceRequests).toBeLessThanOrEqual(18);
+        expect(current.db.state?.last_window_end?.getTime()).toBe(NOW + 6 * MINUTE);
+      });
+
+      it('still advances a window cut short by the page cap, saying it was incomplete', async () => {
+        current = harness(wideWindowTenant({ windowPages: 6 }));
+        afterGap();
+        const summary = await current.run();
+        expect(summary).toMatchObject({ outcome: 'ok', incomplete: true });
+        expect(traceRequests()).toBeLessThanOrEqual(20);
+        expect(current.db.state?.last_window_end?.getTime()).toBe(NOW);
+      });
     });
 
     it('charges the whole allowance when the scan did not answer', async () => {

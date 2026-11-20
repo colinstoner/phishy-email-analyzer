@@ -495,7 +495,19 @@ async function scanAndAlert(
   // The window was read and every flag handled: the next scan starts from
   // here (less the overlap). Otherwise the window is read again next time,
   // and the waves already alerted are recognized and not alerted twice.
-  if (failures === 0) {
+  // Rows the request allowance left unread are read again too: the
+  // allowance is a rolling five minutes, so the next scan has room, and
+  // advancing would skip that mail flow without anyone seeing it. (A
+  // window cut short by the page cap still advances, disclosed as
+  // incomplete: reading it again would hit the same cap.)
+  const unreadByAllowance = result.windowUnread === 'request_allowance';
+  if (unreadByAllowance) {
+    logger.warn(
+      'Fan-out scan: the request allowance ran out before every page of the window was read; the next scan reads this window again',
+      { pages: result.pages, requestsUsed: result.requestsUsed, allowance: context.allowance }
+    );
+  }
+  if (failures === 0 && !unreadByAllowance) {
     context.advance(window.to);
   }
   return failures === 0 ? 'ok' : 'error';

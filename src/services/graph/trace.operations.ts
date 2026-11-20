@@ -104,6 +104,11 @@ export interface TraceOptions {
   signal?: AbortSignal;
   /** Injected for tests; defaults to the current time */
   now?: Date;
+  /**
+   * Asked before each page after the first (each is one more of the
+   * tenant's requests); false stops paging and the result is `truncated`
+   */
+  beforeNextPage?: () => boolean;
 }
 
 function resolveMaxPages(requested: number | undefined): number {
@@ -140,6 +145,7 @@ async function listTraces(
     maxPages: resolveMaxPages(options.maxPages),
     timeoutMs: options.timeoutMs,
     signal: options.signal,
+    ...(options.beforeNextPage ? { beforeNextPage: options.beforeNextPage } : {}),
   });
   return {
     items: parseItems(client, TRACE_PATH, MessageTraceSchema, result.items).map(toTrace),
