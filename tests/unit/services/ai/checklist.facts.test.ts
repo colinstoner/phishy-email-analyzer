@@ -120,7 +120,7 @@ describe('link_text_mismatch', () => {
     } as unknown as EmailMessage;
     const data = parser.extractEmailData(msg);
     expect(data.contentFindings?.anchors).toEqual(['displayed_domain']);
-    expect(data.contentFlags?.some(f => f.includes('portal.example.net'))).toBe(true);
+    expect(data.contentFlags?.some(f => /\bportal\.example\.net\b/.test(f))).toBe(true);
     expect(linkTextMismatch(data)).toBe('yes');
 
     const textOnly = parser.extractEmailData({ ...msg, html: '' } as EmailMessage);
