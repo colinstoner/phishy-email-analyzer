@@ -103,7 +103,10 @@ describe('buildFanoutAlert', () => {
       expect(body).toContain('behaviour-based flag');
       expect(body).toContain('not a verdict on');
       expect(body).toContain('No message was opened and no AI model was involved');
-      expect(body).toContain('2026-11-17T11:58:00.000Z');
+      // Times in the configured zone (UTC by default), never raw ISO strings
+      expect(body).toContain('Tue, 17 Nov 2026, 11:58 UTC');
+      expect(body).not.toContain('2026-11-17T11:58:00.000Z');
+      expect(body).toContain('Tue, 17 Nov 2026, 11:45 UTC to Tue, 17 Nov 2026, 12:00 UTC');
       expect(body).toContain('42 distinct internal recipients');
       expect(body).toContain('the mail filter already quarantined 6 and sent 5 to Junk Email');
       expect(body).toContain('30 reached a mailbox');
@@ -114,11 +117,24 @@ describe('buildFanoutAlert', () => {
       expect(body).toContain('Replying does not trigger any action');
       expect(body).toContain('40 more recipient(s) not listed');
       // The history that makes it anomalous, with the burst IPs for the security team
-      expect(body).toContain('established_with_anomalous_fanout');
+      expect(body).toContain(
+        'Established contact, unusual fan-out: a known sender suddenly mailing many people it never wrote to'
+      );
+      expect(body).not.toContain('established_with_anomalous_fanout');
       expect(body).toContain('203.0.113.7');
     }
     expect(text).toContain(FANOUT_MEANING);
     expect(FANOUT_BENIGN_EXPLANATIONS.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it('writes its times in the configured time zone', () => {
+    const { html, text } = buildFanoutAlert(input({ timeZone: 'America/Chicago' }));
+    for (const body of [html, text]) {
+      expect(body).toContain('Tue, 17 Nov 2026, 05:58 GMT-6');
+      expect(body).toContain('Tue, 17 Nov 2026, 05:45 GMT-6 to Tue, 17 Nov 2026, 06:00 GMT-6');
+      expect(body).not.toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/);
+    }
+    expect(text).toContain('First seen: Tue, 17 Nov 2026, 05:58 GMT-6');
   });
 
   it('marks an update and says how much the wave grew', () => {

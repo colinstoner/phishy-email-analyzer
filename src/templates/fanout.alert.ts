@@ -17,7 +17,11 @@ import type {
   FanoutIncompleteReason,
   FanoutStatusCounts,
 } from '../services/graph/fanout.scan';
-import { formatSenderHistoryLines } from '../utils/sender-history.format';
+import { displayTime } from '../services/response/display';
+import {
+  SENDER_RELATIONSHIP_LABEL,
+  formatSenderHistoryLines,
+} from '../utils/sender-history.format';
 import {
   Fact,
   TEXT_SUBRULE,
@@ -53,6 +57,8 @@ export interface FanoutAlertInput {
   incompleteReasons: FanoutIncompleteReason[];
   /** Present when blast radius is enabled */
   blastRadius?: BlastRadiusReport;
+  /** IANA time zone the alert's times are written in (default UTC) */
+  timeZone?: string;
 }
 
 export interface FanoutAlertEmail {
@@ -125,17 +131,27 @@ function deliverySummary(statuses: FanoutStatusCounts): string {
   );
 }
 
+/** A time as the security team reads it, in the configured zone (the raw value if unparseable) */
+function when(input: FanoutAlertInput, iso: string): string {
+  return displayTime(iso, input.timeZone ?? 'UTC') ?? iso;
+}
+
+/** The scanned window, both ends in the configured zone */
+function windowText(input: FanoutAlertInput): string {
+  return `${when(input, input.window.from)} to ${when(input, input.window.to)}`;
+}
+
 /** Label/value rows of what was seen. Values from mail flow are returned unescaped. */
 function seenRows(input: FanoutAlertInput): Fact[] {
   const { flag } = input;
   const rows: Fact[] = [
     { label: 'Sender (from mail flow)', value: flag.senderAddress },
     { label: 'Subject (from mail flow)', value: flag.subject || '(no subject)' },
-    { label: 'First seen', value: input.waveFirstSeen },
-    { label: 'Latest in this scan', value: flag.lastSeen },
+    { label: 'First seen', value: when(input, input.waveFirstSeen) },
+    { label: 'Latest in this scan', value: when(input, flag.lastSeen) },
     {
       label: 'This scan',
-      value: `${plural(flag.windowRecipients, 'distinct internal recipient')} (${plural(flag.windowMessages, 'message')}) between ${input.window.from} and ${input.window.to}`,
+      value: `${plural(flag.windowRecipients, 'distinct internal recipient')} (${plural(flag.windowMessages, 'message')}) from ${windowText(input)}`,
     },
     { label: 'Wave so far', value: plural(input.waveRecipients, 'distinct internal recipient') },
   ];
@@ -186,8 +202,13 @@ const GENERATED_BY =
  */
 export function buildFanoutAlert(input: FanoutAlertInput): FanoutAlertEmail {
   const { flag } = input;
+  // The classification in plain words: this email is read by people, not parsed
   const historyRows = formatSenderHistoryLines(flag.facts, { includeBurstIps: true }).map(
-    ([label, value]) => ({ label, value })
+    ([label, value]) => ({
+      label,
+      value:
+        label === 'Classification' ? SENDER_RELATIONSHIP_LABEL[flag.facts.classification] : value,
+    })
   );
   const incomplete = incompleteLine(input.incompleteReasons);
   const recipientRows: Array<[string, string]> = flag.recipients.map(recipient => [
@@ -261,7 +282,7 @@ export function buildFanoutAlert(input: FanoutAlertInput): FanoutAlertEmail {
     footer: [
       `Reference: ${input.reference}`,
       REPLY_NOTE,
-      `Scanned window: ${input.window.from} to ${input.window.to}`,
+      `Scanned window: ${windowText(input)}`,
       GENERATED_BY,
     ],
   });
@@ -311,7 +332,7 @@ export function buildFanoutAlert(input: FanoutAlertInput): FanoutAlertEmail {
     '',
     `Reference: ${input.reference}`,
     REPLY_NOTE,
-    `Scanned window: ${input.window.from} to ${input.window.to}`,
+    `Scanned window: ${windowText(input)}`,
     '',
     GENERATED_BY
   );

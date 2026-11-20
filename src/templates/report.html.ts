@@ -196,8 +196,13 @@ export function riskScoreHtml(risk: ReportRisk, options: { prominent?: boolean }
   const tone: Tone = describeVerdict(risk.verdict).tone;
   const score = Math.max(0, Math.min(100, risk.riskScore));
   return `<p class="ph-muted" style="margin:14px 0 0 0;font-family:${FONT};font-size:12px;line-height:16px;font-weight:700;letter-spacing:0.6px;text-transform:uppercase;color:${COLOR.muted};">Risk score</p>
-<p class="ph-ink-${tone}" style="margin:0;font-family:${FONT};color:${TONE[tone].ink};"><strong style="font-size:44px;line-height:50px;font-weight:800;">${risk.riskScore}</strong><span style="font-size:20px;line-height:50px;font-weight:600;">/100</span><span style="font-size:15px;line-height:50px;font-weight:700;">&nbsp;&nbsp;${escapeHtml(risk.riskLevel)} risk</span></p>
+<p class="ph-ink-${tone}" style="margin:0;font-family:${FONT};color:${TONE[tone].ink};"><strong style="font-size:44px;line-height:50px;font-weight:800;">${risk.riskScore}</strong><span style="font-size:20px;line-height:50px;font-weight:600;">/100</span><span style="font-size:15px;line-height:50px;font-weight:700;">&nbsp;&nbsp;${escapeHtml(riskLevelPhrase(risk.riskLevel))}</span></p>
 ${meter(score / 100, tone)}${confidenceHtml ? line(confidenceHtml) : ''}`;
+}
+
+/** The level beside the big number: "critical risk", "low risk", but plain "safe" */
+function riskLevelPhrase(level: string): string {
+  return level === 'safe' ? 'safe' : `${level} risk`;
 }
 
 /** A verdict's label, plain-language gloss and "what to do", as the report words them */
