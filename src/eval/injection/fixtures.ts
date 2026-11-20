@@ -93,6 +93,11 @@ function escapeXml(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+/** For a double-quoted attribute value */
+function escapeXmlAttribute(text: string): string {
+  return escapeXml(text).replace(/"/g, '&quot;');
+}
+
 export interface DocxOptions {
   paragraphs: string[];
   hyperlinks?: string[];
@@ -119,11 +124,11 @@ export function buildDocx(options: DocxOptions): Buffer {
   const rels = [
     ...(options.hyperlinks ?? []).map(
       (url, i) =>
-        `<Relationship Id="rIdL${i}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="${escapeXml(url)}" TargetMode="External"/>`
+        `<Relationship Id="rIdL${i}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="${escapeXmlAttribute(url)}" TargetMode="External"/>`
     ),
     ...(options.remoteTemplate
       ? [
-          `<Relationship Id="rIdT" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/attachedTemplate" Target="${escapeXml(options.remoteTemplate)}" TargetMode="External"/>`,
+          `<Relationship Id="rIdT" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/attachedTemplate" Target="${escapeXmlAttribute(options.remoteTemplate)}" TargetMode="External"/>`,
         ]
       : []),
   ].join('');

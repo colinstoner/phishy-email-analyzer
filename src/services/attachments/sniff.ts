@@ -395,9 +395,9 @@ export function sniffType(bytes: Buffer): RealType {
   const lower = text.toLowerCase();
   const trimmed = lower.trimStart();
   if (looksLikeEmail(text)) return 'eml';
-  if (/<svg[\s>]/.test(lower) && !/<html[\s>]/.test(lower)) return 'svg';
+  if (/<svg[\s>]/i.test(lower) && !/<html[\s>]/i.test(lower)) return 'svg';
   if (
-    /<!doctype\s+html|<html[\s>]|<head[\s>]|<body[\s>]|<script[\s>]|<form[\s>]|<meta[\s>]|<iframe[\s>]|<a\s[^>]*href|<div[\s>]|<table[\s>]|<p[\s>]|<img[\s>]|<input[\s>]|<style[\s>]|<title[\s>]/.test(
+    /<!doctype\s+html|<html[\s>]|<head[\s>]|<body[\s>]|<script[\s>]|<form[\s>]|<meta[\s>]|<iframe[\s>]|<a\s[^>]*href|<div[\s>]|<table[\s>]|<p[\s>]|<img[\s>]|<input[\s>]|<style[\s>]|<title[\s>]/i.test(
       lower
     )
   ) {
