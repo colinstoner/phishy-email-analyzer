@@ -352,8 +352,11 @@ function tally(
     }
     const recipient = row.recipientAddress?.toLowerCase() ?? '';
     const messageKey = row.messageId ?? row.id ?? `${row.receivedDateTime}`;
-    // Adjacent windows share their boundary second, so a row can arrive twice
-    const rowKey = row.id ?? `${messageKey}\n${recipient}\n${row.receivedDateTime}`;
+    // Adjacent windows share their boundary second, so a row can arrive twice.
+    // A trace row's `id` is NOT unique per recipient: rows for different
+    // recipients of one message can share it, so the recipient is always
+    // part of the key (keying on `id` alone drops most of a wave's recipients).
+    const rowKey = `${row.id ?? messageKey}\n${recipient}\n${row.receivedDateTime}`;
     if (seen.has(rowKey)) {
       continue;
     }

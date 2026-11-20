@@ -59,6 +59,9 @@ export function wave(
       {
         subject: options.subject ?? SUBJECT,
         messageId,
+        // As in real message trace: rows for the recipients of one message
+        // share a row id
+        id: `row-${messageId}`,
         status: options.status?.(i) ?? 'Delivered',
         fromIP: '203.0.113.7',
       }

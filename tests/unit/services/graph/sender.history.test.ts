@@ -270,6 +270,24 @@ describe('computeSenderHistoryFacts', () => {
       inboundRow(NOW - 6 * DAY, 'person1@example.com'),
     ];
 
+    it('counts every recipient when rows for one message share a trace row id', () => {
+      // Message trace gives rows for different recipients of one message the
+      // same `id`; keying on it alone would count one recipient per message
+      const shared = blast(40, { fromIP: '198.51.100.7' }).map((row, i) => ({
+        ...row,
+        id: `shared-${i % 4}`,
+        messageId: `<wave-${i % 4}@supplier.example.net>`,
+      }));
+      const facts = computeSenderHistoryFacts({
+        ...BASE,
+        inbound: rows([...history(), ...shared]),
+        outbound: rows([reply()]),
+      });
+      expect(facts.burst.recipients).toEqual({ count: 40, atLeast: false });
+      expect(facts.burst.messages).toEqual({ count: 4, atLeast: false });
+      expect(facts.classification).toBe('established_with_anomalous_fanout');
+    });
+
     it('flags one subject sent far beyond the usual reach of a sender we correspond with', () => {
       const facts = computeSenderHistoryFacts({
         ...BASE,
