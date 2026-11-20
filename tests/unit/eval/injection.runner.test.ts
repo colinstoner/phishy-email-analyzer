@@ -365,6 +365,7 @@ describe('parseEvalArgs', () => {
       region: 'us-east-1',
       modes: ['single'],
       effort: 'medium',
+      scoringMode: 'model',
       repeats: 1,
       concurrency: 4,
       filter: undefined,

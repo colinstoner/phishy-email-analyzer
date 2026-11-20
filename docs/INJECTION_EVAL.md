@@ -113,7 +113,8 @@ ANTHROPIC_API_KEY=... npm run eval:injection -- --provider anthropic --model <mo
 | `--region` | `PHISHY_AWS_REGION`, `AWS_REGION` | Bedrock region |
 | `--mode` | `single` | `single`, `agentic` or `both` |
 | `--effort` | `medium` | `low` or `medium`. Higher levels are rejected: the eval measures the deployed setting |
-| `--repeats` | 1 | Runs per case (1 to 20) |
+| `--repeats` | 1 | Runs per case (1 to 20). With 2 or more, a consistency table is printed (see [Comparing scoring modes](#comparing-scoring-modes)) |
+| `--scoring` | `model` | `model` or `checklist`: run the providers and risk fusion in that [scoring mode](ARCHITECTURE.md#checklist-scoring-experimental). The dry run builds and checks the checklist prompts too |
 | `--filter` | all | Comma-separated terms; a term is a category or part of a case id. Controls are added automatically |
 | `--no-profile` | off | Analyze without the invented organization profile |
 | `--refusal-fallback` | disabled | Retry refusals on this model, as production does |
@@ -174,6 +175,17 @@ Details that matter when reading a number:
 
 The JSON file has the same summaries plus every run: model verdict and risk, fused decision, signals, marker hits with snippets, tool calls (name and truncated input), token usage, estimated cost and latency. Runs are ordered by model, mode, case id and repeat. `caseSet.fingerprint` changes whenever a case changes, and `harnessVersion` whenever scoring changes (version 2 added the `warned` rule above), so compare runs only when both match.
 
+### Comparing scoring modes
+
+```bash
+npm run eval:injection -- --provider anthropic --model claude-opus-5-5 --filter benign_odd,control --repeats 5
+npm run eval:injection -- --provider anthropic --model claude-opus-5-5 --filter benign_odd,control --repeats 5 --scoring checklist
+```
+
+Every run in checklist mode records, besides `modelVerdict`, `modelRiskScore` (the model's own score) and `fused.riskScore` (the score shown), a `scoring` object: `basis` (`checklist`, or `model` when the checklist was unusable), `checklistStatus` (`ok`, `missing`, `malformed`), the validated `answers`, `checklistScore` (in the model verdict's band) and `checklistRawScore` (before the band). `options.scoringMode` and `options.checklistVersion` say which mode produced the file.
+
+The JSON always carries a `consistency` array, one entry per model, mode and case: `shownScore`, `modelScore` and `checklistRawScore` as `{min, max, spread}` over the runs that returned a verdict, `verdicts` (count per shown verdict), `modalVerdict`, `verdictChanges` (runs whose shown verdict differs from the most common one), `checklistItemsVaried` (items whose answer was not the same in every run) and `checklistFallbacks`. With `--repeats` of 2 or more the console prints the same as a table (case ids, numbers and verdict labels only). A spread of 0 in checklist mode with a non-zero `verdictChanges` means the answers were stable and the verdict was not; `checklistRawScore` shows where the checklist alone would have put the email.
+
 ## Cost
 
 Use `--dry-run --model <id> --mode <mode>` for an estimate before a run.
@@ -188,6 +200,7 @@ Four padding cases account for roughly a quarter of the input. Output is typical
 - Estimates use `src/utils/pricing.ts` and are deliberately high (3 characters per token). Reported costs use the token counts the API returns.
 - A failed analysis returns no usage, and an abandoned agentic loop loses its own; those runs are estimated and counted as such in the output.
 - Bedrock prices in `pricing.ts` are first-party list prices. Check your bill, not this number.
+- Checklist mode adds about 4,500 characters to every prompt (roughly 1,100 tokens) and is estimated at 250 extra output tokens per call.
 - `--max-cost-usd` is checked before each call against spend so far plus calls in flight. Controls are dispatched first, so a run that stops early still has baselines.
 
 ## Adding a case

@@ -5,6 +5,7 @@
 
 import { z } from 'zod';
 import { EFFORT_LEVELS } from '../services/ai/model.capabilities';
+import { SCORING_MODES } from '../services/ai/scoring.mode';
 
 /**
  * AI Provider configuration schemas
@@ -236,6 +237,18 @@ const AgenticConfigSchema = z.object({
   enabled: z.boolean().default(false),
   /** Maximum tool-use rounds before the model must deliver a verdict */
   maxToolRounds: z.number().int().min(1).max(10).default(5),
+});
+
+/**
+ * Risk-score mode (experimental). `model` (default): the score shown starts
+ * from the model's own free-form riskScore, exactly as before this setting
+ * existed. `checklist`: the model also answers a fixed checklist of
+ * observable questions and code computes the score from the answers
+ * (services/intelligence/checklist.score.ts); the model's own score is kept
+ * for comparison. A missing or malformed checklist falls back to `model`.
+ */
+const ScoringConfigSchema = z.object({
+  mode: z.enum(SCORING_MODES).default('model'),
 });
 
 /**
@@ -482,6 +495,7 @@ export const PhishyConfigSchema = z.object({
   commands: CommandsConfigSchema.optional(),
   reportButton: ReportButtonConfigSchema.optional(),
   agentic: AgenticConfigSchema.optional(),
+  scoring: ScoringConfigSchema.optional(),
   attachments: AttachmentsConfigSchema.optional(),
   graph: GraphConfigSchema.optional(),
   logLevel: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
@@ -504,6 +518,7 @@ export type CampaignCacheConfig = z.infer<typeof CampaignCacheConfigSchema>;
 export type CampaignResponseConfig = z.infer<typeof CampaignResponseConfigSchema>;
 export type CommandsConfig = z.infer<typeof CommandsConfigSchema>;
 export type AgenticConfig = z.infer<typeof AgenticConfigSchema>;
+export type ScoringConfig = z.infer<typeof ScoringConfigSchema>;
 export type AttachmentAnalysisConfig = z.infer<typeof AttachmentAnalysisConfigSchema>;
 export type GraphConfig = z.infer<typeof GraphConfigSchema>;
 export type GraphBrokerConfig = z.infer<typeof GraphBrokerConfigSchema>;

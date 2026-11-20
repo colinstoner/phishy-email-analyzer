@@ -70,6 +70,22 @@ export interface RunOutcome {
   modelVerdict?: string;
   modelRiskScore?: number;
   fused?: { verdict: string; riskScore: number; riskLevel: string; isPhishing: boolean };
+  /**
+   * Checklist scoring mode only. `fused.riskScore` is the score shown and
+   * `modelRiskScore` the model's own; this records what the shown score
+   * started from and the validated answers (closed values only).
+   */
+  scoring?: {
+    mode: 'checklist';
+    /** `model`: the checklist was unusable and the model's score was used */
+    basis: 'checklist' | 'model';
+    checklistStatus: 'ok' | 'missing' | 'malformed' | 'absent';
+    answers?: Record<string, string>;
+    /** The checklist score in the model verdict's band, before fusion */
+    checklistScore?: number;
+    /** The checklist score before the verdict band */
+    checklistRawScore?: number;
+  };
   /** Agentic mode: the tool loop was abandoned and the single-shot path answered */
   agenticAbandoned?: AbandonReason;
   toolCalls: ToolCallRecord[];
@@ -624,4 +640,100 @@ export function scoreRuns(
     groups.push(summarizeGroup(groupRuns[0].model, groupRuns[0].mode, cases, scoredGroup));
   }
   return { runs, groups };
+}
+
+/** Lowest, highest and the difference, over a set of scores */
+export interface ScoreSpread {
+  min: number;
+  max: number;
+  spread: number;
+}
+
+/**
+ * How repeatable one case was on one model and mode, over its repeats. Built
+ * for `--repeats N`: the same email should get the same verdict and score.
+ */
+export interface CaseConsistency {
+  model: string;
+  mode: EvalMode;
+  caseId: string;
+  /** Runs that returned a verdict; every figure below is over these */
+  runs: number;
+  /** Runs where the model produced no verdict (not part of the figures) */
+  failed: number;
+  /** The score shown in the report (`fused.riskScore`) */
+  shownScore: ScoreSpread | null;
+  /** The model's own riskScore */
+  modelScore: ScoreSpread | null;
+  /** Checklist mode: the checklist score before the verdict band */
+  checklistRawScore: ScoreSpread | null;
+  /** How many runs ended on each shown verdict */
+  verdicts: Record<string, number>;
+  /** The most common shown verdict (ties: alphabetical first) */
+  modalVerdict: string | null;
+  /** Runs whose shown verdict differs from the modal verdict */
+  verdictChanges: number;
+  /** Checklist mode: items whose answer was not the same in every run that had answers */
+  checklistItemsVaried: string[];
+  /** Checklist mode: runs whose shown score fell back to the model's own */
+  checklistFallbacks: number;
+}
+
+function spreadOf(values: number[]): ScoreSpread | null {
+  if (values.length === 0) return null;
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  return { min, max, spread: max - min };
+}
+
+/**
+ * Per model, mode and case: the spread of the shown score, the model's own
+ * score and (checklist mode) the raw checklist score, and how often the
+ * shown verdict differed from the most common one. Deterministic order.
+ */
+export function computeConsistency(outcomes: RunOutcome[]): CaseConsistency[] {
+  const groups = new Map<string, RunOutcome[]>();
+  for (const run of [...outcomes].sort(compareRuns)) {
+    const key = `${run.model}\u0000${run.mode}\u0000${run.caseId}`;
+    groups.set(key, [...(groups.get(key) ?? []), run]);
+  }
+
+  const result: CaseConsistency[] = [];
+  for (const runs of groups.values()) {
+    const ok = runs.filter(r => r.status === 'ok' && r.fused);
+    const verdicts: Record<string, number> = {};
+    for (const run of ok) {
+      const verdict = run.fused?.verdict ?? 'none';
+      verdicts[verdict] = (verdicts[verdict] ?? 0) + 1;
+    }
+    const ranked = Object.entries(verdicts).sort((a, b) => b[1] - a[1] || compareText(a[0], b[0]));
+    const modal = ranked[0];
+
+    const withAnswers = ok
+      .map(r => r.scoring?.answers)
+      .filter((a): a is Record<string, string> => a !== undefined);
+    const itemIds = [...new Set(withAnswers.flatMap(a => Object.keys(a)))];
+    const varied = itemIds.filter(id => new Set(withAnswers.map(a => a[id])).size > 1);
+
+    result.push({
+      model: runs[0].model,
+      mode: runs[0].mode,
+      caseId: runs[0].caseId,
+      runs: ok.length,
+      failed: runs.filter(r => r.status === 'analysis_failed').length,
+      shownScore: spreadOf(ok.map(r => r.fused?.riskScore ?? 0)),
+      modelScore: spreadOf(
+        ok.map(r => r.modelRiskScore).filter((v): v is number => typeof v === 'number')
+      ),
+      checklistRawScore: spreadOf(
+        ok.map(r => r.scoring?.checklistRawScore).filter((v): v is number => typeof v === 'number')
+      ),
+      verdicts,
+      modalVerdict: modal ? modal[0] : null,
+      verdictChanges: modal ? ok.length - modal[1] : 0,
+      checklistItemsVaried: varied,
+      checklistFallbacks: ok.filter(r => r.scoring?.basis === 'model').length,
+    });
+  }
+  return result;
 }

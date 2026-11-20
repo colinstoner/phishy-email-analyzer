@@ -64,6 +64,12 @@ export interface ReportOptions {
     /** What decided the outcome; drives the confidence line's wording */
     confidenceBasis?:
       'model' | 'security_team' | 'threat_intel' | 'attachment_inspection' | 'unassessed';
+    /**
+     * Checklist scoring mode only: fixed-wording reasons derived from the
+     * checklist answers, written by code. When set, the "why" list shows
+     * these in place of the model's free-text indicators.
+     */
+    checklistReasons?: string[];
   };
   /**
    * Who reads this particular email, when it is not the usual combined one
@@ -575,9 +581,10 @@ function buildAnalysisSection(analysis: AnalysisResult, options?: ReportOptions)
     html += `<p><strong>Summary:</strong> ${escapeHtml(analysis.summary)}</p>`;
   }
 
-  // Why Phishy reached this verdict — the model's indicators plus the
+  // Why Phishy reached this verdict — the model's indicators (or, in
+  // checklist scoring mode, the checklist's fixed reasons) plus the
   // intelligence reasons behind the score.
-  const whyItems = [...(analysis.indicators ?? [])];
+  const whyItems = whyBase(analysis, options);
   if (options?.risk?.reasons.length) {
     whyItems.push(...options.risk.reasons);
   }
@@ -613,6 +620,15 @@ function buildAnalysisSection(analysis: AnalysisResult, options?: ReportOptions)
   }
 
   return html;
+}
+
+/**
+ * The first part of the "why" list: the checklist's code-written reasons in
+ * checklist scoring mode, otherwise the model's indicators.
+ */
+function whyBase(analysis: AnalysisResult, options?: ReportOptions): string[] {
+  const checklistReasons = options?.risk?.checklistReasons;
+  return checklistReasons ? [...checklistReasons] : [...(analysis.indicators ?? [])];
 }
 
 /** Pick the "how to spot it" tips for the threat vectors in this assessment */
@@ -680,8 +696,8 @@ export function buildPlainTextReport(
     lines.push('');
   }
 
-  // Why we flagged it (indicators + intelligence reasons)
-  const whyItems = [...(analysis.indicators ?? [])];
+  // Why we flagged it (indicators or checklist reasons + intelligence reasons)
+  const whyItems = whyBase(analysis, options);
   if (options?.risk?.reasons.length) {
     whyItems.push(...options.risk.reasons);
   }

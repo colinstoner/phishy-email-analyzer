@@ -93,6 +93,9 @@ const ENV_MAPPINGS: Record<string, string> = {
   PHISHY_AGENTIC_ENABLED: 'agentic.enabled',
   PHISHY_AGENTIC_MAX_TOOL_ROUNDS: 'agentic.maxToolRounds',
 
+  // Risk-score mode (experimental): model | checklist
+  PHISHY_SCORING_MODE: 'scoring.mode',
+
   // Static attachment analysis
   PHISHY_ATTACHMENT_ANALYSIS_ENABLED: 'attachments.analysis.enabled',
   PHISHY_ATTACHMENT_ANALYSIS_TIME_BUDGET_MS: 'attachments.analysis.timeBudgetMs',

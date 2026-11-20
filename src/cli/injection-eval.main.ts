@@ -39,7 +39,15 @@ import {
   prepareCases,
 } from '../eval/injection/prepare';
 import { RunnerResult, planSummary, runEval } from '../eval/injection/runner';
-import { GroupSummary, ScoredRun, scoreRuns } from '../eval/injection/scorer';
+import {
+  CaseConsistency,
+  GroupSummary,
+  ScoredRun,
+  computeConsistency,
+  scoreRuns,
+} from '../eval/injection/scorer';
+import { SCORING_MODES, ScoringMode } from '../services/ai/scoring.mode';
+import { CHECKLIST_VERSION } from '../services/ai/checklist';
 
 export const USAGE = `Usage: npm run eval:injection -- [options]
 
@@ -53,7 +61,10 @@ What to run:
   --region <region>       Bedrock region                   [PHISHY_AWS_REGION, AWS_REGION]
   --mode <mode>           single | agentic | both          (default: single)
   --effort <level>        low | medium                     (default: medium)
-  --repeats <n>           Runs per case                    (default: 1)
+  --repeats <n>           Runs per case                    (default: 1); with 2 or
+                          more, a consistency table per case is printed
+  --scoring <mode>        model | checklist                (default: model)
+                          checklist: the experimental checklist scoring mode
   --filter <terms>        Comma-separated: a category, or part of a case id
   --no-profile            Analyze without the invented organization profile
   --refusal-fallback <id> Retry refusals on this model     (default: disabled, so
@@ -102,6 +113,8 @@ export interface EvalArguments {
   modes: EvalMode[];
   /** Never above medium: the eval measures the deployed configuration, not a stronger one */
   effort: 'low' | 'medium';
+  /** Risk-score mode the providers and fusion run in */
+  scoringMode: ScoringMode;
   repeats: number;
   concurrency: number;
   filter?: string;
@@ -157,6 +170,7 @@ export function parseEvalArgs(
         mode: { type: 'string' },
         effort: { type: 'string' },
         repeats: { type: 'string' },
+        scoring: { type: 'string' },
         filter: { type: 'string' },
         'no-profile': { type: 'boolean' },
         'refusal-fallback': { type: 'string' },
@@ -199,6 +213,10 @@ export function parseEvalArgs(
   if (effort !== 'low' && effort !== 'medium') {
     throw new UsageError('--effort must be low or medium (the eval never runs above medium)');
   }
+  const scoring = text('scoring') ?? 'model';
+  if (!SCORING_MODES.includes(scoring as ScoringMode)) {
+    throw new UsageError('--scoring must be model or checklist');
+  }
   const mode = text('mode') ?? 'single';
   if (mode !== 'both' && !EVAL_MODES.includes(mode as EvalMode)) {
     throw new UsageError('--mode must be single, agentic or both');
@@ -227,6 +245,7 @@ export function parseEvalArgs(
       fromEnv('AWS_DEFAULT_REGION'),
     modes: mode === 'both' ? [...EVAL_MODES] : [mode as EvalMode],
     effort,
+    scoringMode: scoring as ScoringMode,
     repeats: parseNumber(text('repeats'), 'repeats', 1, { min: 1, max: 20, integer: true }),
     concurrency: parseNumber(text('concurrency'), 'concurrency', DEFAULT_CONCURRENCY, {
       min: 1,
@@ -289,10 +308,16 @@ function countCases(cases: EvalCase[]): string {
 export function renderDryRun(
   caseSet: CaseSet,
   prepared: PreparedCase[],
-  plan: ReturnType<typeof planSummary>
+  plan: ReturnType<typeof planSummary>,
+  scoringMode: ScoringMode = 'model'
 ): string {
   const lines = [
     `Case set ${caseSet.fingerprint.slice(0, 12)}: ${countCases(prepared.map(p => p.evalCase))}`,
+    ...(scoringMode === 'checklist'
+      ? [
+          `Scoring: checklist (version ${CHECKLIST_VERSION}); prompts below include the checklist instructions`,
+        ]
+      : []),
     '',
     `${pad('CATEGORY', 24)}${pad('CASES', 7, true)}${pad('DELIVERED', 11, true)}${pad('PROMPT CHARS', 14, true)}`,
     '-'.repeat(56),
@@ -416,6 +441,53 @@ function renderGroup(group: GroupSummary): string[] {
   return lines;
 }
 
+function spreadText(spread: CaseConsistency['shownScore']): string {
+  return spread ? `${spread.min}-${spread.max} (${spread.spread})` : '-';
+}
+
+/**
+ * The consistency table for `--repeats` of 2 or more: per case, the spread of
+ * the shown score and of the model's own, and how many runs ended on a
+ * verdict other than the most common one. Case ids, numbers and verdict
+ * labels only.
+ */
+export function renderConsistency(entries: CaseConsistency[]): string {
+  const lines: string[] = [];
+  const groups = new Map<string, CaseConsistency[]>();
+  for (const entry of entries) {
+    const key = `${entry.model}\u0000${entry.mode}`;
+    groups.set(key, [...(groups.get(key) ?? []), entry]);
+  }
+  for (const group of groups.values()) {
+    const checklist = group.some(e => e.checklistRawScore !== null || e.checklistFallbacks > 0);
+    lines.push(
+      '',
+      `CONSISTENCY  MODEL ${group[0].model}   MODE ${group[0].mode}`,
+      `${pad('CASE', 32)}${pad('RUNS', 6, true)}  ${pad('SHOWN min-max (spread)', 24)}${pad('MODEL min-max (spread)', 24)}${
+        checklist ? pad('CHECKLIST RAW', 16) : ''
+      }${pad('CHANGED', 9)}VERDICTS`
+    );
+    for (const e of group) {
+      const verdicts = Object.entries(e.verdicts)
+        .map(([verdict, count]) => `${verdict} x${count}`)
+        .join(', ');
+      lines.push(
+        `${pad(e.caseId, 32)}${pad(e.runs, 6, true)}  ${pad(spreadText(e.shownScore), 24)}${pad(
+          spreadText(e.modelScore),
+          24
+        )}${checklist ? pad(spreadText(e.checklistRawScore), 16) : ''}${pad(
+          `${e.verdictChanges}/${e.runs}`,
+          9
+        )}${verdicts || '-'}${e.failed > 0 ? ` (${e.failed} failed)` : ''}${
+          e.checklistFallbacks > 0 ? ` (${e.checklistFallbacks} fell back to model score)` : ''
+        }`
+      );
+    }
+  }
+  lines.push('', 'CHANGED: runs whose verdict differs from the most common verdict for that case.');
+  return lines.join('\n');
+}
+
 /** The console table: one block per model and mode. Case ids and counts only. */
 export function renderResults(groups: GroupSummary[], result: RunnerResult): string {
   const lines = groups.flatMap(renderGroup);
@@ -459,6 +531,7 @@ function realProviderFactory(
             modelId: model,
             effort: args.effort,
             refusalFallbackModel: args.refusalFallbackModel,
+            scoringMode: args.scoringMode,
           },
           extractor,
           profile
@@ -469,6 +542,7 @@ function realProviderFactory(
             model,
             effort: args.effort,
             refusalFallbackModel: args.refusalFallbackModel,
+            scoringMode: args.scoringMode,
           },
           extractor,
           profile
@@ -524,6 +598,7 @@ export async function runCli(argv: string[], io: EvalIo): Promise<number> {
     parser,
     profile,
     reporter: caseSet.reporter,
+    scoringMode: args.scoringMode,
   });
 
   // An unsound case would be billed and then mis-scored: stop before any call
@@ -537,9 +612,12 @@ export async function runCli(argv: string[], io: EvalIo): Promise<number> {
     models: args.models.length > 0 ? args.models : ['(no --model: Opus-tier fallback rates)'],
     modes: args.modes,
     repeats: args.repeats,
+    scoringMode: args.scoringMode,
   };
   if (args.dryRun) {
-    io.stdout(renderDryRun(caseSet, prepared, planSummary(prepared, planOptions)));
+    io.stdout(
+      renderDryRun(caseSet, prepared, planSummary(prepared, planOptions), args.scoringMode)
+    );
     return EXIT_OK;
   }
 
@@ -557,6 +635,7 @@ export async function runCli(argv: string[], io: EvalIo): Promise<number> {
     repeats: args.repeats,
     concurrency: args.concurrency,
     effort: args.effort,
+    scoringMode: args.scoringMode,
     maxCostUsd: args.maxCostUsd,
     saveRaw: args.saveRaw,
     profile,
@@ -572,6 +651,7 @@ export async function runCli(argv: string[], io: EvalIo): Promise<number> {
   const { runs, groups } = scoreRuns(selected, result.outcomes, {
     riskDropThreshold: args.riskDropThreshold,
   });
+  const consistency = computeConsistency(result.outcomes);
 
   const outPath = resolve(
     args.out ??
@@ -586,6 +666,7 @@ export async function runCli(argv: string[], io: EvalIo): Promise<number> {
     stoppedForBudget: boolean;
     estimatedSpendUsd: number;
     summaries: GroupSummary[];
+    consistency: CaseConsistency[];
     runs: ScoredRun[];
   } = {
     harnessVersion: 2,
@@ -596,6 +677,8 @@ export async function runCli(argv: string[], io: EvalIo): Promise<number> {
       models: args.models,
       modes: args.modes,
       effort: args.effort,
+      scoringMode: args.scoringMode,
+      ...(args.scoringMode === 'checklist' ? { checklistVersion: CHECKLIST_VERSION } : {}),
       repeats: args.repeats,
       filter: args.filter ?? null,
       profile: args.useProfile,
@@ -612,11 +695,15 @@ export async function runCli(argv: string[], io: EvalIo): Promise<number> {
     stoppedForBudget: result.stoppedForBudget,
     estimatedSpendUsd: result.estimatedSpendUsd,
     summaries: groups,
+    consistency,
     runs,
   };
   await (io.writeTextFile ?? writeResults)(outPath, `${JSON.stringify(document, null, 2)}\n`);
 
   io.stdout(renderResults(groups, result));
+  if (args.repeats > 1) {
+    io.stdout(renderConsistency(consistency));
+  }
   io.stdout(`\nResults written to ${outPath}`);
 
   const errors = groups.reduce((sum, group) => sum + group.errors, 0);

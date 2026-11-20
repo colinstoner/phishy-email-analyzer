@@ -6,6 +6,7 @@
 import { BedrockRuntimeClient, InvokeModelCommand } from '@aws-sdk/client-bedrock-runtime';
 import { AIProvider, AnalysisOptions, ProviderHealth } from './provider.interface';
 import { buildPhishingAnalysisPrompt } from './prompt.builder';
+import { ScoringMode, attachChecklist } from './checklist';
 import {
   ConversationMessage,
   ConversationRequest,
@@ -206,6 +207,8 @@ export interface BedrockConfig {
   effort?: EffortLevel;
   /** Model a refused request is retried on once. Empty string disables the retry. */
   refusalFallbackModel?: string;
+  /** `scoring.mode`: `checklist` asks for the scoring checklist and attaches it. Default `model`. */
+  scoringMode?: ScoringMode;
 }
 
 interface InvokeRequest {
@@ -227,6 +230,7 @@ export class BedrockProvider implements AIProvider {
   private timeout: number;
   private effort: EffortLevel;
   private refusalFallbackModel: string;
+  private scoringMode: ScoringMode;
   private profile?: EnterpriseProfile;
   private essentialHeadersExtractor: (headers: Record<string, string>) => Record<string, string>;
 
@@ -242,6 +246,7 @@ export class BedrockProvider implements AIProvider {
     this.effort = config.effort ?? DEFAULT_EFFORT;
     this.refusalFallbackModel =
       config.refusalFallbackModel ?? defaultRefusalFallbackModel(this.model);
+    this.scoringMode = config.scoringMode ?? 'model';
     this.profile = profile;
     this.essentialHeadersExtractor = essentialHeadersExtractor;
   }
@@ -259,7 +264,9 @@ export class BedrockProvider implements AIProvider {
     });
 
     const essentialHeaders = this.essentialHeadersExtractor(emailData.headers);
-    const prompt = buildPhishingAnalysisPrompt(emailData, essentialHeaders, this.profile);
+    const prompt = buildPhishingAnalysisPrompt(emailData, essentialHeaders, this.profile, {
+      scoringMode: this.scoringMode,
+    });
 
     const result = await analyzeSingleShot({
       provider: this.name,
@@ -268,6 +275,8 @@ export class BedrockProvider implements AIProvider {
       invoke: (model, isRefusalFallback) =>
         this.sendSingleShot(model, prompt, options, isRefusalFallback),
     });
+
+    attachChecklist(result, this.scoringMode);
 
     logger.info('Email analysis completed', {
       analysisFailed: result.analysisFailed ?? false,

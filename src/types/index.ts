@@ -3,6 +3,7 @@
  */
 
 import type { AttachmentInspection } from '../services/attachments/types';
+import type { ChecklistOutcome } from '../services/ai/checklist';
 
 /**
  * Email message structure as received from various sources
@@ -353,6 +354,12 @@ export interface AnalysisResult {
   tokenUsage?: TokenUsage;
   /** Agentic analysis: which tools the model consulted, in call order */
   toolsUsed?: string[];
+  /**
+   * Checklist scoring mode only (`scoring.mode: checklist`): the model's
+   * answers to the scoring checklist, or why there are none. Absent in the
+   * default model scoring mode.
+   */
+  checklist?: ChecklistOutcome;
 }
 
 /**

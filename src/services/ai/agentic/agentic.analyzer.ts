@@ -19,6 +19,7 @@ import { AnalysisResult, ExtractedEmailData, TokenUsage } from '../../../types';
 import { EnterpriseProfile } from '../../../models/profile.model';
 import { AIProvider, parseAnalysisResponse } from '../provider.interface';
 import { buildPhishingAnalysisPrompt } from '../prompt.builder';
+import { ScoringMode, attachChecklist } from '../checklist';
 import {
   ConversationMessage,
   ContentBlockParam,
@@ -42,11 +43,14 @@ export interface AgenticAnalyzerConfig {
   maxToolRounds?: number;
   /** Extracts the headers worth showing the model from the full header set */
   essentialHeadersExtractor: (headers: Record<string, string>) => Record<string, string>;
+  /** `scoring.mode`: `checklist` asks for the scoring checklist and attaches it. Default `model`. */
+  scoringMode?: ScoringMode;
 }
 
 export class AgenticAnalyzer {
   private maxToolRounds: number;
   private essentialHeadersExtractor: AgenticAnalyzerConfig['essentialHeadersExtractor'];
+  private scoringMode: ScoringMode;
 
   constructor(
     private executor: AgenticToolExecutor,
@@ -54,6 +58,7 @@ export class AgenticAnalyzer {
   ) {
     this.maxToolRounds = config.maxToolRounds ?? DEFAULT_MAX_TOOL_ROUNDS;
     this.essentialHeadersExtractor = config.essentialHeadersExtractor;
+    this.scoringMode = config.scoringMode ?? 'model';
   }
 
   /**
@@ -77,7 +82,9 @@ export class AgenticAnalyzer {
     const tools = this.executor.getToolDefinitions();
 
     const essentialHeaders = this.essentialHeadersExtractor(emailData.headers);
-    const prompt = buildPhishingAnalysisPrompt(emailData, essentialHeaders, profile);
+    const prompt = buildPhishingAnalysisPrompt(emailData, essentialHeaders, profile, {
+      scoringMode: this.scoringMode,
+    });
 
     const messages: ConversationMessage[] = [{ role: 'user', content: prompt }];
     const usage: TokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
@@ -141,6 +148,7 @@ export class AgenticAnalyzer {
         }
         result.tokenUsage = usage.totalTokens > 0 ? usage : undefined;
         result.toolsUsed = toolsUsed;
+        attachChecklist(result, this.scoringMode);
 
         logger.info('Agentic analysis completed', {
           isPhishing: result.isPhishing,
