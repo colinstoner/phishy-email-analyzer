@@ -818,8 +818,9 @@ export class EmailParserService {
       /-------- Original Message --------\s*\n([\s\S]*?)(?:\n\n|\r\n\r\n|$)/i,
       /Begin forwarded message:\s*\n([\s\S]*?)(?:\n\n|\r\n\r\n|$)/i,
       // Outlook style: no marker line — match through the end of the Subject
-      // line so its value is part of the captured block
-      /From:.*\r?\nSent:.*\r?\nTo:.*\r?\n(?:Cc:.*\r?\n)?Subject:.*/i,
+      // line so its value is part of the captured block. Outlook for Windows
+      // and the web write "Sent:", Outlook for Mac writes "Date:".
+      /From:.*\r?\n(?:Sent|Date):.*\r?\nTo:.*\r?\n(?:Cc:.*\r?\n)?Subject:.*/i,
     ];
 
     let headerBlock = '';
