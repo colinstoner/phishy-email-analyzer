@@ -4,7 +4,7 @@
  * name. No S3 config is loaded and no secret is resolved.
  */
 
-import { ENV_MAPPINGS, envValueKind, loadConfig } from '../../../src/config';
+import { ENV_MAPPINGS, envValueKind, loadConfig, parseEnvValue } from '../../../src/config';
 
 const TENANT_ID = 'aaaaaaaa-1111-4222-8333-bbbbbbbbbbbb';
 const CLIENT_ID = 'cccccccc-4444-4555-8666-dddddddddddd';
@@ -77,7 +77,7 @@ const PLAUSIBLE: Record<string, string> = {
   PHISHY_GRAPH_SENDER_HISTORY_BURST_WINDOW_HOURS: '24',
   PHISHY_GRAPH_SENDER_HISTORY_BUDGET_MS: '8000',
   PHISHY_GRAPH_SENDER_HISTORY_FANOUT_MIN_RECIPIENTS: '15',
-  PHISHY_GRAPH_SENDER_HISTORY_FANOUT_MULTIPLIER: '3',
+  PHISHY_GRAPH_SENDER_HISTORY_FANOUT_MULTIPLIER: '2.5',
   PHISHY_GRAPH_FANOUT_SCAN_ENABLED: 'true',
   PHISHY_GRAPH_FANOUT_SCAN_OVERLAP_MINUTES: '10',
   PHISHY_GRAPH_FANOUT_SCAN_MAX_WINDOW_MINUTES: '60',
@@ -149,6 +149,65 @@ describe('ENV_MAPPINGS', () => {
     expect(config.graph?.read?.clientId).toBe(CLIENT_ID);
     expect(config.campaignResponse?.maxWarningsPerCampaign).toBe(100);
     expect(config.attachments?.analysis?.maxDepth).toBe(3);
+  });
+
+  it('accepts a decimal for a decimal setting', async () => {
+    process.env.ANTHROPIC_API_KEY = 'test-key';
+    process.env.SENDER_EMAIL = 'phishy@example.com';
+    process.env.PHISHY_GRAPH_SENDER_HISTORY_FANOUT_MULTIPLIER = '2.5';
+    process.env.PHISHY_CAMPAIGN_RESPONSE_APPROVAL_TTL_HOURS = '0.5';
+
+    const config = await loadConfig();
+
+    expect(config.graph?.senderHistory?.fanoutMultiplier).toBe(2.5);
+    expect(config.campaignResponse?.approvalTtlHours).toBe(0.5);
+  });
+
+  it('still rejects a decimal for an integer setting', async () => {
+    process.env.ANTHROPIC_API_KEY = 'test-key';
+    process.env.SENDER_EMAIL = 'phishy@example.com';
+    process.env.PHISHY_AGENTIC_MAX_TOOL_ROUNDS = '2.5';
+
+    await expect(loadConfig()).rejects.toThrow('Invalid configuration');
+  });
+
+  it('never converts string settings that look numeric or boolean', async () => {
+    process.env.ANTHROPIC_API_KEY = '0123456789';
+    process.env.SENDER_EMAIL = 'phishy@example.com';
+    process.env.SES_CONFIG_SET = '007';
+    process.env.PHISHY_GRAPH_BROKER_FUNCTION = '123456789012';
+    process.env.CLAUDE_MODEL = '2.5';
+    process.env.PHISHY_AI_REFUSAL_FALLBACK_MODEL = 'true';
+    process.env.PHISHY_PROFILE = '0044';
+
+    const config = await loadConfig();
+
+    expect(config.ai.anthropic?.apiKey).toBe('0123456789');
+    expect(config.ai.anthropic?.model).toBe('2.5');
+    expect(config.ai.refusalFallbackModel).toBe('true');
+    expect(config.notification.sesConfigSet).toBe('007');
+    expect(config.graph?.brokerFunctionName).toBe('123456789012');
+    expect(config.profile).toBe('0044');
+  });
+
+  it('decides each conversion from the target field', () => {
+    expect(parseEnvValue('graph.senderHistory.fanoutMultiplier', '2.5')).toBe(2.5);
+    expect(parseEnvValue('graph.senderHistory.fanoutMultiplier', ' 3 ')).toBe(3);
+    expect(parseEnvValue('agentic.maxToolRounds', '07')).toBe(7);
+    expect(parseEnvValue('agentic.maxToolRounds', '1e3')).toBe('1e3');
+    expect(parseEnvValue('agentic.maxToolRounds', 'five')).toBe('five');
+    expect(parseEnvValue('graph.tenantId', '00000000')).toBe('00000000');
+    expect(parseEnvValue('graph.read.clientId', '1234')).toBe('1234');
+    expect(parseEnvValue('agentic.enabled', 'TRUE')).toBe(true);
+    expect(parseEnvValue('agentic.enabled', 'False')).toBe(false);
+    expect(parseEnvValue('agentic.enabled', 'yes')).toBe('yes');
+    expect(parseEnvValue('campaignAlerts.distributionList', 'a@example.com,b@example.com')).toBe(
+      'a@example.com,b@example.com'
+    );
+    expect(parseEnvValue('email.safeDomains', ' example.com ,, example.org')).toEqual([
+      'example.com',
+      'example.org',
+    ]);
   });
 
   it('keeps PHISHY_CAMPAIGN_ALERTS_DISTRIBUTION a single address', async () => {

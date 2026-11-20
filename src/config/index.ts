@@ -482,28 +482,32 @@ export function envValueKind(configPath: string): EnvValueKind {
   }
 }
 
+/** A plain decimal number: digits, optionally a fractional part, optionally negative */
+const DECIMAL_NUMBER = /^-?\d+(?:\.\d+)?$/;
+
 /**
- * Parse environment variable value to appropriate type
+ * Parse an environment variable's value into the type its target field
+ * expects. Conversion is decided by the schema, so string fields (IDs,
+ * account numbers, model IDs, GUIDs, values with leading zeros) are never
+ * turned into numbers or booleans. A value that does not fit is passed on
+ * unchanged and fails validation with the field's own message.
  */
-function parseEnvValue(configPath: string, value: string): unknown {
-  // Boolean values
-  if (value.toLowerCase() === 'true') return true;
-  if (value.toLowerCase() === 'false') return false;
-
-  // Comma-separated arrays, for the fields the schema declares as lists
-  if (envValueKind(configPath) === 'list') {
-    return value
-      .split(',')
-      .map(s => s.trim())
-      .filter(Boolean);
+export function parseEnvValue(configPath: string, value: string): unknown {
+  switch (envValueKind(configPath)) {
+    case 'list':
+      return value
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean);
+    case 'boolean':
+      if (value.toLowerCase() === 'true') return true;
+      if (value.toLowerCase() === 'false') return false;
+      return value;
+    case 'number':
+      return DECIMAL_NUMBER.test(value.trim()) ? Number(value.trim()) : value;
+    default:
+      return value;
   }
-
-  // Numbers
-  if (/^\d+$/.test(value)) {
-    return parseInt(value, 10);
-  }
-
-  return value;
 }
 
 /**

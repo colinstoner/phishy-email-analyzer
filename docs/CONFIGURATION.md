@@ -32,9 +32,7 @@ When the same setting is defined in more than one place, the highest wins:
 
 There is no local configuration file in the deployed function: `config/phishy.config.json` is only a convenient place to keep a file before uploading it to S3 (it is gitignored). A Secrets Manager ARN in `PHISHY_DB_CONNECTION` is resolved after the sources are merged; one in `PHISHY_GRAPH_READ_CERTIFICATE` on the first Graph call.
 
-Environment variables are parsed as follows: `true` / `false` become booleans, a value made only of digits becomes an integer, and the variables whose setting is a list (`SAFE_DOMAINS`, `SAFE_SENDERS`, `SECURITY_TEAM_DISTRIBUTION`, `SAFE_SENDER_SECURITY`) are split on commas. Every other variable, including `PHISHY_CAMPAIGN_ALERTS_DISTRIBUTION`, is a single value.
-
-- A setting that takes a decimal (`PHISHY_GRAPH_SENDER_HISTORY_FANOUT_MULTIPLIER`) accepts only whole numbers from the environment; put a value such as `2.5` in the S3 file.
+Environment variables are converted according to the setting they map to: for an on/off setting `true` / `false` (any case) become booleans; for a numeric setting a plain decimal such as `30` or `2.5` becomes a number (whole-number settings still reject `2.5`); the settings that are lists (`SAFE_DOMAINS`, `SAFE_SENDERS`, `SECURITY_TEAM_DISTRIBUTION`, `SAFE_SENDER_SECURITY`) are split on commas. Every other variable, including `PHISHY_CAMPAIGN_ALERTS_DISTRIBUTION`, IDs and model names, is kept as the exact string given.
 
 The SAM template has no parameter for a configuration file. To use one with it, add `PHISHY_CONFIG_S3` to the function's environment in `template.yaml`; an object under `profiles/` in the stack's email bucket is already readable by the function's role.
 
