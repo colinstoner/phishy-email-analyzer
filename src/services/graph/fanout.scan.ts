@@ -247,7 +247,9 @@ export function groupInboundRows(
     ) {
       continue;
     }
-    const rowKey = row.id ?? `${row.messageId ?? ''}\n${recipient}\n${row.receivedDateTime}`;
+    // A trace row's `id` can be shared by rows for different recipients of
+    // one message, so the recipient is always part of the key
+    const rowKey = `${row.id ?? row.messageId ?? ''}\n${recipient}\n${row.receivedDateTime}`;
     if (seen.has(rowKey)) {
       continue;
     }
