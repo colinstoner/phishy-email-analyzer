@@ -221,6 +221,26 @@ export interface LinkFact {
   raw: string;
   canonical: string;
   flags: string[];
+  /** Set when the canonical destination is a file share on a known hosting platform */
+  fileShare?: FileShareFact;
+}
+
+/**
+ * What a file-share link's host and path reveal about where the file is
+ * hosted (src/utils/file-share.ts). Every string field comes from the URL,
+ * which the sender wrote: each is shape-checked, and is hostile data.
+ */
+export interface FileShareFact {
+  /** Hosting platform, from a fixed list */
+  platform: string;
+  /** Whose space: a person's site, a team/organization site, a consumer account, or not shown */
+  space: 'personal' | 'team' | 'consumer' | 'unknown';
+  /** Tenant or account label from the host (SharePoint tenant, Box/Egnyte/ShareFile subdomain) */
+  tenantLabel?: string;
+  /** SharePoint/OneDrive personal site owner segment: the owner's sign-in name, `@` and `.` written as `_` */
+  ownerSegment?: string;
+  /** Google Workspace domain from an `/a/<domain>/` path */
+  ownerDomain?: string;
 }
 
 /**
