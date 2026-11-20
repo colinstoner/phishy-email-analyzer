@@ -24,6 +24,7 @@
   },
   "notification": {
     "senderEmail": "phishy@yourcompany.com",
+    "replyToEmail": "phishy@yourcompany.com",
     "senderName": "Phishy Security",
     "securityTeamDistribution": ["security-team@yourcompany.com"],
     "sesConfigSet": "phishy-config-set"

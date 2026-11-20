@@ -308,6 +308,7 @@ async function initializeServices(): Promise<{
   const sesNotifier = new SESNotifier({
     region: config.storage.region,
     senderEmail: config.notification.senderEmail,
+    replyToEmail: config.notification.replyToEmail,
     senderName: config.notification.senderName,
     securityTeamDistribution: config.notification.securityTeamDistribution,
     configSet: config.notification.sesConfigSet,

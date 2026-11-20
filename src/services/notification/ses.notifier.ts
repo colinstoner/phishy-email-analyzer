@@ -15,6 +15,8 @@ const logger = createLogger('ses-notifier');
 export interface SESNotifierConfig {
   region: string;
   senderEmail: string;
+  /** Sets `Reply-To` on everything sent, so replies reach Phishy's inbox */
+  replyToEmail?: string;
   senderName?: string;
   securityTeamDistribution?: string[];
   configSet?: string;
@@ -31,6 +33,7 @@ export function sesMessageIdDomain(region: string): string {
 export class SESNotifier {
   private client: SES;
   private senderEmail: string;
+  private replyToEmail?: string;
   private senderName: string;
   private securityTeamDistribution: string[];
   private configSet?: string;
@@ -40,6 +43,11 @@ export class SESNotifier {
     this.client = new SES({ region: config.region });
     this.region = config.region;
     this.senderEmail = config.senderEmail;
+    // One plain address or nothing: it becomes a header value
+    this.replyToEmail =
+      config.replyToEmail && /^[^\s<>,;"]+@[^\s<>,;"]+$/.test(config.replyToEmail)
+        ? config.replyToEmail
+        : undefined;
     this.senderName = config.senderName ?? 'Phishy';
     this.securityTeamDistribution = config.securityTeamDistribution ?? [];
     this.configSet = config.configSet;
@@ -116,6 +124,7 @@ export class SESNotifier {
       async () => {
         const params = {
           Source: `"${this.senderName}" <${this.senderEmail}>`,
+          ReplyToAddresses: this.replyToEmail ? [this.replyToEmail] : undefined,
           Destination: {
             ToAddresses: [recipient],
             CcAddresses: ccAddresses?.length ? ccAddresses : undefined,
@@ -187,6 +196,7 @@ export class SESNotifier {
     const fromName = this.senderName.replace(/["\r\n\\]/g, '');
     const mime = [
       `From: "${fromName}" <${this.senderEmail}>`,
+      ...(this.replyToEmail ? [`Reply-To: <${this.replyToEmail}>`] : []),
       `To: ${to.join(', ')}`,
       `Subject: ${encodedSubject}`,
       'MIME-Version: 1.0',

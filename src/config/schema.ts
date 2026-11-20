@@ -73,6 +73,13 @@ const EmailConfigSchema = z.object({
  */
 const NotificationConfigSchema = z.object({
   senderEmail: z.string().email('Valid sender email required'),
+  /**
+   * Where replies to Phishy's emails go (a `Reply-To` header). Set it to the
+   * address Phishy receives mail at when the sender address is not that
+   * address (a no-reply sender, for example): the command channel works by
+   * reply, so without it a verdict or approval never reaches Phishy.
+   */
+  replyToEmail: z.string().email('Valid reply-to email required').optional(),
   senderName: z.string().default('Phishy'),
   securityTeamDistribution: z.array(z.string().email()).default([]),
   safeSenderSecurity: z.array(z.string().email()).default([]),

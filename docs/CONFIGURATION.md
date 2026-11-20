@@ -83,6 +83,7 @@ Refusals in the `reasoning_extraction` category are not retried: they mean the p
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SENDER_EMAIL` | - | From address for notification emails |
+| `REPLY_TO_EMAIL` | - | `Reply-To` for everything Phishy sends. Set it to the address Phishy receives mail at when `SENDER_EMAIL` is a different address (a no-reply sender): the command channel works by reply. The SAM template sets it to `RecipientEmail` when `EmailCommandsEnabled` is true |
 | `SECURITY_TEAM_DISTRIBUTION` | - | Comma-separated CC recipients for enterprise users |
 | `SAFE_SENDER_SECURITY` | - | Comma-separated CC recipients for safelist users (optional, separate from enterprise) |
 | `SES_CONFIG_SET` | - | Optional SES configuration set |
