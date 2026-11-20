@@ -157,7 +157,8 @@ function statusRows(statuses: FanoutStatusCounts): Fact[] {
   }));
 }
 
-function incompleteLine(reasons: FanoutIncompleteReason[]): string | undefined {
+/** The scan-incomplete sentence (also used in a scan-opened incident's reasons) */
+export function incompleteLine(reasons: FanoutIncompleteReason[]): string | undefined {
   if (reasons.length === 0) {
     return undefined;
   }

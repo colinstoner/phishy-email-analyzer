@@ -22,6 +22,10 @@
  *   under the tenant's 100 per 5 minutes and apart from the on-report
  *   checks' own allowance; a scan has a hard time budget; a scan that finds
  *   the previous one still running does nothing.
+ * - **One email per wave.** With campaign response on, a flagged wave opens
+ *   (or updates) a campaign-response incident and the incident email takes
+ *   the alert's place; the plain alert is sent only when no incident email
+ *   went out (tables missing, the incident is closed, or the send failed).
  * - Never throws; emits one `FanoutScans` metric line per invocation.
  */
 
@@ -39,7 +43,14 @@ import { FanoutFlag, FanoutScanResult } from '../graph/fanout.scan';
 import type { FanoutScanSource } from '../graph/fanout.source';
 import type { GraphGateway } from '../graph/graph.gateway';
 import { DEFAULT_FANOUT_MIN_RECIPIENTS, subjectGroupKey } from '../graph/sender.history';
-import { buildFanoutAlert } from '../../templates/fanout.alert';
+import { computeCampaignSignature } from '../intelligence/database.service';
+import type { CampaignResponseService } from '../response/campaign.response.service';
+import type { FanoutIncidentInput } from '../response/response.types';
+import {
+  FANOUT_NOT_A_VERDICT,
+  buildFanoutAlert,
+  incompleteLine,
+} from '../../templates/fanout.alert';
 import {
   AlertClaim,
   FANOUT_MIGRATION,
@@ -102,6 +113,11 @@ export interface FanoutJobDeps {
   };
   /** For the blast-radius section, when that feature is on */
   graph?: Pick<GraphGateway, 'blastRadius' | 'lookupBlastRadius'>;
+  /**
+   * Campaign response, when it is enabled: a flagged wave opens (or
+   * updates) an incident, whose email replaces the alert
+   */
+  campaignResponse?: Pick<CampaignResponseService, 'openIncidentFromFanoutAlert'>;
   /** Injected for tests */
   now?: () => number;
   newToken?: () => string;
@@ -131,6 +147,98 @@ export function blastRadiusEmailFor(flag: FanoutFlag, firstSeen: string): Extrac
     original_sender: '',
     originalForwarder: '',
     links: [],
+  };
+}
+
+/**
+ * The domain a report of this wave will most likely come from. A report's
+ * campaign signature is computed from the reporting employee's own address
+ * (the SES envelope sender) and the subject, so a scan-opened incident must
+ * use the domain the recipients' own addresses carry for a later report to
+ * find it: the most common domain among the listed recipients that is one
+ * of the organization's domains (ties: the first in configuration order,
+ * then alphabetical), else the first configured domain. Recipient addresses
+ * are mail-flow data, used here only as a grouping key and compared to
+ * operator configuration.
+ */
+export function likelyReporterDomain(flag: FanoutFlag, safeDomains: string[]): string {
+  const configured = safeDomains.map(domain => domain.toLowerCase());
+  const counts = new Map<string, number>();
+  for (const recipient of flag.recipients) {
+    const domain = recipient.address.slice(recipient.address.lastIndexOf('@') + 1).toLowerCase();
+    const internal = configured.some(
+      safe => domain === safe || (domain.endsWith(`.${safe}`) && domain.length > safe.length + 1)
+    );
+    if (internal) {
+      counts.set(domain, (counts.get(domain) ?? 0) + 1);
+    }
+  }
+  const rank = (domain: string): number => {
+    const index = configured.indexOf(domain);
+    return index === -1 ? configured.length : index;
+  };
+  const best = [...counts.entries()].sort(
+    ([a, countA], [b, countB]) => countB - countA || rank(a) - rank(b) || a.localeCompare(b)
+  )[0];
+  return best?.[0] ?? configured[0] ?? 'unknown';
+}
+
+function bounded(count: { count: number; atLeast: boolean } | null): string {
+  if (!count) {
+    return 'unknown';
+  }
+  return `${count.atLeast ? 'at least ' : ''}${count.count}`;
+}
+
+/**
+ * What campaign response is given for a flagged wave. Every line here is
+ * written by code from counts; the sender and subject travel only as the
+ * incident's own (escaped, defanged) sender and subject fields.
+ */
+export function fanoutIncidentInput(
+  deps: Pick<FanoutJobDeps, 'config'>,
+  flag: FanoutFlag,
+  wave: {
+    claim: Exclude<AlertClaim, { kind: 'none' }>;
+    waveRecipients: number;
+    waveFirstSeen: string;
+    incompleteReasons: FanoutScanResult['incompleteReasons'];
+    blastRadius?: BlastRadiusReport;
+  }
+): FanoutIncidentInput {
+  const { facts, statuses } = flag;
+  const incomplete = incompleteLine(wave.incompleteReasons);
+  const reasons = [
+    `The fan-out scan saw one external sender reach ${wave.waveRecipients} internal recipient(s) ` +
+      `(${flag.windowRecipients} in the scanned window, in ${flag.windowMessages} message(s)).`,
+    ...(incomplete ? [incomplete] : []),
+    `Sender history: two-way contact in the last ${facts.lookbackDays} days ` +
+      `(${bounded(facts.twoWay.messages)} message(s) sent to it by ${bounded(facts.twoWay.internalSenders)} of our people), ` +
+      `usually reaching ${bounded(facts.history.recipients)} recipient(s); this subject reached ` +
+      `${bounded(facts.burst.sameSubject.recipients)}, ${bounded(facts.burst.sameSubject.newRecipients)} of them new to it.`,
+    `Delivery in the scanned window: ${statuses.delivered} reached a mailbox, ${statuses.quarantined} quarantined, ` +
+      `${statuses.junk} sent to Junk Email, ${statuses.failed} failed.`,
+    FANOUT_NOT_A_VERDICT,
+  ];
+  const changes =
+    wave.claim.kind === 'growth'
+      ? [
+          `The fan-out scan has now seen it reach ${wave.waveRecipients} internal recipient(s); the previous fan-out sighting reported ${wave.claim.previousRecipients}.`,
+        ]
+      : [
+          `The fan-out scan saw it reach ${wave.waveRecipients} internal recipient(s) in mail-flow records.`,
+        ];
+  return {
+    campaignSignature: computeCampaignSignature(
+      likelyReporterDomain(flag, deps.config.email.safeDomains),
+      flag.subject
+    ),
+    subject: flag.subject,
+    senderAddress: flag.senderAddress,
+    firstDeliveryAt: wave.waveFirstSeen,
+    ...(wave.blastRadius ? { reach: wave.blastRadius } : {}),
+    reasons,
+    changes: incomplete ? [...changes, incomplete] : changes,
   };
 }
 
@@ -439,6 +547,44 @@ async function alertOnFlag(
       remainingMs: context.remaining(),
     });
     context.summary.traceRequests += BLAST_RADIUS_TRACE_REQUEST_ESTIMATE;
+  }
+
+  if (deps.campaignResponse) {
+    const incident = await deps.campaignResponse.openIncidentFromFanoutAlert(
+      fanoutIncidentInput(deps, flag, {
+        claim,
+        waveRecipients,
+        waveFirstSeen,
+        incompleteReasons: scan.incompleteReasons,
+        blastRadius,
+      })
+    );
+    if (incident && (incident.email === 'opened' || incident.email === 'updated')) {
+      // The incident email is the one email about this wave
+      context.summary.alertsSent++;
+      logger.info('Fan-out wave sent to the security team as a campaign-response incident', {
+        reference: claim.reference,
+        incident: incident.reference,
+        kind: claim.kind,
+        email: incident.email,
+        recipients: waveRecipients,
+      });
+      return;
+    }
+    if (incident?.email === 'unchanged') {
+      logger.info('Fan-out wave already in its incident; nothing new to send', {
+        reference: claim.reference,
+        incident: incident.reference,
+      });
+      return;
+    }
+    // No incident email went out (tables missing, the incident is closed or
+    // a false positive, or the send failed): the plain alert, exactly as
+    // with campaign response off
+    logger.warn('Fan-out wave: no incident email was sent; sending the plain fan-out alert', {
+      reference: claim.reference,
+      incident: incident ? incident.email : 'unavailable',
+    });
   }
 
   const email = buildFanoutAlert({

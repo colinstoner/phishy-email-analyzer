@@ -174,14 +174,15 @@ export async function handler(event: SESEvent, _context: Context): Promise<APIGa
 
 /**
  * The initialized services a scheduled task needs (`scheduled.handler.ts`):
- * the same configuration, notifier, database and Graph gateway the email
- * pipeline uses, built once per instance
+ * the same configuration, notifier, database, Graph gateway and (when
+ * enabled) campaign response the email pipeline uses, built once per instance
  */
 export async function scheduledTaskServices(): Promise<{
   config: PhishyConfig;
   sesNotifier: SESNotifier;
   intelligenceDb?: IntelligenceDatabaseService;
   graph: GraphGateway;
+  campaignResponse?: CampaignResponseService;
 }> {
   const { config, services } = await initializeServices();
   return {
@@ -189,6 +190,7 @@ export async function scheduledTaskServices(): Promise<{
     sesNotifier: services.sesNotifier,
     intelligenceDb: services.intelligenceDb,
     graph: services.graph,
+    ...(services.campaignResponse ? { campaignResponse: services.campaignResponse } : {}),
   };
 }
 

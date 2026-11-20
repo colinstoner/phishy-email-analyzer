@@ -301,10 +301,40 @@ export interface FanoutIncidentInput {
   senderName?: string;
   /** Earliest delivery the scan saw (ISO) */
   firstDeliveryAt?: string;
-  /** The scan's reach: same shape as a blast-radius report */
-  reach: BlastRadiusReport;
+  /**
+   * The scan's reach: same shape as a blast-radius report. Absent when blast
+   * radius is not enabled (the incident then says so and proposes no
+   * targeted warning).
+   */
+  reach?: BlastRadiusReport;
   /** Code-written reasons the scan alerted (e.g. "reached 48 people in 6 minutes") */
   reasons: string[];
   /** The scan's own 0-100 score, when it has one (no model verdict exists yet) */
   riskScore?: number;
+  /**
+   * Code-written lines saying what is new, for when the incident already
+   * exists and has been emailed (opened by reports, or by an earlier scan
+   * sighting): they become a threaded update. Without them an existing
+   * incident only takes the new reach.
+   */
+  changes?: string[];
+}
+
+/**
+ * What `openIncidentFromFanoutAlert` sent the security team:
+ * - `opened`: the opening incident email (a new incident, or one whose first
+ *   email had never gone out)
+ * - `updated`: a threaded update to the incident's existing email
+ * - `unchanged`: nothing; the incident exists, was emailed, and no change
+ *   lines were given
+ * - `closed`: nothing; the incident is a false positive or closed
+ * - `not_sent`: the email failed; the caller should tell the team another way
+ */
+export type FanoutIncidentEmail = 'opened' | 'updated' | 'unchanged' | 'closed' | 'not_sent';
+
+export interface FanoutIncidentOutcome {
+  incidentId: string;
+  reference: string;
+  created: boolean;
+  email: FanoutIncidentEmail;
 }

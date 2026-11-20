@@ -189,6 +189,8 @@ When on, each campaign becomes an **incident**:
 
 `audience` decides who is warned. The default, `distribution`, keeps today's broadcast. Choose `recipients` (or `both`) to warn the people who actually received it; that needs [blast radius](#blast-radius-optional). `employeeWarning` decides whether the targeted warning waits for an approval (`approve`, the default), goes out at once (`auto`) or never (`off`); `distributionWarning` does the same for the broadcast (default `auto`, as before). An approval is good for `approvalTtlHours` and applies to its own campaign only; a late approval is proposed again under a new reference.
 
+**Fan-out trigger.** With the [scheduled fan-out scan](#scheduled-fan-out-scan-optional) on too, a wave the scan flags opens an incident before anyone reports it (zero reports, every action waiting for approval), and that incident email replaces the scan's own alert. Reports of the same email join it later.
+
 Requires campaign alerts (`PHISHY_CAMPAIGN_ALERTS_ENABLED`), the intelligence database, `migrations/006_campaign_response.sql` (applied manually; without it Phishy logs which migration to apply and behaves as with campaign response off), and the email command channel for approvals. Migration 003 is needed for a `false positive` reply to close an incident.
 
 | Variable | Config key | Default | Description |
@@ -514,6 +516,8 @@ File configuration uses `graph.fanoutScan.*` (`enabled`, `overlapMinutes`, `maxW
 - `ExchangeMessageTrace.Read.All` on the read app registration, as for the sender-relationship check.
 - **The intelligence database, with `migrations/005_fanout_scan.sql` applied manually.** The scan keeps its lock, its window, its request log and the alerted waves there ([DATABASE.md](DATABASE.md)). Without the database it does not run: each scheduled invocation logs what to configure and emits `Outcome=no_database`; without the migration, `Outcome=migration_missing` and a log line naming the file.
 - `SECURITY_TEAM_DISTRIBUTION`: the only recipients of the alert. With it empty the scan does not run.
+
+**With campaign response on** (`PHISHY_CAMPAIGN_RESPONSE_ENABLED`, see [Campaign Response](#campaign-response-optional)), a flagged wave opens a campaign-response incident and the security team gets the **incident email instead of the alert**: one email per wave, with the scan's findings, the reach and proposed actions (always waiting for approval: nothing goes to employees from a scan on its own). A wave that grows materially becomes an update in that incident's thread, and an employee report of the same email later joins the incident. The plain alert is still sent when no incident email went out (migration 006 not applied, the incident is closed or a false positive, or the send failed). No new setting.
 - `SAFE_DOMAINS` decide what "internal" means: a recipient on one of them (or a subdomain) is internal, a sender on none of them is external. In broker mode they are sent to the broker in the scan request.
 - A schedule that invokes the **main** function every 5 minutes (or so) with exactly this payload: `{"phishyScheduledTask": "graph_fanout_scan", "version": 1}`. The SAM template can create it ([AWS.md](../AWS.md)). Any other payload carrying `phishyScheduledTask` is refused; an EventBridge rule without this constant input does nothing.
 

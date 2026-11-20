@@ -22,18 +22,36 @@ type Store = typeof import('../../../../src/services/hunting/fanout.store');
 type Db = typeof import('../../../mocks/fanout.db');
 type Tenant = typeof import('../../../mocks/fanout.tenant');
 type Fake = typeof import('../../../mocks/graph.fake');
+type Response = typeof import('../../../../src/services/response/campaign.response.service');
+type FakeStoreModule = typeof import('../response/fake.store');
+type Intel = typeof import('../../../../src/services/intelligence/database.service');
+type Schema = typeof import('../../../../src/config/schema');
 
 const savedLevel = process.env.LOG_LEVEL;
 process.env.LOG_LEVEL = 'debug';
 jest.resetModules();
 /* eslint-disable @typescript-eslint/no-require-imports */
 const { createFanoutScanSource } = require('../../../../src/services/graph') as Graph;
-const { blastRadiusEmailFor, fanoutWindow, runFanoutScan } =
+const { blastRadiusEmailFor, fanoutWindow, likelyReporterDomain, runFanoutScan } =
   require('../../../../src/services/hunting/fanout.job') as Job;
+const { CampaignResponseService } =
+  require('../../../../src/services/response/campaign.response.service') as Response;
+const { FakeResponseStore } = require('../response/fake.store') as FakeStoreModule;
+const { computeCampaignSignature } =
+  require('../../../../src/services/intelligence/database.service') as Intel;
+const { DEFAULT_ALREADY_CLICKED_INSTRUCTIONS } = require('../../../../src/config/schema') as Schema;
 const { isMaterialGrowth } = require('../../../../src/services/hunting/fanout.store') as Store;
 const { FakeFanoutDb: FakeDb } = require('../../../mocks/fanout.db') as Db;
-const { NOW, SENDER, establishedHistory, fanoutResponder, takeoverTenant, traceRow, wave } =
-  require('../../../mocks/fanout.tenant') as Tenant;
+const {
+  NOW,
+  SENDER,
+  SUBJECT,
+  establishedHistory,
+  fanoutResponder,
+  takeoverTenant,
+  traceRow,
+  wave,
+} = require('../../../mocks/fanout.tenant') as Tenant;
 const { fakeGraph } = require('../../../mocks/graph.fake') as Fake;
 /* eslint-enable @typescript-eslint/no-require-imports */
 process.env.LOG_LEVEL = savedLevel;
@@ -503,6 +521,280 @@ describe('runFanoutScan', () => {
     await current.run();
     const logged = logLines.join('\n');
     expect(logged).toContain('Fan-out alert sent to the security team');
+    expect(logged).not.toContain(SENDER);
+    expect(logged).not.toContain('remittance');
+    expect(logged).not.toContain('person1@example.com');
+  });
+});
+
+describe('likelyReporterDomain', () => {
+  const flagWith = (addresses: string[]): Parameters<typeof likelyReporterDomain>[0] =>
+    ({
+      recipients: addresses.map(address => ({ address, status: 'delivered' })),
+    }) as never;
+
+  it('is the domain most of the recipients carry', () => {
+    const flag = flagWith(['a@example.org', 'b@example.org', 'c@example.com']);
+    expect(likelyReporterDomain(flag, ['example.com', 'example.org'])).toBe('example.org');
+  });
+
+  it('keeps a subdomain as it is, since that is what a report from it carries', () => {
+    const flag = flagWith(['a@eu.example.com', 'b@eu.example.com']);
+    expect(likelyReporterDomain(flag, ['example.com'])).toBe('eu.example.com');
+  });
+
+  it('breaks ties by configuration order and ignores domains that are not ours', () => {
+    const flag = flagWith(['a@example.org', 'b@example.com', 'c@outside.example.net']);
+    expect(likelyReporterDomain(flag, ['example.com', 'example.org'])).toBe('example.com');
+  });
+
+  it('falls back to the first configured domain when no recipient is listed', () => {
+    expect(likelyReporterDomain(flagWith([]), ['Example.com', 'example.org'])).toBe('example.com');
+  });
+});
+
+describe('runFanoutScan with campaign response', () => {
+  const REPORTER = 'reporter@example.com';
+
+  interface ResponseHarness {
+    store: InstanceType<typeof FakeResponseStore>;
+    service: InstanceType<typeof CampaignResponseService>;
+    sendThreadedEmail: jest.Mock;
+  }
+
+  /** The real service over an in-memory store, sending through the job's own mock */
+  function campaignResponse(
+    options: { employeeWarning?: 'approve' | 'auto'; audience?: 'recipients' | 'both' } = {}
+  ): ResponseHarness {
+    const store = new FakeResponseStore(() => new Date(Date.now()));
+    const sendThreadedEmail = jest
+      .fn()
+      .mockResolvedValue({ success: true, messageId: 'ses-thread-1' });
+    const service = new CampaignResponseService({
+      store: store.asStore(),
+      mailer: { sendEmail: current.sendEmail, sendThreadedEmail },
+      config: {
+        enabled: true,
+        audience: options.audience ?? 'recipients',
+        employeeWarning: options.employeeWarning ?? 'approve',
+        distributionWarning: 'auto',
+        approvalTtlHours: 4,
+        maxWarningsPerCampaign: 100,
+        maxRemovalMailboxes: 500,
+        maxRemovalMessages: 1000,
+        updateIntervalMinutes: 30,
+        reachThreshold: 5,
+        alreadyClickedInstructions: DEFAULT_ALREADY_CLICKED_INSTRUCTIONS,
+        timeZone: 'UTC',
+      },
+      safeDomains: ['example.com'],
+      securityTeam: SECURITY_TEAM,
+      distributionList: 'everyone@example.com',
+      commandsEnabled: true,
+      legacyAlert: jest.fn().mockResolvedValue(false),
+      markCampaignAlerted: jest.fn().mockResolvedValue(undefined),
+      now: () => new Date(Date.now()),
+    });
+    return { store, service, sendThreadedEmail };
+  }
+
+  function sentSubjects(): string[] {
+    return current.sendEmail.mock.calls.map(call => call[1] as string);
+  }
+
+  function employeeEmails(): unknown[] {
+    return current.sendEmail.mock.calls.filter(call => !SECURITY_TEAM.includes(call[0] as string));
+  }
+
+  /** What the email pipeline computes for a forwarded report (lambda.handler.ts) */
+  function reportSignature(reporter: string, forwardSubject: string): string {
+    return computeCampaignSignature(reporter.split('@')[1] ?? 'unknown', forwardSubject);
+  }
+
+  const blastReport = (): BlastRadiusReport => ({
+    status: 'complete',
+    route: 'trace',
+    totals: { recipients: 3, read: 1, replied: 0, forwarded: 0 },
+    recipients: [1, 2, 3].map(n => ({
+      address: `person${n}@example.com`,
+      mailbox: 'found' as const,
+      folder: 'inbox' as const,
+      isRead: n === 1,
+      response: 'none' as const,
+      mailboxId: `${String(n).padStart(8, '0')}-1111-4111-8111-111111111111`,
+      messageIds: [`AAMkAG-${n}`],
+      receivedAt: new Date(NOW - 2 * MINUTE).toISOString(),
+    })),
+    lookedUpAt: new Date(NOW).toISOString(),
+  });
+
+  it('opens one incident and sends its email instead of a separate alert', async () => {
+    const response = campaignResponse();
+    const summary = await current.run({ campaignResponse: response.service });
+
+    expect(summary).toMatchObject({ outcome: 'ok', flagged: 1, alertsSent: 1 });
+    // One email to the security team, and it is the incident email
+    expect(current.sendEmail).toHaveBeenCalledTimes(1);
+    const [to, subject, , text, cc] = current.sendEmail.mock.calls[0] as [
+      string,
+      string,
+      string,
+      string,
+      string[],
+    ];
+    expect([to, ...cc]).toEqual(SECURITY_TEAM);
+    expect(subject).not.toMatch(/fan-out alert/);
+    expect(text).toContain('Reports so far: 0');
+    expect(text).toContain(
+      'The fan-out scan saw one external sender reach 20 internal recipient(s)'
+    );
+    expect(text).toContain('No message was opened and no AI model was involved');
+
+    expect(response.store.incidents).toHaveLength(1);
+    expect(response.store.incidents[0]).toMatchObject({ trigger: 'fanout_scan', reportCount: 0 });
+    // The wave is claimed and the window advanced, exactly as for an alert
+    expect(current.db.waves).toHaveLength(1);
+    expect(current.db.state?.last_window_end?.getTime()).toBe(NOW);
+    expect(employeeEmails()).toEqual([]);
+  });
+
+  it('never sends to employees without approval, even with warnings set to auto', async () => {
+    const response = campaignResponse({ employeeWarning: 'auto', audience: 'both' });
+    const lookupBlastRadius = jest.fn().mockResolvedValue(blastReport());
+    await current.run({
+      campaignResponse: response.service,
+      graph: { blastRadius: true, lookupBlastRadius },
+    });
+
+    expect(current.sendEmail).toHaveBeenCalledTimes(1);
+    expect(employeeEmails()).toEqual([]);
+    const proposals = response.store.actions.filter(action => action.status === 'proposed');
+    expect(proposals.length).toBeGreaterThan(0);
+    expect(proposals.every(action => action.authorization === 'approve')).toBe(true);
+    expect(response.store.incidents[0].reach.recipients).toHaveLength(3);
+  });
+
+  it('files the incident where a later forwarded report of the same email finds it', async () => {
+    const response = campaignResponse();
+    await current.run({ campaignResponse: response.service });
+
+    const signature = reportSignature(REPORTER, `FW: ${SUBJECT}`);
+    expect(response.store.incidents[0].campaignSignature).toBe(signature);
+    expect(await response.store.getIncidentBySignature(signature)).toBeDefined();
+  });
+
+  it('sends a material growth as an update in the incident thread, not a second alert', async () => {
+    const response = campaignResponse();
+    await current.run({ campaignResponse: response.service });
+    expect(current.sendEmail).toHaveBeenCalledTimes(1);
+    const incident = response.store.incidents[0];
+
+    const history = establishedHistory();
+    jest.setSystemTime(NOW + 5 * MINUTE);
+    const bigger = wave(45);
+    current.tenant = {
+      windowPages: [bigger],
+      inbound: { [SENDER]: [...history.inbound, ...bigger] },
+      outbound: { [SENDER]: history.outbound },
+    };
+    const summary = await current.run({ campaignResponse: response.service });
+
+    expect(summary.alertsSent).toBe(1);
+    expect(current.sendEmail).toHaveBeenCalledTimes(1);
+    expect(response.sendThreadedEmail).toHaveBeenCalledTimes(1);
+    const [recipients, , , text, inReplyTo] = response.sendThreadedEmail.mock.calls[0] as [
+      string[],
+      string,
+      string,
+      string,
+      string,
+    ];
+    expect(recipients).toEqual(SECURITY_TEAM);
+    expect(inReplyTo).toBe(incident.threadMessageId);
+    expect(text).toContain(
+      'The fan-out scan has now seen it reach 45 internal recipient(s); the previous fan-out sighting reported 20.'
+    );
+    expect(response.store.incidents).toHaveLength(1);
+    expect(current.db.waves[0].alerted_recipients).toBe(45);
+  });
+
+  it('sends nothing more for a sighting without material growth', async () => {
+    const response = campaignResponse();
+    await current.run({ campaignResponse: response.service });
+    jest.setSystemTime(NOW + 5 * MINUTE);
+    await current.run({ campaignResponse: response.service });
+    expect(current.sendEmail).toHaveBeenCalledTimes(1);
+    expect(response.sendThreadedEmail).not.toHaveBeenCalled();
+  });
+
+  it('sends the plain alert when the campaign-response tables are missing, and says what to apply', async () => {
+    const response = campaignResponse();
+    response.store.unavailable = true;
+    const summary = await current.run({ campaignResponse: response.service });
+
+    expect(summary).toMatchObject({ outcome: 'ok', alertsSent: 1 });
+    expect(current.sendEmail).toHaveBeenCalledTimes(1);
+    expect(sentSubjects()[0]).toMatch(/^Phishy fan-out alert FANOUT-/);
+    expect(logLines.join('\n')).toContain('migrations/006_campaign_response.sql');
+    expect(current.db.state?.last_window_end?.getTime()).toBe(NOW);
+  });
+
+  it('sends the plain alert when the incident email fails', async () => {
+    const response = campaignResponse();
+    current.sendEmail.mockResolvedValueOnce({ success: false, error: 'Throttling' });
+    const summary = await current.run({ campaignResponse: response.service });
+
+    expect(summary).toMatchObject({ outcome: 'ok', alertsSent: 1 });
+    expect(current.sendEmail).toHaveBeenCalledTimes(2);
+    expect(sentSubjects()[1]).toMatch(/^Phishy fan-out alert FANOUT-/);
+    expect(current.db.waves).toHaveLength(1);
+  });
+
+  it('holds the window and the claim when nothing could be sent, then sends the incident email', async () => {
+    const response = campaignResponse();
+    current.sendEmail
+      .mockResolvedValueOnce({ success: false, error: 'Throttling' })
+      .mockResolvedValueOnce({ success: false, error: 'Throttling' });
+    const failed = await current.run({ campaignResponse: response.service });
+
+    expect(failed).toMatchObject({ outcome: 'error', alertsSent: 0 });
+    expect(current.db.waves).toHaveLength(0);
+    expect(current.db.state?.last_window_end).toBeNull();
+
+    jest.setSystemTime(NOW + 5 * MINUTE);
+    const retried = await current.run({ campaignResponse: response.service });
+    expect(retried).toMatchObject({ outcome: 'ok', alertsSent: 1 });
+    expect(current.sendEmail).toHaveBeenCalledTimes(3);
+    // The incident's opening email, which never went out the first time
+    expect(sentSubjects()[2]).not.toMatch(/fan-out alert/);
+    expect(response.store.incidents).toHaveLength(1);
+    expect(current.db.waves).toHaveLength(1);
+  });
+
+  it('sends the plain alert for a wave whose incident was ruled a false positive', async () => {
+    const response = campaignResponse();
+    await current.run({ campaignResponse: response.service });
+    response.store.incidents[0].status = 'false_positive';
+
+    jest.setSystemTime(NOW + 25 * 60 * MINUTE);
+    const history = establishedHistory();
+    const later = wave(20, { atMs: NOW + 25 * 60 * MINUTE - 2 * MINUTE });
+    current.tenant = {
+      windowPages: [later],
+      inbound: { [SENDER]: [...history.inbound, ...later] },
+      outbound: { [SENDER]: history.outbound },
+    };
+    await current.run({ campaignResponse: response.service });
+    expect(current.sendEmail).toHaveBeenCalledTimes(2);
+    expect(sentSubjects()[1]).toMatch(/^Phishy fan-out alert FANOUT-/);
+    expect(response.sendThreadedEmail).not.toHaveBeenCalled();
+  });
+
+  it('logs no sender, subject or recipient address', async () => {
+    const response = campaignResponse();
+    await current.run({ campaignResponse: response.service });
+    const logged = logLines.join('\n');
+    expect(logged).toContain('as a campaign-response incident');
     expect(logged).not.toContain(SENDER);
     expect(logged).not.toContain('remittance');
     expect(logged).not.toContain('person1@example.com');
