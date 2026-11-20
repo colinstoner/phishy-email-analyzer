@@ -76,7 +76,7 @@ describe('employee warning', () => {
     expect(email.text).toContain('Subject: "Invoice <b>2291</b> overdue');
     expect(email.text).toContain('From: "Accounts Team" <billing@examp1e-billing[.]test>');
     expect(email.text).toContain('Arrived: Tue, 17 Nov 2026, 09:14 UTC');
-    expect(email.text).toContain('Where: In your mailbox.');
+    expect(email.text).toContain('Where: In your Inbox.');
     // Which email comes before what to do
     expect(email.text.indexOf('WHICH EMAIL')).toBeLessThan(email.text.indexOf('WHAT TO DO'));
   });
@@ -118,6 +118,10 @@ describe('employee warning', () => {
     );
     const deleted = buildEmployeeWarning(context, { address: 'p@example.com', folder: 'deleted' });
     expect(deleted.text).toContain('Where: Your Deleted Items.');
+    const other = buildEmployeeWarning(context, { address: 'p@example.com', folder: 'other' });
+    expect(other.text).toContain('Where: In a folder of your mailbox other than your Inbox.');
+    const unknown = buildEmployeeWarning(context, { address: 'p@example.com', folder: 'unknown' });
+    expect(unknown.text).toContain('Where: In your mailbox.');
   });
 
   it('works without a subject or time', () => {

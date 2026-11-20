@@ -266,6 +266,8 @@ function whyYouAreGettingThis(context: WarningContext): string {
 
 /** Where the recipient's own copy is, in their terms */
 const WHERE_IT_IS: Record<string, string> = {
+  inbox: 'In your Inbox.',
+  other: 'In a folder of your mailbox other than your Inbox.',
   junk: 'Your Junk Email folder. It is still dangerous there: do not open it.',
   deleted: 'Your Deleted Items. If you did not open it, there is nothing else to do.',
   recoverable: 'You have already deleted it.',

@@ -58,7 +58,11 @@ function facts(
 }
 
 const TRUNCATED = facts('established', {
-  history: { messages: { count: 2000, atLeast: true }, recipients: { count: 150, atLeast: true }, firstSeen: '2026-11-01' },
+  history: {
+    messages: { count: 2000, atLeast: true },
+    recipients: { count: 150, atLeast: true },
+    firstSeen: '2026-11-01',
+  },
   burst: {
     messages: exact(4),
     recipients: exact(4),
@@ -123,6 +127,11 @@ describe('formatSenderHistoryLines', () => {
     expect(text).toContain('2 distinct; 0 of them also seen in the history period');
     expect(text).not.toContain('at least');
     expect(text).not.toContain('Elision');
+  });
+
+  it('writes a one-hour burst window in the singular', () => {
+    const lines = formatSenderHistoryLines({ ...facts('established'), burstWindowHours: 1 });
+    expect(lines.map(([label]) => label)).toContain('Burst window (the last 1 hour)');
   });
 
   it('never presents a truncated count as exact', () => {
@@ -313,7 +322,9 @@ describe('risk fusion: a relationship never lowers risk', () => {
       recommendations: [],
       analysisFailed: true,
     };
-    const decision = fuseRisk(failed, { senderHistory: facts('established_with_anomalous_fanout') });
+    const decision = fuseRisk(failed, {
+      senderHistory: facts('established_with_anomalous_fanout'),
+    });
     expect(decision.verdict).toBe('suspicious');
     expect(decision.riskScore).toBe(SENDER_FANOUT_RISK_FLOOR);
   });
@@ -469,7 +480,9 @@ describe('report: sender relationship', () => {
     const html = buildEmailHtml(analysis('suspicious', 60), data);
     const text = buildPlainTextReport(analysis('suspicious', 60), data);
 
-    const section = html.slice(html.indexOf('Sender Relationship (organization mail-flow records)'));
+    const section = html.slice(
+      html.indexOf('Sender Relationship (organization mail-flow records)')
+    );
     expect(html.indexOf('Sender Relationship')).toBeGreaterThan(
       html.indexOf('Original Email for IT Review')
     );
@@ -489,7 +502,10 @@ describe('report: sender relationship', () => {
     const html = buildEmailHtml(analysis('legitimate', 5), emailData(facts('established')), {
       risk: { ...fuseRisk(analysis('legitimate', 5), { senderHistory: facts('established') }) },
     });
-    const reporterPart = html.slice(html.indexOf('<body'), html.indexOf('Original Email for IT Review'));
+    const reporterPart = html.slice(
+      html.indexOf('<body'),
+      html.indexOf('Original Email for IT Review')
+    );
     expect(reporterPart).not.toMatch(/established|emailed your organization before/);
   });
 
@@ -497,7 +513,10 @@ describe('report: sender relationship', () => {
     const history = facts('established_with_anomalous_fanout');
     const risk = fuseRisk(analysis('legitimate', 5), { senderHistory: history });
     const html = buildEmailHtml(analysis('legitimate', 5), emailData(history), { risk });
-    const reporterPart = html.slice(html.indexOf('<body'), html.indexOf('Original Email for IT Review'));
+    const reporterPart = html.slice(
+      html.indexOf('<body'),
+      html.indexOf('Original Email for IT Review')
+    );
     expect(reporterPart.match(/far more people than usual/g)).toHaveLength(1);
     expect(reporterPart).toContain('SUSPICIOUS');
   });

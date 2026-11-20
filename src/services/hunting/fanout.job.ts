@@ -97,7 +97,8 @@ export interface FanoutRunSummary {
 }
 
 export interface FanoutJobDeps {
-  config: Pick<PhishyConfig, 'graph' | 'email' | 'notification'>;
+  /** `campaignResponse` only for its `timeZone`, the zone the alert's times are written in */
+  config: Pick<PhishyConfig, 'graph' | 'email' | 'notification' | 'campaignResponse'>;
   /** Undefined when the feature is off */
   source?: FanoutScanSource;
   /** The intelligence database; undefined when it is not configured */
@@ -609,6 +610,9 @@ async function alertOnFlag(
     window: scan.window,
     incompleteReasons: scan.incompleteReasons,
     ...(blastRadius ? { blastRadius } : {}),
+    ...(deps.config.campaignResponse?.timeZone
+      ? { timeZone: deps.config.campaignResponse.timeZone }
+      : {}),
   });
 
   // The security team and nobody else: To the first address, Cc the rest
