@@ -70,7 +70,50 @@ Parameters:
   CampaignAlertDistribution:
     Type: String
     Default: ''
-    Description: Address the campaign broadcast is sent to (e.g. all-staff@yourdomain.com). Required when CampaignAlertsEnabled is true.
+    Description: Address the campaign broadcast is sent to (e.g. all-staff@yourdomain.com). Required when CampaignAlertsEnabled is true, unless CampaignResponseEnabled is true and its audience is recipients.
+  CampaignResponseEnabled:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Default: 'false'
+    Description: >
+      Campaign response: one incident email per campaign to the security team,
+      a targeted warning to the people who received the email, and actions the
+      security team approves by reply (mailbox removal is a dry run). Needs
+      CampaignAlertsEnabled, the intelligence database with
+      migrations/006_campaign_response.sql applied manually, and
+      EmailCommandsEnabled for approvals to be received.
+  CampaignResponseAudience:
+    Type: String
+    AllowedValues: [distribution, recipients, both]
+    Default: distribution
+    Description: >
+      Who a campaign warning goes to: the distribution list, the individual
+      recipients the blast-radius lookup found (needs GraphBlastRadiusEnabled),
+      or both. Used only when CampaignResponseEnabled is true.
+  CampaignResponseEmployeeWarning:
+    Type: String
+    AllowedValues: ['off', approve, auto]
+    Default: approve
+    Description: >
+      How the targeted employee warning is authorized: approve (a security-team
+      member replies with the approval line), auto (sent as soon as the campaign
+      is detected) or off. Used only when CampaignResponseEnabled is true.
+  EmailCommandsEnabled:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Default: 'false'
+    Description: >
+      Email command channel: members of SecurityTeamDistribution whose mail
+      passes SPF or DKIM can reply to Phishy's reports to record a verdict or
+      approve a response action. Needs the intelligence database with
+      migrations/002_analysis_feedback.sql applied.
+  AttachmentAnalysisEnabled:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Default: 'false'
+    Description: >
+      Static inspection of attachments (real type, name tricks, forms, scripts,
+      macros, archive listings, links). Nothing is executed or fetched.
   SafeSenders:
     Type: String
     Default: ''
@@ -208,6 +251,13 @@ Rules:
         AssertDescription: GraphReadClientId is required when GraphEnabled is true
       - Assert: !Not [!Equals [!Ref GraphCertificateSecretArn, '']]
         AssertDescription: GraphCertificateSecretArn is required when GraphEnabled is true
+  CampaignResponseRequirements:
+    RuleCondition: !Equals [!Ref CampaignResponseEnabled, 'true']
+    Assertions:
+      - Assert: !Equals [!Ref CampaignAlertsEnabled, 'true']
+        AssertDescription: CampaignResponseEnabled needs CampaignAlertsEnabled=true
+      - Assert: !Not [!Equals [!Ref IntelligenceDbSecretArn, '']]
+        AssertDescription: CampaignResponseEnabled needs the intelligence database (IntelligenceDbSecretArn)
   FanoutScanRequirements:
     RuleCondition: !Equals [!Ref GraphFanoutScanEnabled, 'true']
     Assertions:
@@ -235,10 +285,26 @@ Conditions:
   HasSafeSenders: !Not [!Equals [!Ref SafeSenders, '']]
   HasSafeSenderSecurity: !Not [!Equals [!Ref SafeSenderSecurity, '']]
   HasProfile: !Not [!Equals [!Ref ProfileS3Uri, '']]
+  HasCampaignAlertDistribution: !Not [!Equals [!Ref CampaignAlertDistribution, '']]
+  UseCampaignResponse: !And
+    - !Condition UseIntelligence
+    - !Equals [!Ref CampaignAlertsEnabled, 'true']
+    - !Equals [!Ref CampaignResponseEnabled, 'true']
+  # Campaign alerts need somewhere to send the broadcast, unless campaign
+  # response is on (it can warn the individual recipients instead)
   UseCampaignAlerts: !And
     - !Condition UseIntelligence
     - !Equals [!Ref CampaignAlertsEnabled, 'true']
-    - !Not [!Equals [!Ref CampaignAlertDistribution, '']]
+    - !Or
+      - !Condition HasCampaignAlertDistribution
+      - !Equals [!Ref CampaignResponseEnabled, 'true']
+  UseCampaignAlertDistribution: !And
+    - !Condition UseCampaignAlerts
+    - !Condition HasCampaignAlertDistribution
+  UseEmailCommands: !And
+    - !Condition UseIntelligence
+    - !Equals [!Ref EmailCommandsEnabled, 'true']
+  UseAttachmentAnalysis: !Equals [!Ref AttachmentAnalysisEnabled, 'true']
   UseReportButton: !Equals [!Ref ReportButtonEnabled, 'true']
   # The GraphSettingsPresent rule rejects GraphEnabled without the secret ARN,
   # so the second clause never decides anything at deploy time; it states the
@@ -348,7 +414,12 @@ Resources:
           PHISHY_INTELLIGENCE_ENABLED: !If [UseIntelligence, 'true', !Ref AWS::NoValue]
           PHISHY_DB_CONNECTION: !If [UseIntelligence, !Ref IntelligenceDbSecretArn, !Ref AWS::NoValue]
           PHISHY_CAMPAIGN_ALERTS_ENABLED: !If [UseCampaignAlerts, 'true', !Ref AWS::NoValue]
-          PHISHY_CAMPAIGN_ALERTS_DISTRIBUTION: !If [UseCampaignAlerts, !Ref CampaignAlertDistribution, !Ref AWS::NoValue]
+          PHISHY_CAMPAIGN_ALERTS_DISTRIBUTION: !If [UseCampaignAlertDistribution, !Ref CampaignAlertDistribution, !Ref AWS::NoValue]
+          PHISHY_CAMPAIGN_RESPONSE_ENABLED: !If [UseCampaignResponse, 'true', !Ref AWS::NoValue]
+          PHISHY_CAMPAIGN_RESPONSE_AUDIENCE: !If [UseCampaignResponse, !Ref CampaignResponseAudience, !Ref AWS::NoValue]
+          PHISHY_CAMPAIGN_RESPONSE_EMPLOYEE_WARNING: !If [UseCampaignResponse, !Ref CampaignResponseEmployeeWarning, !Ref AWS::NoValue]
+          PHISHY_EMAIL_COMMANDS_ENABLED: !If [UseEmailCommands, 'true', !Ref AWS::NoValue]
+          PHISHY_ATTACHMENT_ANALYSIS_ENABLED: !If [UseAttachmentAnalysis, 'true', !Ref AWS::NoValue]
           PHISHY_REPORT_BUTTON_ENABLED: !If [UseReportButton, 'true', !Ref AWS::NoValue]
           # Graph: this function only invokes the broker. It is given no
           # tenant ID, client ID or certificate, and no access to the secret.
