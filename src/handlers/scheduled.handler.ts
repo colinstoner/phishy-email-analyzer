@@ -55,6 +55,9 @@ export async function handleScheduledTask(
         db: services.intelligenceDb?.featureStore(),
         notifier: services.sesNotifier,
         graph: services.graph,
+        // With campaign response on, a flagged wave becomes an incident
+        // (one email to the security team) instead of a separate alert
+        ...(services.campaignResponse ? { campaignResponse: services.campaignResponse } : {}),
       },
       { remainingMs: () => context?.getRemainingTimeInMillis?.() }
     );

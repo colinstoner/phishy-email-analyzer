@@ -86,6 +86,12 @@ export interface GraphPagingOptions extends GraphRequestOptions {
   maxPages: number;
   /** Most items to return across all pages */
   maxItems?: number;
+  /**
+   * Asked before each page after the first is requested, so a caller can
+   * count that request against an allowance first. Returning false stops
+   * paging there: the result is `truncated`, as when `maxPages` is reached.
+   */
+  beforeNextPage?: () => boolean;
 }
 
 /**
@@ -263,6 +269,10 @@ export class GraphClient {
     let pages = 0;
 
     while (url && pages < maxPages) {
+      if (pages > 0 && options.beforeNextPage && !options.beforeNextPage()) {
+        // The caller's allowance refused the next page
+        return { items, pages, truncated: true };
+      }
       const page: Record<string, unknown> = await this.getJsonFromUrl<Record<string, unknown>>(
         url,
         path.template,

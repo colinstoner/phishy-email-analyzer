@@ -43,6 +43,7 @@ import {
   fakeGraph,
   graphErrorResponse,
 } from '../../../mocks/graph.fake';
+import { WIDE_SENDERS, fanoutResponder, wideWindowTenant } from '../../../mocks/fanout.tenant';
 
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
@@ -379,9 +380,13 @@ describe('computeSenderHistoryFacts', () => {
       const known = Array.from({ length: 16 }, (_, i) => `known${i}@example.com`);
       const usual = known.map(recipient => inboundRow(NOW - 8 * DAY, recipient));
       // The usual newsletter to the usual 16 people plus 4 new ones ...
-      const newsletter = [...known, 'n1@example.com', 'n2@example.com', 'n3@example.com', 'n4@example.com'].map(
-        recipient => inboundRow(NOW - HOUR, recipient, { subject: 'Monthly update' })
-      );
+      const newsletter = [
+        ...known,
+        'n1@example.com',
+        'n2@example.com',
+        'n3@example.com',
+        'n4@example.com',
+      ].map(recipient => inboundRow(NOW - HOUR, recipient, { subject: 'Monthly update' }));
       // ... and unrelated one-off messages to 30 other new people
       const oneOffs = Array.from({ length: 30 }, (_, i) =>
         inboundRow(NOW - HOUR, `other${i}@example.com`, { subject: `Ticket ${i}` })
@@ -470,7 +475,10 @@ describe('computeSenderHistoryFacts', () => {
     const facts = computeSenderHistoryFacts({
       ...BASE,
       inbound: rows([
-        inboundRow(NOW - HOUR, 'all-staff@example.com', { messageId: '<dl@x>', status: 'expanded' }),
+        inboundRow(NOW - HOUR, 'all-staff@example.com', {
+          messageId: '<dl@x>',
+          status: 'expanded',
+        }),
         inboundRow(NOW - HOUR, 'alex@example.com', { messageId: '<dl@x>' }),
         inboundRow(NOW - HOUR, 'sam@example.com', { messageId: '<dl@x>', status: 'failed' }),
       ]),
@@ -498,7 +506,9 @@ describe('computeSenderHistoryFacts', () => {
   });
 
   it('never presents a truncated count as exact, and never calls recipients new against a truncated history', () => {
-    const history = Array.from({ length: 5 }, (_, i) => inboundRow(NOW - (i + 3) * DAY, 'a@example.com'));
+    const history = Array.from({ length: 5 }, (_, i) =>
+      inboundRow(NOW - (i + 3) * DAY, 'a@example.com')
+    );
     const facts = computeSenderHistoryFacts({
       ...BASE,
       inbound: rows([...history, ...blast(40)], { historyTruncated: true }),
@@ -528,7 +538,6 @@ describe('computeSenderHistoryFacts', () => {
     expect(facts.burst.newRecipients).toEqual({ count: 20, atLeast: true });
     expect(facts.history.messages.atLeast).toBe(false);
   });
-
 });
 
 describe('classifySenderRelationship thresholds', () => {
@@ -643,7 +652,11 @@ describe('new trace operations', () => {
   it('refuses a bad page cap', async () => {
     const graph = fakeGraph([() => collection([])]);
     await expect(
-      listMessageTracesByRecipient(graph.client, { ...window, recipientAddress: SENDER, maxPages: 6 })
+      listMessageTracesByRecipient(graph.client, {
+        ...window,
+        recipientAddress: SENDER,
+        maxPages: 6,
+      })
     ).rejects.toThrow('maxPages');
     expect(graph.requests).toHaveLength(0);
   });
@@ -796,7 +809,9 @@ describe('SenderHistoryService', () => {
 
   it('discards a lookup whose rows carry no address to confirm', async () => {
     const graph = fakeGraph([
-      traceResponder({ inbound: [inboundRow(NOW - HOUR, 'a@example.com', { senderAddress: undefined })] }),
+      traceResponder({
+        inbound: [inboundRow(NOW - HOUR, 'a@example.com', { senderAddress: undefined })],
+      }),
     ]);
     const service = new SenderHistoryService(graph.client, SETTINGS, { now });
     expect(await service.lookupForEmail(email(SENDER))).toBeUndefined();
@@ -924,7 +939,9 @@ describe('SenderHistoryService', () => {
   });
 
   it('widens the burst window back to a late report’s claimed date', async () => {
-    const graph = fakeGraph([traceResponder({ inbound: [inboundRow(NOW - 3 * DAY, 'a@example.com')] })]);
+    const graph = fakeGraph([
+      traceResponder({ inbound: [inboundRow(NOW - 3 * DAY, 'a@example.com')] }),
+    ]);
     const service = new SenderHistoryService(graph.client, SETTINGS, { now });
     const facts = await service.lookupForEmail(
       email(SENDER, { 'Original-Date': 'Sat, 14 Nov 2026 12:00:00 +0000' })
@@ -939,7 +956,10 @@ describe('SenderHistoryService', () => {
       request =>
         // A follow-up page carries only the service's own paging token
         (request.query.$filter ?? 'senderAddress eq').includes('senderAddress eq')
-          ? collection(blast(5), 'https://graph.microsoft.com/v1.0/admin/exchange/tracing/messageTraces?$skiptoken=next')
+          ? collection(
+              blast(5),
+              'https://graph.microsoft.com/v1.0/admin/exchange/tracing/messageTraces?$skiptoken=next'
+            )
           : collection([]),
     ]);
     const service = new SenderHistoryService(graph.client, SETTINGS, { now });
@@ -1083,7 +1103,11 @@ describe('SenderHistoryService', () => {
     it('stops retrying at the deadline', async () => {
       const graph = fakeGraph([denied]);
       // Real timers: the 250 ms retry delay outlasts the 60 ms budget
-      const service = new SenderHistoryService(graph.client, { ...SETTINGS, budgetMs: 60 }, { now });
+      const service = new SenderHistoryService(
+        graph.client,
+        { ...SETTINGS, budgetMs: 60 },
+        { now }
+      );
 
       expect(await service.lookupForEmail(email(SENDER))).toBeUndefined();
       const atDeadline = graph.requests.length;
@@ -1239,7 +1263,9 @@ describe('createSenderHistoryService', () => {
         graph.client
       )
     ).toBeUndefined();
-    expect(createSenderHistoryService({ email, graph: { enabled: true } }, graph.client)).toBeUndefined();
+    expect(
+      createSenderHistoryService({ email, graph: { enabled: true } }, graph.client)
+    ).toBeUndefined();
   });
 
   it('builds the service when both are on', () => {
@@ -1272,6 +1298,46 @@ describe('fan-out judged on one chosen subject (the fan-out scan)', () => {
     const absent = computeSenderHistoryFacts({ ...input, focusSubjectKey: 'no such subject' });
     expect(absent.burst.sameSubject.recipients.count).toBe(0);
     expect(absent.classification).toBe('established');
+  });
+
+  describe('a history long enough to need a second page per query', () => {
+    const sender = WIDE_SENDERS[0];
+    const lookup = (allowance: number) => {
+      const graph = fakeGraph([fanoutResponder(wideWindowTenant())]);
+      const service = new SenderHistoryService(
+        graph.client,
+        { ...SETTINGS, requestAllowancePer5Min: allowance },
+        { now: () => NOW }
+      );
+      return { graph, service };
+    };
+
+    it('counts each further page exactly, before it is requested', async () => {
+      const { graph, service } = lookup(60);
+      const result = await service.lookupSender(() => ({
+        claimedFrom: sender,
+        claimedDate: undefined,
+      }));
+      // Three windows, two queries each, two pages each
+      expect(graph.requests).toHaveLength(12);
+      expect(service.requestsUsed()).toBe(12);
+      expect(result.allowanceCut).toBeUndefined();
+      expect(result.facts?.truncated).toBe(false);
+    });
+
+    it('refuses a page the allowance has no room for, and says the facts were cut short by it', async () => {
+      const { graph, service } = lookup(8);
+      const result = await service.lookupSender(() => ({
+        claimedFrom: sender,
+        claimedDate: undefined,
+      }));
+      expect(graph.requests).toHaveLength(8);
+      expect(service.requestsUsed()).toBe(8);
+      expect(result.allowanceCut).toBe(true);
+      expect(result.facts?.truncated).toBe(true);
+      // A cut-short history is never judged as anomalous fan-out
+      expect(result.facts?.classification).not.toBe('established_with_anomalous_fanout');
+    });
   });
 
   it('caches a focused lookup apart from an unfocused one, and honours a smaller allowance', async () => {

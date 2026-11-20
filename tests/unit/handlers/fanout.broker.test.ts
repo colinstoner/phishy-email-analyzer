@@ -314,6 +314,12 @@ describe('fanout_scan through the Graph broker', () => {
     expect(parsed.flagged[0].recipientsOmitted).toBe(50);
     expect(parsed.flagged[0].facts.sendingIps.burstIps).toHaveLength(20);
     expect(parsed.flagged[0].facts.sendingIps.burstIpsOmitted).toBe(6);
+    // Why paging stopped early is carried when present, and optional
+    expect(parsed.windowUnread).toBeUndefined();
+    expect(
+      protocol.FanoutScanResultSchema.parse({ ...base, windowUnread: 'request_allowance' })
+        .windowUnread
+    ).toBe('request_allowance');
 
     for (const broken of [
       { ...base, extra: 1 },
@@ -325,6 +331,7 @@ describe('fanout_scan through the Graph broker', () => {
         flagged: [{ ...flag, recipients: [{ address: 'a b@example.com', status: 'delivered' }] }],
       },
       { ...base, incompleteReasons: ['because'] },
+      { ...base, windowUnread: 'candidate_limit' },
     ]) {
       expect(protocol.FanoutScanResultSchema.safeParse(broken).success).toBe(false);
     }

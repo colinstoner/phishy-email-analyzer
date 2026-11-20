@@ -1174,6 +1174,100 @@ describe('second trigger: the fan-out scan', () => {
     expect(store.incidents).toHaveLength(1);
     expect(store.incidents[0].summary.detectedBy).toBe('fan-out scan, then employee reports');
   });
+
+  const SCAN = {
+    campaignSignature: SIGNATURE,
+    subject: 'Invoice 2291 overdue',
+    senderAddress: 'billing@examp1e-billing.test',
+    reasons: ['Burst to many recipients'],
+  };
+
+  it('says what it sent, and opens without reach when blast radius is off', async () => {
+    const { service, store, sent } = setup();
+    const opened = await service.openIncidentFromFanoutAlert(SCAN);
+    expect(opened).toMatchObject({ created: true, email: 'opened' });
+    expect(store.incidents[0].reach.status).toBe('not_enabled');
+    expect(proposed(store, 'send_warning')).toBeUndefined();
+    expect(sent).toHaveLength(1);
+    expect(sent[0].text).toContain('blast radius is not enabled');
+  });
+
+  it('threads a later sighting as an update, approval-only, and only when given changes', async () => {
+    const { service, store, sent, advance } = setup({ employeeWarning: 'auto' });
+    await service.openIncidentFromFanoutAlert({ ...SCAN, reach: blast([recipient(1)]) });
+    advance(5 * 60_000);
+
+    const quiet = await service.openIncidentFromFanoutAlert({
+      ...SCAN,
+      reach: blast([recipient(1), recipient(2)]),
+    });
+    expect(quiet).toMatchObject({ created: false, email: 'unchanged' });
+    expect(sent).toHaveLength(1);
+    expect(store.incidents[0].reach.recipients).toHaveLength(2);
+
+    const grown = await service.openIncidentFromFanoutAlert({
+      ...SCAN,
+      reach: blast([1, 2, 3, 4].map(n => recipient(n))),
+      changes: ['The fan-out scan has now seen it reach 40 internal recipient(s).'],
+    });
+    expect(grown).toMatchObject({ created: false, email: 'updated' });
+    expect(sent).toHaveLength(2);
+    expect(sent[1].inReplyTo).toBe('ses-1');
+    expect(sent[1].text).toContain(
+      'The fan-out scan has now seen it reach 40 internal recipient(s).'
+    );
+    expect(employeeEmails(sent)).toEqual([]);
+    expect(
+      store.actions.filter(a => a.status === 'proposed').every(a => a.authorization === 'approve')
+    ).toBe(true);
+  });
+
+  it('never runs an automatic warning from a scan sighting of a report-opened incident', async () => {
+    const { service, store, sent, advance } = setup({ employeeWarning: 'auto' });
+    const input = reportInput({ blastRadius: blast([recipient(1)]) });
+    expect(await service.handleCampaignReport(input)).toBe('opened');
+    const warnedBefore = employeeEmails(sent).length;
+    advance(5 * 60_000);
+
+    const sighting = await service.openIncidentFromFanoutAlert({
+      ...SCAN,
+      reach: blast([1, 2, 3, 4, 5].map(n => recipient(n))),
+      changes: ['The fan-out scan saw it reach 40 internal recipient(s) in mail-flow records.'],
+    });
+    expect(sighting).toMatchObject({ created: false, email: 'updated' });
+    expect(employeeEmails(sent)).toHaveLength(warnedBefore);
+    expect(store.incidents).toHaveLength(1);
+  });
+
+  it('sends nothing for a sighting of a false-positive incident', async () => {
+    const { service, store, sent } = setup();
+    await service.openIncidentFromFanoutAlert(SCAN);
+    store.incidents[0].status = 'false_positive';
+    const again = await service.openIncidentFromFanoutAlert({ ...SCAN, changes: ['More.'] });
+    expect(again).toMatchObject({ email: 'closed' });
+    expect(sent).toHaveLength(1);
+  });
+
+  it('reports a failed incident email, and sends the opening email on the next sighting', async () => {
+    const { service, mailer, sent } = setup();
+    mailer.sendEmail.mockResolvedValueOnce({ success: false, error: 'Throttling' } as never);
+    expect(await service.openIncidentFromFanoutAlert(SCAN)).toMatchObject({
+      created: true,
+      email: 'not_sent',
+    });
+    expect(
+      await service.openIncidentFromFanoutAlert({ ...SCAN, changes: ['More.'] })
+    ).toMatchObject({ created: false, email: 'opened' });
+    expect(sent).toHaveLength(1);
+    expect(sent[0].inReplyTo).toBeUndefined();
+  });
+
+  it('is undefined when the tables are missing (the scan then sends its plain alert)', async () => {
+    const { service, store, sent } = setup();
+    store.unavailable = true;
+    expect(await service.openIncidentFromFanoutAlert(SCAN)).toBeUndefined();
+    expect(sent).toHaveLength(0);
+  });
 });
 
 describe('the reach trigger', () => {

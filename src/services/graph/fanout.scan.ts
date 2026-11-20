@@ -90,6 +90,16 @@ export const FANOUT_INCOMPLETE_REASONS: readonly FanoutIncompleteReason[] = [
 
 export type FanoutScanOutcome = 'ok' | 'forbidden' | 'timeout' | 'rate_limited' | 'error';
 
+/** Why the scan stopped reading the window's rows before its last page */
+export type FanoutWindowUnread = 'page_limit' | 'page_error' | 'request_allowance' | 'time_budget';
+
+export const FANOUT_WINDOW_UNREAD: readonly FanoutWindowUnread[] = [
+  'page_limit',
+  'page_error',
+  'request_allowance',
+  'time_budget',
+];
+
 /** Recipient delivery states as the alert counts them */
 export interface FanoutStatusCounts {
   delivered: number;
@@ -139,6 +149,13 @@ export interface FanoutScanResult {
   candidatesChecked: number;
   incomplete: boolean;
   incompleteReasons: FanoutIncompleteReason[];
+  /**
+   * Present when some of the window's rows were never read, with why paging
+   * stopped (the same word is also in `incompleteReasons`). The scheduled
+   * job reads the window again next time when the cause was the request
+   * allowance. Absent when every page was read (and from an older broker).
+   */
+  windowUnread?: FanoutWindowUnread;
   flagged: FanoutFlag[];
 }
 
@@ -462,7 +479,7 @@ export class FanoutScanService {
           continue;
         }
         const before = history.requestsUsed();
-        const { facts, metric } = await history.lookupSender(() => ({
+        const { facts, metric, allowanceCut } = await history.lookupSender(() => ({
           claimedFrom: candidate.senderAddress,
           claimedDate: new Date(candidate.firstMs).toISOString(),
           budgetMs: Math.min(left, MAX_HISTORY_BUDGET_MS),
@@ -478,8 +495,17 @@ export class FanoutScanService {
           break;
         }
         checked++;
+        if (allowanceCut) {
+          // The allowance refused a page of this sender's history: its facts
+          // are cut short (fan-out is not judged on them) and nothing is
+          // left for another candidate
+          reasons.add('request_allowance');
+        }
         if (!facts) {
           reasons.add(metric.outcome === 'timeout' ? 'time_budget' : 'history_unavailable');
+          if (allowanceCut) {
+            break;
+          }
           continue;
         }
         if (
@@ -487,6 +513,9 @@ export class FanoutScanService {
           flagged.length < FANOUT_MAX_FLAGS
         ) {
           flagged.push(toFlag(candidate, facts));
+        }
+        if (allowanceCut) {
+          break;
         }
       }
 
@@ -499,7 +528,9 @@ export class FanoutScanService {
         candidatesChecked: checked,
         flagged: flagged.length,
         requestsUsed: budget.used,
+        requestLimit: budget.limit,
         incompleteReasons,
+        windowUnread: pages.unread,
         durationMs: this.now() - startedAt,
       });
       return {
@@ -514,6 +545,7 @@ export class FanoutScanService {
         candidatesChecked: checked,
         incomplete: incompleteReasons.length > 0,
         incompleteReasons,
+        ...(pages.unread ? { windowUnread: pages.unread } : {}),
         flagged,
       };
     } finally {
@@ -548,7 +580,7 @@ export class FanoutScanService {
     signal: AbortSignal,
     reasons: Set<FanoutIncompleteReason>
   ): Promise<
-    | { rows: MessageTrace[]; pages: number }
+    | { rows: MessageTrace[]; pages: number; unread?: FanoutWindowUnread }
     | { failed: FanoutScanOutcome; filterMismatch: boolean; pages: number }
   > {
     const rows: MessageTrace[] = [];
@@ -562,7 +594,7 @@ export class FanoutScanService {
           return { failed: 'rate_limited', filterMismatch: false, pages };
         }
         reasons.add('request_allowance');
-        return { rows, pages };
+        return { rows, pages, unread: 'request_allowance' };
       }
       let page: { items: MessageTrace[]; next?: GraphPageCursor };
       try {
@@ -576,8 +608,9 @@ export class FanoutScanService {
         if (pages === 0) {
           return { failed: failure.outcome, filterMismatch: false, pages };
         }
-        reasons.add(failure.outcome === 'timeout' ? 'time_budget' : 'page_error');
-        return { rows, pages };
+        const unread = failure.outcome === 'timeout' ? 'time_budget' : 'page_error';
+        reasons.add(unread);
+        return { rows, pages, unread };
       }
       pages++;
       rows.push(...page.items);
@@ -587,7 +620,7 @@ export class FanoutScanService {
       cursor = page.next;
     }
     reasons.add('page_limit');
-    return { rows, pages };
+    return { rows, pages, unread: 'page_limit' };
   }
 
   private async pageWithRetries(

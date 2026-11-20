@@ -100,6 +100,12 @@ export interface FanoutTenant {
   windowForbidden?: number;
   /** Answer every window page after the first with this error status */
   laterPageStatus?: number;
+  /**
+   * Page per-address (history) answers at this many rows, as the service
+   * does at 1000, so a long history costs a second request per query.
+   * Unset: every history answer is one page.
+   */
+  historyPageSize?: number;
 }
 
 const NEXT = 'https://graph.microsoft.com/v1.0/admin/exchange/tracing/messageTraces?$skiptoken=';
@@ -107,6 +113,27 @@ const NEXT = 'https://graph.microsoft.com/v1.0/admin/exchange/tracing/messageTra
 function quoted(filter: string, field: string): string | undefined {
   const match = filter.match(new RegExp(`${field} eq '((?:[^']|'')*)'`));
   return match?.[1].replace(/''/g, "'");
+}
+
+/** One page of a per-address answer, with a next link that keeps the filter */
+function historyPage(
+  rows: MessageTrace[],
+  filter: string,
+  token: string | undefined,
+  size?: number
+): Response {
+  if (!size) {
+    return collection(rows);
+  }
+  const index = token === undefined ? 0 : Number(token.slice(1));
+  const page = rows.slice(index * size, (index + 1) * size);
+  const more = (index + 1) * size < rows.length;
+  return collection(
+    page,
+    more
+      ? `https://graph.microsoft.com/v1.0/admin/exchange/tracing/messageTraces?$filter=${encodeURIComponent(filter)}&$skiptoken=h${index + 1}`
+      : undefined
+  );
 }
 
 /** Responder for the fake Graph; counts what it served */
@@ -118,7 +145,10 @@ export function fanoutResponder(tenant: FanoutTenant): FakeResponder & { windowR
     }
     const filter = request.query.$filter ?? '';
     const token = request.query.$skiptoken;
-    const isWindow = token !== undefined || (!filter.includes(' eq ') && filter.length > 0);
+    const historyToken = token?.startsWith('h') ? token : undefined;
+    const isWindow =
+      (token !== undefined && historyToken === undefined) ||
+      (!filter.includes(' eq ') && filter.length > 0);
     if (isWindow) {
       responder.windowRequests++;
       if (forbiddenLeft > 0) {
@@ -137,11 +167,21 @@ export function fanoutResponder(tenant: FanoutTenant): FakeResponder & { windowR
     }
     const sender = quoted(filter, 'senderAddress');
     if (sender !== undefined) {
-      return collection(tenant.inbound?.[sender] ?? []);
+      return historyPage(
+        tenant.inbound?.[sender] ?? [],
+        filter,
+        historyToken,
+        tenant.historyPageSize
+      );
     }
     const recipient = quoted(filter, 'recipientAddress');
     if (recipient !== undefined) {
-      return collection(tenant.outbound?.[recipient] ?? []);
+      return historyPage(
+        tenant.outbound?.[recipient] ?? [],
+        filter,
+        historyToken,
+        tenant.historyPageSize
+      );
     }
     return undefined;
   }) as FakeResponder & { windowRequests: number };
@@ -158,4 +198,71 @@ export function takeoverTenant(count = 20, extraWindowRows: MessageTrace[] = [])
     inbound: { [SENDER]: [...history.inbound, ...burst] },
     outbound: { [SENDER]: history.outbound },
   };
+}
+
+/** A one-hour window, as a scan reads after a gap */
+export const WIDE_WINDOW = { receivedFrom: new Date(NOW - HOUR), receivedTo: new Date(NOW) };
+
+/** The candidate senders of `wideWindowTenant`, most recipients first */
+export const WIDE_SENDERS = [1, 2, 3, 4, 5, 6].map(n => `contact${n}@vendor${n}.example.net`);
+
+/**
+ * The shape of a real one-hour replay that overspent its allowance: 4,497
+ * trace rows in the window, six senders each reaching 30-40 people (more
+ * candidates than one scan checks), and long two-way histories that come
+ * back in two pages per query (the service pages at 1000 rows), so each
+ * history lookup costs twelve requests rather than six.
+ */
+export function wideWindowTenant(
+  options: {
+    windowPages?: number;
+    /** Earliest row in the window (default: an hour before NOW) */
+    startMs?: number;
+  } = {}
+): FanoutTenant {
+  const startMs = options.startMs ?? NOW - HOUR;
+  const waves = WIDE_SENDERS.map((sender, i) =>
+    wave(40 - 2 * i, {
+      sender,
+      subject: `Payment portal update ${i + 1}`,
+      atMs: NOW - 30 * 60 * 1000 + i * 60 * 1000,
+    })
+  );
+  const burstRows = waves.flat();
+  const fillerCount = 4497 - burstRows.length;
+  // Ordinary inbound mail: many external senders, one recipient each,
+  // spread from the start of the window to two minutes before NOW
+  const spacing = Math.floor((NOW - 2 * 60 * 1000 - startMs) / fillerCount);
+  const filler = Array.from({ length: fillerCount }, (_, i) =>
+    traceRow(
+      `news${i}@bulk.example.org`,
+      `person${i % 300}@example.com`,
+      startMs + 1000 + i * spacing,
+      { subject: `Weekly digest ${i}` }
+    )
+  );
+  const rows = [...burstRows, ...filler];
+  const pageCount = options.windowPages ?? 1;
+  const size = Math.ceil(rows.length / pageCount);
+  const windowPages = Array.from({ length: pageCount }, (_, i) =>
+    rows.slice(i * size, (i + 1) * size)
+  );
+
+  const inbound: Record<string, MessageTrace[]> = {};
+  const outbound: Record<string, MessageTrace[]> = {};
+  WIDE_SENDERS.forEach((sender, i) => {
+    // Years of routine mail to two people, and their replies
+    const history = Array.from({ length: 1200 }, (_, k) =>
+      traceRow(sender, k % 2 ? 'alex@example.com' : 'sam@example.com', NOW - (3 + (k % 25)) * DAY, {
+        subject: `Invoice ${k}`,
+      })
+    );
+    inbound[sender] = [...history, ...waves[i]];
+    outbound[sender] = Array.from({ length: 1200 }, (_, k) =>
+      traceRow(k % 2 ? 'alex@example.com' : 'sam@example.com', sender, NOW - (3 + (k % 25)) * DAY, {
+        subject: `RE: Invoice ${k}`,
+      })
+    );
+  });
+  return { windowPages, inbound, outbound, historyPageSize: 1000 };
 }

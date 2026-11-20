@@ -64,13 +64,14 @@ import {
   WarningMailer,
 } from './executors';
 import { generateReference } from './reference';
-import { ResponseStore, ResponseStoreUnavailableError } from './response.store';
+import { RESPONSE_MIGRATION, ResponseStore, ResponseStoreUnavailableError } from './response.store';
 import {
   ActionAuthorization,
   ActionResult,
   ActionScope,
   CampaignIncident,
   FanoutIncidentInput,
+  FanoutIncidentOutcome,
   IncidentReach,
   IncidentSummary,
   RemovalScope,
@@ -611,17 +612,28 @@ export class CampaignResponseService {
    * Nothing is sent to employees without a security-team approval on this
    * path, whatever `employeeWarning` says: there is no model verdict yet.
    * Reports of the same message later join the incident (same campaign
-   * signature) and update it. Never throws; undefined when the response
-   * tables are missing or the incident could not be opened.
+   * signature) and update it.
+   *
+   * When the incident already exists (opened by reports, or by an earlier
+   * sighting of the same wave) the scan's reach is merged into it; if its
+   * opening email never went out that email is sent now, otherwise the
+   * caller's `changes` become a threaded update (also `approve` only). The
+   * scheduled job calls this only for a new or materially grown wave, so
+   * those updates are already rate-limited by its dedupe; the report-side
+   * `updateIntervalMinutes` does not apply to them.
+   *
+   * Never throws; undefined when the response tables are missing or the
+   * incident could not be opened. `email` says what the security team was
+   * sent, so the caller can fall back to its own alert when nothing went.
    */
   async openIncidentFromFanoutAlert(
     input: FanoutIncidentInput
-  ): Promise<{ incidentId: string; reference: string; created: boolean } | undefined> {
+  ): Promise<FanoutIncidentOutcome | undefined> {
     try {
       const signature =
         input.campaignSignature ??
         computeCampaignSignature(this.deps.safeDomains[0] ?? 'unknown', input.subject);
-      const reach = mergeReach(undefined, input.reach, true);
+      const reach = mergeReach(undefined, input.reach, input.reach !== undefined);
       const score = Math.max(0, Math.min(100, Math.round(input.riskScore ?? 50)));
       const sender = senderParts(
         input.senderName ? `${input.senderName} <${input.senderAddress}>` : input.senderAddress
@@ -649,10 +661,9 @@ export class CampaignResponseService {
         reach,
         reportCount: 0,
       });
+      const ids = { incidentId: incident.id, reference: incident.reference };
       if (!created) {
-        const merged = mergeReach(incident.reach, input.reach, true);
-        await this.store.updateIncident(incident.id, { reach: merged });
-        return { incidentId: incident.id, reference: incident.reference, created: false };
+        return { ...ids, created: false, email: await this.fanoutSighting(incident, input) };
       }
       await this.store.appendAudit({
         incidentId: incident.id,
@@ -661,14 +672,56 @@ export class CampaignResponseService {
         detail: { trigger: 'fanout_scan', recipients: reach.totals.recipients },
       });
       emitCampaignResponseMetric('CampaignIncidentsOpened', 1, { Trigger: 'fanout_scan' });
-      await this.respond(incident, { done: [], forceApprove: true });
-      return { incidentId: incident.id, reference: incident.reference, created: true };
+      const sent = await this.respond(incident, { done: [], forceApprove: true });
+      return { ...ids, created: true, email: sent ? 'opened' : 'not_sent' };
     } catch (error) {
+      if (error instanceof ResponseStoreUnavailableError) {
+        logger.warn(
+          `Fan-out scan could not open a campaign-response incident: its tables are missing. Apply migrations/${RESPONSE_MIGRATION}; the scan sends its plain alert instead`
+        );
+        return undefined;
+      }
       logger.error('Could not open an incident from the fan-out alert', {
         error: error instanceof Error ? error.message : String(error),
       });
       return undefined;
     }
+  }
+
+  /**
+   * The scan saw a wave whose incident already exists: merge its reach and
+   * tell the security team in the incident's own thread. Everything stays
+   * `approve`: a scan sighting never sends anything to employees by itself.
+   */
+  private async fanoutSighting(
+    stored: CampaignIncident,
+    input: FanoutIncidentInput
+  ): Promise<FanoutIncidentOutcome['email']> {
+    const reach = mergeReach(stored.reach, input.reach, input.reach !== undefined);
+    if (stored.status !== 'open') {
+      await this.store.updateIncident(stored.id, { reach });
+      return 'closed';
+    }
+    const summary = this.withDelivery(stored.summary, reach);
+    await this.store.updateIncident(stored.id, { reach, summary });
+    const incident: CampaignIncident = { ...stored, reach, summary };
+    if (!stored.lastUpdateSentAt) {
+      // The opening email never went out (it failed): send it now
+      const sent = await this.respond(incident, { done: [], forceApprove: true });
+      return sent ? 'opened' : 'not_sent';
+    }
+    if (!input.changes || input.changes.length === 0) {
+      return 'unchanged';
+    }
+    const expired = await this.expire(incident);
+    const changes = [
+      ...input.changes,
+      ...(expired.length > 0
+        ? [`${expired.length} proposed action(s) expired without approval.`]
+        : []),
+    ];
+    const sent = await this.respond(incident, { done: [], changes, forceApprove: true });
+    return sent ? 'updated' : 'not_sent';
   }
 
   // -------------------------------------------------------------------------
@@ -858,7 +911,7 @@ export class CampaignResponseService {
       releaseHeld?: boolean;
       getRemainingMs?: () => number | undefined;
     }
-  ): Promise<void> {
+  ): Promise<boolean> {
     const modes = this.modes(incident, options.forceApprove);
     if (options.releaseHeld) {
       // The held proposals are replaced by what runs now (and by a fresh
@@ -944,7 +997,7 @@ export class CampaignResponseService {
     const idleReason =
       proposed.length === 0 ? this.idleReason(incident, current, modes) : undefined;
 
-    await this.sendIncidentEmail(incident, {
+    const sent = await this.sendIncidentEmail(incident, {
       proposed,
       done,
       notes,
@@ -955,6 +1008,7 @@ export class CampaignResponseService {
     if (auto?.scope.kind === 'send_warning') {
       await this.runWarning(incident, auto, auto.scope, options.getRemainingMs);
     }
+    return sent;
   }
 
   private autoLine(scope: WarningScope): string {
@@ -1215,13 +1269,13 @@ export class CampaignResponseService {
       changes?: string[];
       idleReason?: string;
     }
-  ): Promise<void> {
+  ): Promise<boolean> {
     const team = this.deps.securityTeam;
     if (team.length === 0) {
       logger.warn(
         'Campaign incident has no security team to tell (notification.securityTeamDistribution is empty)'
       );
-      return;
+      return false;
     }
     const email = buildIncidentEmail({
       incident,
@@ -1259,7 +1313,7 @@ export class CampaignResponseService {
         incidentId: incident.id,
         error: result.error,
       });
-      return;
+      return false;
     }
     await this.store.updateIncident(incident.id, {
       ...(incident.threadMessageId || !result.messageId
@@ -1288,6 +1342,7 @@ export class CampaignResponseService {
       });
       emitCampaignResponseMetric('CampaignIncidentUpdates', 1);
     }
+    return true;
   }
 
   private warningContext(

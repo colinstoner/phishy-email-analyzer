@@ -403,6 +403,10 @@ export const FanoutScanResultSchema = z
         ])
       )
       .max(6),
+    /** Why paging stopped before the last page; absent when every page was read */
+    windowUnread: z
+      .enum(['page_limit', 'page_error', 'request_allowance', 'time_budget'])
+      .optional(),
     flagged: z
       .array(
         z.strictObject({

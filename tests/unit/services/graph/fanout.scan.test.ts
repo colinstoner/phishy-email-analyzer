@@ -26,12 +26,14 @@ import {
   NOW,
   SENDER,
   SUBJECT,
+  WIDE_WINDOW,
   WINDOW,
   establishedHistory,
   fanoutResponder,
   takeoverTenant,
   traceRow,
   wave,
+  wideWindowTenant,
 } from '../../../mocks/fanout.tenant';
 
 const SETTINGS: FanoutScanSettings = {
@@ -424,6 +426,62 @@ describe('FanoutScanService', () => {
       expect(spent).toBeLessThanOrEqual(FANOUT_INSTANCE_ALLOWANCE_PER_5_MIN);
       const after = await scan.scan({ ...REQUEST, maxRequests: 100 });
       expect(after.outcome).toBe('rate_limited');
+    });
+
+    describe('over a wide window with long histories', () => {
+      const WIDE: FanoutScanRequest = { ...REQUEST, ...WIDE_WINDOW };
+
+      function traceRequests(graph: ReturnType<typeof fakeGraph>): number {
+        return graph.requests.filter(r => r.path === '/admin/exchange/tracing/messageTraces')
+          .length;
+      }
+
+      it('stops at the allowance: paging and history pages together never exceed it', async () => {
+        const { scan, graph } = service(wideWindowTenant());
+        const result = await scan.scan(WIDE);
+
+        expect(result.outcome).toBe('ok');
+        expect(result.rowsScanned).toBe(4497);
+        expect(result.candidates).toBe(6);
+        // One window page, then 12 for the first history lookup; the second
+        // lookup's further pages are refused at the allowance, not spent past it
+        expect(traceRequests(graph)).toBe(20);
+        expect(result.requestsUsed).toBe(20);
+        expect(result.candidatesChecked).toBe(2);
+        expect(result.incomplete).toBe(true);
+        expect(result.incompleteReasons).toEqual(['candidate_limit', 'request_allowance']);
+        // Every row of the window was read: only the checks were cut short
+        expect(result.windowUnread).toBeUndefined();
+      });
+
+      it.each([2, 5, 7, 12, 13, 18, 19, 20, 24, 31, 40])(
+        'spends at most an allowance of %i, and counts exactly what it spent',
+        async allowance => {
+          const { scan, graph } = service(wideWindowTenant());
+          const result = await scan.scan({ ...WIDE, maxRequests: allowance, maxCandidates: 10 });
+          expect(traceRequests(graph)).toBeLessThanOrEqual(allowance);
+          expect(result.requestsUsed).toBe(traceRequests(graph));
+          if (result.candidatesChecked < result.candidates) {
+            expect(result.incompleteReasons).toContain('request_allowance');
+          }
+        }
+      );
+
+      it('says when the allowance ended the read before the last page of the window', async () => {
+        const { scan, graph } = service(wideWindowTenant({ windowPages: 3 }));
+        const result = await scan.scan({ ...WIDE, maxRequests: 2 });
+        expect(traceRequests(graph)).toBe(2);
+        expect(result.pages).toBe(2);
+        expect(result.windowUnread).toBe('request_allowance');
+        expect(result.incompleteReasons).toContain('request_allowance');
+        expect(result.candidatesChecked).toBe(0);
+      });
+
+      it('marks a window cut short by the page cap, not by the allowance', async () => {
+        const { scan } = service(wideWindowTenant({ windowPages: 3 }));
+        const result = await scan.scan({ ...WIDE, maxPages: 2 });
+        expect(result.windowUnread).toBe('page_limit');
+      });
     });
 
     it('does not touch the on-report sender-history allowance', async () => {

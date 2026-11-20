@@ -13,7 +13,9 @@ const mockState: {
   config: Record<string, unknown>;
   db: unknown;
   invoke: jest.Mock;
-} = { config: {}, db: undefined, invoke: jest.fn() };
+  /** The intelligence database's raw query, as campaign response uses it */
+  runQuery: jest.Mock;
+} = { config: {}, db: undefined, invoke: jest.fn(), runQuery: jest.fn() };
 const mockSendEmail = jest.fn();
 const mockSendAnalysisReport = jest.fn();
 const mockAnalyzeEmail = jest.fn();
@@ -49,6 +51,7 @@ jest.mock('../../../src/services/intelligence/database.service', () => {
     IntelligenceDatabaseService: jest.fn().mockImplementation(() => ({
       initialize: jest.fn().mockResolvedValue(undefined),
       featureStore: () => mockState.db,
+      runQuery: (text: string, params: unknown[]) => mockState.runQuery(text, params),
     })),
   };
 });
@@ -334,6 +337,54 @@ describe('scheduled fan-out scan through the entry point', () => {
     await unified.handler(SES_EVENT as never, context);
     expect(mockAnalyzeEmail).toHaveBeenCalledTimes(1);
     expect(mockState.invoke).not.toHaveBeenCalled();
+  });
+
+  it('hands a flagged wave to campaign response when it is on, and degrades to the plain alert without migration 006', async () => {
+    mockState.config = {
+      ...baseConfig(true),
+      campaignAlerts: { enabled: true, distributionList: 'everyone@example.com' },
+      campaignResponse: {
+        enabled: true,
+        audience: 'recipients',
+        employeeWarning: 'approve',
+        distributionWarning: 'auto',
+        approvalTtlHours: 4,
+        maxWarningsPerCampaign: 100,
+        maxRemovalMailboxes: 500,
+        maxRemovalMessages: 1000,
+        updateIntervalMinutes: 30,
+        reachThreshold: 5,
+        alreadyClickedInstructions: 'Contact the security team.',
+        timeZone: 'UTC',
+      },
+    };
+    mockState.runQuery = jest
+      .fn()
+      .mockRejectedValue(Object.assign(new Error('relation does not exist'), { code: '42P01' }));
+    const { FakeFanoutDb: FakeDb } =
+      require('../../mocks/fanout.db') as typeof import('../../mocks/fanout.db');
+    mockState.db = new FakeDb();
+    let fresh: Unified | undefined;
+    jest.isolateModules(() => {
+      fresh = require('../../../src/handlers/unified.handler') as Unified;
+    });
+
+    const response = await fresh!.handler(SCHEDULE as never, context);
+    expect(body(response)).toMatchObject({ outcome: 'ok', flagged: 1, alertsSent: 1 });
+    // Campaign response was asked first (the scheduled path is wired to it)
+    expect(mockState.runQuery).toHaveBeenCalled();
+    expect(String(mockState.runQuery.mock.calls[0][0])).toContain('campaign_incidents');
+    // Its tables are missing: the plain alert, to the security team only
+    expect(mockSendEmail).toHaveBeenCalledTimes(1);
+    const [to, subject, , , cc] = mockSendEmail.mock.calls[0] as [
+      string,
+      string,
+      string,
+      string,
+      string[],
+    ];
+    expect([to, ...cc]).toEqual(SECURITY_TEAM);
+    expect(subject).toMatch(/^Phishy fan-out alert FANOUT-/);
   });
 
   it('runs no scan without the intelligence database', async () => {
