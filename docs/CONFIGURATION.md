@@ -128,7 +128,7 @@ The display name on outbound mail (`notification.senderName`, default `Phishy`) 
 |----------|---------|-------------|
 | `S3_BUCKET_NAME` | - | S3 bucket SES stores raw emails in. Required |
 | `PHISHY_AWS_REGION` / `AWS_REGION` | the Lambda's region, else `us-east-1` | Region for S3 and SES (`storage.region`) |
-| `S3_PREFIX` | `emails` | Accepted but not currently read: the object key comes from the SES receipt, and the fallback key is always `emails/<message-id>`. Keep SES's prefix `emails/` |
+| `S3_PREFIX` | `emails` | Accepted (`storage.s3Prefix`) so existing configurations keep loading, but ignored, with a warning at startup when set: the object key comes from the SES receipt, and the fallback key is always `emails/<message-id>`. Keep SES's prefix `emails/` and leave this unset |
 
 ### Profile and Configuration File
 
@@ -146,7 +146,7 @@ The display name on outbound mail (`notification.senderName`, default `Phishy`) 
 | `PHISHY_CAMPAIGN_ALERTS_ENABLED` | `false` | Enable campaign alerts (needs the database) |
 | `PHISHY_CAMPAIGN_ALERTS_DISTRIBUTION` | - | The address the campaign broadcast goes to, typically an all-staff list (`campaignAlerts.distributionList`) |
 
-`intelligence.type` accepts `postgres` (the default) and `dynamodb`, but only PostgreSQL is implemented; `intelligence.tableName` is unused.
+`intelligence.type` accepts `postgres` (the default) and `dynamodb`, but only PostgreSQL is implemented: `dynamodb` is ignored, and so is `intelligence.tableName`. Both are still accepted so existing configuration files keep loading, and each logs a warning at startup when set.
 
 #### Campaign alerts
 
@@ -658,7 +658,6 @@ For more complex setups, use a JSON configuration file. Upload it to S3 and set 
   },
   "storage": {
     "s3Bucket": "phishy-emails",
-    "s3Prefix": "emails",
     "region": "us-east-1"
   },
   "logLevel": "info"

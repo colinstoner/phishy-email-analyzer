@@ -32,7 +32,6 @@
   },
   "storage": {
     "s3Bucket": "phishy-emails",
-    "s3Prefix": "emails",
     "region": "us-east-1"
   },
   "profile": "s3://phishy-emails/profiles/my-org.profile.json",

@@ -25,9 +25,10 @@ let cachedDbConnectionString: string | null = null;
 /**
  * Configuration priority (highest to lowest):
  * 1. Environment variables (runtime overrides)
- * 2. S3 configuration file
- * 3. Local configuration file
- * 4. Default values
+ * 2. S3 configuration file (PHISHY_CONFIG_S3)
+ * 3. Default values
+ * No local configuration file is read: config/phishy.config.json is only a
+ * place to keep a file before uploading it to S3.
  */
 
 /**
@@ -178,6 +179,9 @@ export async function loadConfig(): Promise<PhishyConfig> {
   config = await resolveSecrets(config);
 
   warnAboutCredentialInBrokerMode(config);
+  for (const warning of ignoredConfigKeyWarnings(config)) {
+    logger.warn(warning);
+  }
 
   // Validate final configuration
   const validation = safeValidateConfig(config);
@@ -216,6 +220,31 @@ function warnAboutCredentialInBrokerMode(config: PartialPhishyConfig): void {
         'It is ignored here; remove it so only the Graph broker holds the credential'
     );
   }
+}
+
+/**
+ * Keys the schema still accepts, so existing configurations keep loading,
+ * but that nothing reads. One fixed message per key that was set explicitly
+ * (in the S3 file or the environment); values are never logged.
+ */
+export function ignoredConfigKeyWarnings(config: PartialPhishyConfig): string[] {
+  const warnings: string[] = [];
+  if (config.storage?.s3Prefix !== undefined) {
+    warnings.push(
+      'storage.s3Prefix (S3_PREFIX) is set but ignored: the object key comes from the SES ' +
+        'receipt and the fallback key is always emails/<message-id>. Remove it'
+    );
+  }
+  if (config.intelligence?.type === 'dynamodb') {
+    warnings.push(
+      'intelligence.type is dynamodb, which is not implemented and is ignored: the ' +
+        'intelligence database is PostgreSQL (intelligence.connectionString). Remove it'
+    );
+  }
+  if (config.intelligence?.tableName !== undefined) {
+    warnings.push('intelligence.tableName is set but ignored (nothing reads it). Remove it');
+  }
+  return warnings;
 }
 
 /**
@@ -287,7 +316,7 @@ function getDefaultConfig(): PartialPhishyConfig {
     },
     storage: {
       s3Bucket: 'phishy-emails',
-      s3Prefix: 'emails',
+      // s3Prefix is left to the schema default so an explicit (ignored) value can be warned about
       region: process.env.AWS_REGION ?? 'us-east-1',
     },
     intelligence: {

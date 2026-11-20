@@ -91,6 +91,7 @@ const NotificationConfigSchema = z.object({
  */
 const StorageConfigSchema = z.object({
   s3Bucket: z.string().min(1, 'S3 bucket name is required'),
+  /** Accepted for compatibility but not read (the key prefix is fixed); warned about when set */
   s3Prefix: z.string().default('emails'),
   region: z.string().default('us-east-1'),
 });
@@ -100,8 +101,10 @@ const StorageConfigSchema = z.object({
  */
 const IntelligenceConfigSchema = z.object({
   enabled: z.boolean().default(false),
+  /** Only PostgreSQL is implemented; `dynamodb` is accepted for compatibility, ignored and warned about */
   type: z.enum(['postgres', 'dynamodb']).default('postgres'),
   connectionString: z.string().optional(),
+  /** Accepted for compatibility but not read; warned about when set */
   tableName: z.string().optional(),
 });
 
