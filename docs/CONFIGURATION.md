@@ -164,6 +164,40 @@ Requires the intelligence database and `migrations/002_analysis_feedback.sql`.
 |----------|---------|-------------|
 | `PHISHY_EMAIL_COMMANDS_ENABLED` | `false` | Process security-team replies as commands |
 
+With [campaign response](#campaign-response-optional) on, the channel also accepts **approvals** of proposed actions. Those are never interpreted by the model and never matched loosely: only a line of its own reading `APPROVE WARNING <reference>` or `APPROVE REMOVAL <reference>`, in your own new text (not the quoted history), with the reference printed next to that action in the incident email. Approving twice does nothing twice.
+
+### Campaign Response (Optional)
+
+What Phishy does once a campaign crosses the alert threshold (at least 3 reports from at least 2 people within 4 hours). Off by default; off means the campaign alert behaves exactly as before: one generic warning to `PHISHY_CAMPAIGN_ALERTS_DISTRIBUTION`.
+
+When on, each campaign becomes an **incident**:
+
+- **The security team** gets one incident email: what the attack is, timeline, blast radius, what Phishy has done, and proposed actions, each with the exact reply line that approves it. Later reports and wider reach arrive as replies in the same thread, at most one per `updateIntervalMinutes`.
+- **The people who received it** (found by blast radius) get a plain-language warning, one email each, with your organization's own "if you already clicked" instructions. People who reported it get a short thank-you note instead. Nobody whose copy was not delivered is warned; every address must be on a safe domain; no link from the attack is ever included.
+- **Remove remaining copies** is proposed with a scope of exact message IDs per mailbox. In this version approving it runs a **dry run**: Phishy replies with what it would remove, and no mailbox is changed (the mailbox write tier is not built).
+
+`audience` decides who is warned. The default, `distribution`, keeps today's broadcast. Choose `recipients` (or `both`) to warn the people who actually received it; that needs [blast radius](#blast-radius-optional). `employeeWarning` decides whether the targeted warning waits for an approval (`approve`, the default), goes out at once (`auto`) or never (`off`); `distributionWarning` does the same for the broadcast (default `auto`, as before). An approval is good for `approvalTtlHours` and applies to its own campaign only; a late approval is proposed again under a new reference.
+
+Requires campaign alerts (`PHISHY_CAMPAIGN_ALERTS_ENABLED`), the intelligence database, `migrations/006_campaign_response.sql` (applied manually; without it Phishy logs which migration to apply and behaves as with campaign response off), and the email command channel for approvals. Migration 003 is needed for a `false positive` reply to close an incident.
+
+| Variable | Config key | Default | Description |
+|----------|-----------|---------|-------------|
+| `PHISHY_CAMPAIGN_RESPONSE_ENABLED` | `campaignResponse.enabled` | `false` | Turn campaign response on |
+| `PHISHY_CAMPAIGN_RESPONSE_AUDIENCE` | `campaignResponse.audience` | `distribution` | Who is warned: `distribution`, `recipients` or `both` |
+| `PHISHY_CAMPAIGN_RESPONSE_EMPLOYEE_WARNING` | `campaignResponse.employeeWarning` | `approve` | Targeted warning: `off`, `approve` (after a security-team approval) or `auto` |
+| `PHISHY_CAMPAIGN_RESPONSE_LIST_WARNING` | `campaignResponse.distributionWarning` | `auto` | Distribution-list broadcast: `off`, `approve` or `auto` |
+| `PHISHY_CAMPAIGN_RESPONSE_APPROVAL_TTL_HOURS` | `campaignResponse.approvalTtlHours` | `4` | How long a proposed action can be approved (max 72) |
+| `PHISHY_CAMPAIGN_RESPONSE_MAX_WARNINGS` | `campaignResponse.maxWarningsPerCampaign` | `100` | Most employee emails (warnings and thank-you notes) per campaign (1–1000) |
+| `PHISHY_CAMPAIGN_RESPONSE_MAX_REMOVAL_MAILBOXES` | `campaignResponse.maxRemovalMailboxes` | `500` | Most mailboxes one removal may name |
+| `PHISHY_CAMPAIGN_RESPONSE_MAX_REMOVAL_MESSAGES` | `campaignResponse.maxRemovalMessages` | `1000` | Most messages one removal may name |
+| `PHISHY_CAMPAIGN_RESPONSE_UPDATE_INTERVAL_MINUTES` | `campaignResponse.updateIntervalMinutes` | `30` | Shortest gap between incident updates |
+| `PHISHY_CAMPAIGN_RESPONSE_CLICKED_INSTRUCTIONS` | `campaignResponse.alreadyClickedInstructions` | *(see below)* | Plain text shown under "If you already clicked or entered your password" |
+| `PHISHY_CAMPAIGN_RESPONSE_TIME_ZONE` | `campaignResponse.timeZone` | `UTC` | IANA time zone for the times in the warning (e.g. `Europe/London`) |
+
+Default "already clicked" text: *If you clicked a link in it, opened an attachment, or entered your password, contact your IT or security team straight away and change your password. You will not be in trouble: reporting it quickly is what limits the damage.* Replace it with your organization's own instructions (who to call, how to reach them out of hours).
+
+Sending notes: warnings are sent one per person through SES, so `maxWarningsPerCampaign` emails count against your SES sending rate and quota; in `auto` mode they are sent from the Lambda that crossed the threshold, after the reports, and anything not sent before the function runs short of time is counted and proposed again. The targeted warning reaches at most the 100 recipients a blast-radius lookup lists; a larger campaign's incident email says how many have no known address, and `audience: both` covers them with the broadcast.
+
 ### Outlook Report Button Intake
 
 Microsoft 365 can deliver a copy of every message an employee reports with Outlook's built-in **Report** button to a mailbox of your choice (Defender portal → Settings → Email & collaboration → User reported settings → *Send reported messages to*). If those reports reach Phishy's address, this flag makes Phishy recognize them and handle them **silently** — the employee clicked a button and is not waiting for an answer, so their experience does not change:
@@ -321,7 +355,7 @@ Sizing:
 
 | Metric | Dimensions | Meaning |
 |--------|-----------|---------|
-| `GraphBrokerCalls` | `Operation` = `original_message_lookup` / `sender_history_lookup` / `blast_radius_lookup`; `Outcome` = `ok` / `refused` / `timeout` / `throttled` / `invoke_error` / `function_error` / `oversized` / `malformed` / `invalid_request` | One per invocation of the broker. Anything but `ok` is worth an alarm: `invoke_error` usually means a missing `lambda:InvokeFunction` permission or no route to the Lambda API; `refused` means the broker's own configuration is wrong or a feature flag is off there (the main function's log line `Graph broker call did not produce a result` carries the broker's reason word) |
+| `GraphBrokerCalls` | `Operation` = `original_message_lookup` / `sender_history_lookup` / `blast_radius_lookup` / `fanout_scan`; `Outcome` = `ok` / `refused` / `timeout` / `throttled` / `invoke_error` / `function_error` / `oversized` / `malformed` / `invalid_request` | One per invocation of the broker. Anything but `ok` is worth an alarm: `invoke_error` usually means a missing `lambda:InvokeFunction` permission or no route to the Lambda API; `refused` means the broker's own configuration is wrong or a feature flag is off there (the main function's log line `Graph broker call did not produce a result` carries the broker's reason word) |
 | `GraphBrokerCallDurationMs` | same | Round-trip time of the invocation |
 
 The features' own metrics (`OriginalFetchCount`, `SenderHistoryLookups`, `BlastRadius*`) are emitted by the main function in both modes, so existing dashboards and alarms keep working. Cached answers (`cache_hit`, `BlastRadiusCacheHits`) now come from the broker's instances, which are shared by every main-function instance.
@@ -445,6 +479,35 @@ File configuration uses `graph.senderHistory.*` with the same names (`enabled`, 
 The sending IPs are never given to the model and never logged at info level.
 
 **Metrics** (namespace `Phishy`, dimension `Outcome` = `ok`, `cache_hit`, `skipped`, `timeout`, `forbidden`, `cooldown`, `rate_limited`, `error`): `SenderHistoryLookups`, `SenderHistoryDurationMs`, `SenderHistoryAnomalousFanout`, `SenderHistoryTruncated`, `SenderHistoryForbiddenRetries`, `SenderHistoryFilterMismatches`.
+
+#### Scheduled fan-out scan (optional)
+
+The sender-relationship rule above, run proactively: every few minutes, without waiting for anyone to report, Phishy reads the last few minutes of your tenant's inbound mail flow from message trace and emails the **security team** when an established external contact suddenly sends one subject to many internal people. A real takeover wave typically reaches dozens of mailboxes within a minute or two, minutes before the first employee report; the scan exists to close that gap. Code-driven and read-only; **no AI model is involved**. How it works and what it cannot see: [ARCHITECTURE.md](ARCHITECTURE.md#scheduled-fan-out-scan).
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PHISHY_GRAPH_FANOUT_SCAN_ENABLED` | `false` | Enable the scan. Only effective with `PHISHY_GRAPH_ENABLED=true`. Set it on the main function and, in broker mode, on the broker too (the broker refuses the operation otherwise) |
+| `PHISHY_GRAPH_FANOUT_SCAN_OVERLAP_MINUTES` | `10` | Each window starts this long before the previous scan's window ended (1-30), so mail flow that message trace records late is still seen |
+| `PHISHY_GRAPH_FANOUT_SCAN_MAX_WINDOW_MINUTES` | `60` | Widest window one scan reads (5-120). After a longer gap (the schedule was off, scans failed) the oldest part is skipped, logged, and the scan counted as incomplete |
+| `PHISHY_GRAPH_FANOUT_SCAN_MAX_PAGES` | `4` | Message trace pages (up to 5000 rows each) one scan reads (1-10). More rows than that makes the scan incomplete, never silently truncated |
+| `PHISHY_GRAPH_FANOUT_SCAN_MAX_CANDIDATES` | `3` | Sender-and-subject groups (most recipients first) whose history one scan checks (1-10) |
+| `PHISHY_GRAPH_FANOUT_SCAN_REQUEST_ALLOWANCE` | `20` | Message trace requests all scans together may spend in any 5 minutes (5-40), tracked in the database across Lambda instances |
+| `PHISHY_GRAPH_FANOUT_SCAN_BUDGET_MS` | `60000` | Hard limit on one scan's Graph work (10000-120000) |
+| `PHISHY_GRAPH_FANOUT_SCAN_DEDUPE_HOURS` | `24` | A wave (one sender, one subject) quiet for this long is over; the same sender and subject later is a new wave and alerts again (1-168) |
+
+File configuration uses `graph.fanoutScan.*` (`enabled`, `overlapMinutes`, `maxWindowMinutes`, `maxPages`, `maxCandidates`, `requestAllowancePer5Min`, `budgetMs`, `dedupeHours`). The rule's thresholds and history period are the sender-relationship check's (`PHISHY_GRAPH_SENDER_HISTORY_LOOKBACK_DAYS`, `_BURST_WINDOW_HOURS`, `_FANOUT_MIN_RECIPIENTS`, `_FANOUT_MULTIPLIER`, or their defaults); in broker mode the broker's values are the ones applied. The scan does not need the on-report check to be enabled.
+
+**Requirements.**
+
+- `ExchangeMessageTrace.Read.All` on the read app registration, as for the sender-relationship check.
+- **The intelligence database, with `migrations/005_fanout_scan.sql` applied manually.** The scan keeps its lock, its window, its request log and the alerted waves there ([DATABASE.md](DATABASE.md)). Without the database it does not run: each scheduled invocation logs what to configure and emits `Outcome=no_database`; without the migration, `Outcome=migration_missing` and a log line naming the file.
+- `SECURITY_TEAM_DISTRIBUTION`: the only recipients of the alert. With it empty the scan does not run.
+- `SAFE_DOMAINS` decide what "internal" means: a recipient on one of them (or a subdomain) is internal, a sender on none of them is external. In broker mode they are sent to the broker in the scan request.
+- A schedule that invokes the **main** function every 5 minutes (or so) with exactly this payload: `{"phishyScheduledTask": "graph_fanout_scan", "version": 1}`. The SAM template can create it ([AWS.md](../AWS.md)). Any other payload carrying `phishyScheduledTask` is refused; an EventBridge rule without this constant input does nothing.
+
+**Request budget.** Message trace allows 100 requests per 5 minutes per tenant, shared by everything that reads it. A scan costs one request per page of the window (one at most tenants' volumes: a 15-minute window is a few hundred rows) plus, for each candidate it checks, the sender-relationship lookup's requests (6 at a 30-day lookback; each 403 retry is one more), plus about 2 for a blast-radius lookup when an alert is sent and that feature is on. All scans together spend at most `PHISHY_GRAPH_FANOUT_SCAN_REQUEST_ALLOWANCE` (20) per 5 minutes: the allowance is tracked in the database, so it holds whichever Lambda instance runs a scan, and only one scan runs at a time. It is separate from the on-report sender-relationship check's own allowance (60 per broker instance per 5 minutes), so a scan never takes requests from a report, and 20 + 60 stays under the tenant's 100 with one broker instance. Each broker instance also caps scans at 40 requests per 5 minutes whatever the caller asks.
+
+**Metrics** (namespace `Phishy`, dimension `Outcome` = `ok`, `skipped_running`, `no_database`, `migration_missing`, `rate_limited`, `forbidden`, `timeout`, `error`): `FanoutScans`, `FanoutScanDurationMs`, `FanoutScanRowsScanned`, `FanoutScanCandidates`, `FanoutScanFlags`, `FanoutScanAlertsSent`, `FanoutScanIncomplete`, `FanoutScanTraceRequests`. Alarm on `FanoutScans` with any outcome other than `ok` and `skipped_running` persisting, and on `FanoutScanIncomplete`.
 
 ### AWS Secrets Manager Integration
 

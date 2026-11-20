@@ -38,3 +38,15 @@ export const MESSAGE_ID_PATTERN = /^<?[^<>\s@]{1,200}@[^<>\s@]{1,255}>?$/;
 
 /** A delivery status as message trace words it ("Delivered", "Quarantined") */
 export const DELIVERY_STATUS_PATTERN = /^[A-Za-z][A-Za-z ]{0,39}$/;
+
+/**
+ * A Graph item ID (a message): standard or URL-safe base64 text. Carried,
+ * never interpreted; it may enter a request only through `graphPath`.
+ */
+export const GRAPH_ITEM_ID_PATTERN = /^[A-Za-z0-9+/=_-]{1,512}$/;
+
+/** An Entra directory object ID (a user's mailbox): a GUID */
+export const DIRECTORY_ID_PATTERN = /^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$/;
+
+/** Graph IDs of matching copies kept per recipient: the scope a response action may name */
+export const MAX_REPORTED_COPY_IDS = 5;

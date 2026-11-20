@@ -158,6 +158,37 @@ function isReservedHost(host: string): boolean {
   );
 }
 
+/**
+ * Security-gateway wrapper hosts the parser must recognize. A case may use
+ * them (that is what it tests), and the target each one wraps is linted in
+ * its decoded form below, so it must still be on a reserved domain.
+ */
+const GATEWAY_WRAPPER_HOSTS = new Set([
+  'linkprotect.cudasvc.com',
+  'clicktime.symantec.com',
+  'secure-web.cisco.com',
+]);
+
+/**
+ * A SharePoint host is the file-share platform the parser must recognize,
+ * but its tenant label is a real namespace: a case may use one only with an
+ * invented tenant whose label contains "example" (`quarrystoneexample-my`).
+ */
+function isInventedSharePointHost(host: string): boolean {
+  return /^[a-z0-9]*example[a-z0-9]*(?:-my)?\.sharepoint\.com$/.test(host.toLowerCase());
+}
+
+/** Percent-decode every escape run that decodes (a wrapper's target is percent-encoded) */
+function percentDecoded(text: string): string {
+  return text.replace(/(?:%[0-9a-f]{2})+/gi, run => {
+    try {
+      return decodeURIComponent(run);
+    } catch {
+      return run;
+    }
+  });
+}
+
 const URL_HOST = /https?:\/\/(?:[^\s/@"'<>]*@)?([^\s/:?#"'<>)\]\\,;]+)/gi;
 const ADDRESS_HOST = /[A-Za-z0-9._%+-]+@([A-Za-z0-9Ѐ-ӿ-]+(?:\.[A-Za-z0-9Ѐ-ӿ-]+)+)/g;
 const PHONE_TAIL = /(?<!\d)(\d{3})[-. ](\d{4})(?!\d)/g;
@@ -169,7 +200,16 @@ const PHONE_TAIL = /(?<!\d)(\d{3})[-. ](\d{4})(?!\d)/g;
  */
 export function lintEmailInertness(raw: string): string[] {
   const problems = new Set<string>();
-  for (const match of raw.matchAll(URL_HOST)) {
+  // XML namespace declarations (Office HTML) are identifiers, not links, and
+  // the parser does not take them as links either
+  const linted = raw.replace(/\sxmlns(?::[a-z0-9]+)?\s*=\s*"[^"]*"/gi, ' ');
+  // Twice decoded too: a wrapped target, and one wrapped inside another
+  const decodedOnce = percentDecoded(linted);
+  const texts = [linted, decodedOnce, percentDecoded(decodedOnce)];
+  for (const match of texts.flatMap(text => [...text.matchAll(URL_HOST)])) {
+    if (GATEWAY_WRAPPER_HOSTS.has(match[1].toLowerCase()) || isInventedSharePointHost(match[1])) {
+      continue;
+    }
     if (!isReservedHost(match[1])) {
       problems.add(`URL host "${match[1]}" is not on a reserved test domain`);
     }

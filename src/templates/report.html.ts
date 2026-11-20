@@ -88,6 +88,11 @@ export interface ReportOptions {
   silentReport?: {
     reporter: string;
   };
+  /**
+   * The email command channel is on: an email addressed to the security
+   * team alone says how to reply with a verdict.
+   */
+  replyCommands?: boolean;
 }
 
 /**
@@ -111,6 +116,70 @@ function confidenceText(risk: NonNullable<ReportOptions['risk']>): string | unde
     default:
       return undefined;
   }
+}
+
+/** The fused risk as every Phishy email shows it */
+export type ReportRisk = NonNullable<ReportOptions['risk']>;
+
+/**
+ * The risk score and Confidence lines, plain text, exactly as the report
+ * shows them. Every Phishy email that states a risk uses this. A failed
+ * analysis has no real score: never "0/100 (safe)", which would read as a
+ * clean bill of health for an email nobody checked.
+ */
+export function riskScoreLines(risk: ReportRisk): string[] {
+  if (risk.verdict === 'undetermined') {
+    return ['Risk score: not assessed'];
+  }
+  const lines = [`Risk score: ${risk.riskScore}/100 (${risk.riskLevel})`];
+  const confidence = confidenceText(risk);
+  if (confidence) {
+    lines.push(`Confidence: ${confidence}`);
+  }
+  return lines;
+}
+
+/** The same two lines as HTML, with the score prominent */
+export function riskScoreHtml(risk: ReportRisk): string {
+  if (risk.verdict === 'undetermined') {
+    return `<p class="risk-score">Risk score: <strong>not assessed</strong></p>`;
+  }
+  let html = `<p class="risk-score">Risk score: <strong>${risk.riskScore}/100</strong> (${escapeHtml(risk.riskLevel)})</p>`;
+  const confidence = confidenceText(risk);
+  if (confidence) {
+    html += `<p class="risk-score">Confidence: <strong>${escapeHtml(confidence)}</strong></p>`;
+  }
+  return html;
+}
+
+/** A verdict's label, plain-language gloss and "what to do", as the report words them */
+export function describeVerdict(verdict: string): {
+  label: string;
+  plain?: string;
+  action?: string;
+  tone: 'danger' | 'caution' | 'safe';
+} {
+  const display = VERDICT_DISPLAY[verdict];
+  return display
+    ? { label: display.label, plain: display.plain, action: display.action, tone: display.tone }
+    : { label: verdict.toUpperCase(), tone: 'caution' };
+}
+
+/**
+ * In an email addressed to the security team alone (and carrying the
+ * reference replies are matched by): how to correct the verdict. The same
+ * words as the incident email's proposed actions. Never in a copy the
+ * reporter reads.
+ */
+function securityReplyHint(options?: ReportOptions): string | undefined {
+  return options?.audience === 'security' && options.analysisId && options.replyCommands
+    ? 'Security team: reply to this email with "confirmed phishing" or "false positive" to record your verdict for the whole campaign.'
+    : undefined;
+}
+
+/** HTML-escape text for any Phishy email */
+export function escapeEmailHtml(text: string): string {
+  return escapeHtml(text);
 }
 
 /** Lead line for a report sent to the security team about a silent button report */
@@ -443,8 +512,9 @@ export function buildEmailHtml(
             </div>
             ${options?.blastRadius ? buildBlastRadiusHtml(options.blastRadius) : ''}
             <div class="metadata">
-                <p><strong>Analyzed Email Subject:</strong> ${escapeHtml(originalSubject)}</p>
-                <p><strong>From:</strong> ${escapeHtml(emailData.from_email)}</p>
+                <p><strong>Subject:</strong> ${escapeHtml(originalSubject)}</p>
+                <p><strong>Reported by:</strong> ${escapeHtml(emailData.from_email)}</p>
+                ${securityReplyHint(options) ? `<p>${escapeHtml(securityReplyHint(options) ?? '')}</p>` : ''}
                 ${options?.analysisId ? `<p class="ref-line">Reference: ${escapeHtml(options.analysisId)}</p>` : ''}
             </div>
             ${buildOriginalEmailSection(emailData, options?.audience)}
@@ -482,17 +552,7 @@ function buildAnalysisSection(analysis: AnalysisResult, options?: ReportOptions)
     const label = display?.label ?? options.risk.verdict.toUpperCase();
     html += `<div class="verdict-banner ${TONE_CLASS[tone]}-bg">`;
     html += `<p class="verdict-line"><span class="${TONE_CLASS[tone]}">${escapeHtml(label)}</span></p>`;
-    // A failed analysis has no real score — never render "0/100 (safe)", which
-    // would read as a clean bill of health for an email we never checked.
-    if (options.risk.verdict === 'undetermined') {
-      html += `<p class="risk-score">Risk score: <strong>not assessed</strong></p>`;
-    } else {
-      html += `<p class="risk-score">Risk score: <strong>${options.risk.riskScore}/100</strong> (${escapeHtml(options.risk.riskLevel)})</p>`;
-      const confidence = confidenceText(options.risk);
-      if (confidence) {
-        html += `<p class="risk-score">Confidence: <strong>${escapeHtml(confidence)}</strong></p>`;
-      }
-    }
+    html += riskScoreHtml(options.risk);
     html += `</div>`;
     if (display?.plain) {
       html += `<p><strong>What this means:</strong> ${escapeHtml(display.plain)}</p>`;
@@ -600,16 +660,7 @@ export function buildPlainTextReport(
   // Verdict + risk
   if (options?.risk) {
     lines.push(`Verdict: ${display?.label ?? options.risk.verdict.toUpperCase()}`);
-    // A failed analysis has no real score — don't print "0/100 (safe)".
-    if (options.risk.verdict === 'undetermined') {
-      lines.push('Risk score: not assessed');
-    } else {
-      lines.push(`Risk score: ${options.risk.riskScore}/100 (${options.risk.riskLevel})`);
-      const confidence = confidenceText(options.risk);
-      if (confidence) {
-        lines.push(`Confidence: ${confidence}`);
-      }
-    }
+    lines.push(...riskScoreLines(options.risk));
     if (display?.plain) {
       lines.push(`What this means: ${display.plain}`);
     }
@@ -669,7 +720,11 @@ export function buildPlainTextReport(
   lines.push(divider);
   lines.push('Email Details:');
   lines.push(`  Subject: ${emailData.subject}`);
-  lines.push(`  From: ${emailData.from_email}`);
+  lines.push(`  Reported by: ${emailData.from_email}`);
+  const hint = securityReplyHint(options);
+  if (hint) {
+    lines.push(`  ${hint}`);
+  }
 
   if (options?.analysisId) {
     lines.push(`  Reference: ${options.analysisId}`);
@@ -795,7 +850,7 @@ function blastRadiusLines(report: BlastRadiusReport): string[] {
  * addresses are the organization's own, but they and the sender/subject
  * come from mail flow: everything is escaped.
  */
-function buildBlastRadiusHtml(report: BlastRadiusReport): string {
+export function buildBlastRadiusHtml(report: BlastRadiusReport): string {
   if (report.status === 'unavailable') {
     return `
             <div class="analysis blast-radius">
@@ -836,7 +891,7 @@ function buildBlastRadiusHtml(report: BlastRadiusReport): string {
 }
 
 /** Blast-radius section (plain text) for the security team's copy */
-function buildBlastRadiusText(report: BlastRadiusReport): string[] {
+export function buildBlastRadiusText(report: BlastRadiusReport): string[] {
   if (report.status === 'unavailable') {
     return [`Security team only: ${report.note ?? 'Blast radius lookup could not be completed.'}`];
   }
@@ -863,7 +918,7 @@ function buildBlastRadiusText(report: BlastRadiusReport): string[] {
 /**
  * Escape HTML special characters
  */
-function escapeHtml(text: string): string {
+export function escapeHtml(text: string): string {
   const htmlEntities: Record<string, string> = {
     '&': '&amp;',
     '<': '&lt;',

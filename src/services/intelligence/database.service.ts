@@ -405,6 +405,17 @@ export class IntelligenceDatabaseService {
   }
 
   /**
+   * Run one parameterized statement. For services that keep their own
+   * tables (campaign response, migration 006); errors, including 42P01 and
+   * 42703, reach the caller unchanged.
+   */
+  async runQuery(text: string, params: unknown[]): Promise<{ rows: Record<string, unknown>[] }> {
+    await this.initialize();
+    const result = await this.pool.query(text, params);
+    return { rows: result.rows as Record<string, unknown>[] };
+  }
+
+  /**
    * Store an email analysis result
    */
   async storeAnalysis(record: EmailAnalysisRecord): Promise<string> {
@@ -1028,6 +1039,26 @@ export class IntelligenceDatabaseService {
       lastSeenAt: row.last_seen_at as Date,
       alertSentAt: (row.alert_sent_at as Date | null) ?? undefined,
       isActive: row.is_active as boolean,
+    };
+  }
+
+  /**
+   * Parameterized queries for a feature that keeps its own tables (the
+   * fan-out scan's state, migration 005), after the baseline initialization.
+   * Callers pass every value as a parameter, never in the SQL text.
+   */
+  featureStore(): {
+    query(
+      sql: string,
+      params?: unknown[]
+    ): Promise<{ rows: Array<Record<string, unknown>>; rowCount: number | null }>;
+  } {
+    return {
+      query: async (sql, params) => {
+        await this.initialize();
+        const result = await this.pool.query(sql, params);
+        return { rows: result.rows as Array<Record<string, unknown>>, rowCount: result.rowCount };
+      },
     };
   }
 

@@ -14,6 +14,7 @@ import { ThreatIndicatorRecord } from './database.service';
 import { createLogger } from '../../utils/logger';
 import { extractUrls, extractDomain } from '../../utils/validation';
 import { attachmentLinkFacts } from '../attachments';
+import { unwrapKnownWrappers } from '../../utils/canonicalize';
 
 const logger = createLogger('ioc-extractor');
 
@@ -259,6 +260,11 @@ function unwrapRedirectChain(url: string, maxDepth = 4): string[] {
 }
 
 function extractEmbeddedUrl(url: string): string | null {
+  // Known security-gateway wrappers first (Barracuda's `a=`, for example,
+  // is not a generic redirect key), via the same code the prompt uses
+  const unwrapped = unwrapKnownWrappers(url);
+  if (unwrapped) return unwrapped;
+
   try {
     const parsed = new URL(url);
 

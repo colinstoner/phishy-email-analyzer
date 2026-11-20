@@ -37,8 +37,11 @@ import { DirectoryUser, listUsers } from './directory.operations';
 import { GraphClient } from './graph.client';
 import {
   DELIVERY_STATUS_PATTERN,
+  DIRECTORY_ID_PATTERN,
+  GRAPH_ITEM_ID_PATTERN,
   MAX_ADDRESS_LENGTH,
   MAX_LISTED_RECIPIENTS,
+  MAX_REPORTED_COPY_IDS,
   MAX_SUBJECT_LENGTH,
   MESSAGE_ID_PATTERN,
 } from './graph.limits';
@@ -117,6 +120,16 @@ export interface BlastRadiusRecipient {
   lastVerbCode?: number;
   /** Matching messages in the mailbox (or trace rows), when more than one */
   copies?: number;
+  /**
+   * The recipient's directory object ID and the Graph IDs of the matching
+   * copies found in their mailbox (at most 5). Phishy's own lookup produced
+   * them, and they are the only identifiers a campaign-response action may
+   * name: never a search expression. Not rendered in any report.
+   */
+  mailboxId?: string;
+  messageIds?: string[];
+  /** When the mailbox received the first matching copy (ISO, from the mailbox) */
+  receivedAt?: string;
 }
 
 export interface BlastRadiusCoverage {
@@ -323,6 +336,8 @@ interface MailboxEntry {
    */
   messageIds: string[];
   hit?: MessageSummary;
+  /** Graph IDs of every matching copy found (shape-checked, capped) */
+  hitIds: string[];
   copies: number;
   folder?: BlastRadiusFolder;
   response?: BlastRadiusResponse;
@@ -797,6 +812,7 @@ export class BlastRadiusService {
       progress.successes += 1;
       if (found.length > 0) {
         entry.hit = found[0];
+        entry.hitIds = copyIds(found);
         entry.copies = found.length;
       }
     } catch (error) {
@@ -874,6 +890,7 @@ export class BlastRadiusService {
       entry.recoverableChecked = true;
       if (found.length > 0) {
         entry.hit = found[0];
+        entry.hitIds = copyIds(found);
         entry.copies = found.length;
         entry.folder = 'recoverable';
       }
@@ -943,6 +960,7 @@ export class BlastRadiusService {
       response: entry.hit ? (entry.response ?? 'unknown') : undefined,
       lastVerbCode: entry.lastVerbCode,
       copies: entry.copies > 1 ? entry.copies : undefined,
+      ...(entry.hit ? copyIdentifiers(entry) : {}),
     });
 
     let recipients: BlastRadiusRecipient[];
@@ -1121,11 +1139,36 @@ export class BlastRadiusService {
   }
 }
 
+/** Graph IDs of the copies found, shape-checked and capped */
+function copyIds(found: MessageSummary[]): string[] {
+  const ids: string[] = [];
+  for (const message of found) {
+    if (GRAPH_ITEM_ID_PATTERN.test(message.id) && !ids.includes(message.id)) {
+      ids.push(message.id);
+    }
+  }
+  return ids.slice(0, MAX_REPORTED_COPY_IDS);
+}
+
+/** The identifiers of a mailbox copy a response action may name, when well formed */
+function copyIdentifiers(
+  entry: MailboxEntry
+): Pick<BlastRadiusRecipient, 'mailboxId' | 'messageIds' | 'receivedAt'> {
+  const received = Date.parse(entry.hit?.receivedDateTime ?? '');
+  return {
+    ...(DIRECTORY_ID_PATTERN.test(entry.user.id) && entry.hitIds.length > 0
+      ? { mailboxId: entry.user.id, messageIds: entry.hitIds }
+      : {}),
+    ...(Number.isFinite(received) ? { receivedAt: new Date(received).toISOString() } : {}),
+  };
+}
+
 function newEntry(user: DirectoryUser, address: string, messageIds: string[] = []): MailboxEntry {
   return {
     user,
     address,
     messageIds,
+    hitIds: [],
     checked: false,
     recoverableChecked: false,
     copies: 0,

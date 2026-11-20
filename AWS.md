@@ -34,7 +34,7 @@ If you deploy with SAM, you can skip to Section 9 (production access) and Sectio
 
 ### Optional: Microsoft Graph (the Graph broker function)
 
-Phishy's three optional Microsoft Graph features (original-message lookup, sender-relationship check, blast radius) are off by default, and with `GraphEnabled=false` the template creates exactly what it creates without them. Setting `GraphEnabled=true` deploys them in **broker mode**: Graph requests are made by a second function, the Graph broker, and never by the function that parses email. Why, and what crosses between the two, is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#graph-broker).
+Phishy's optional Microsoft Graph features (original-message lookup, sender-relationship check, blast radius, and the scheduled fan-out scan) are off by default, and with `GraphEnabled=false` the template creates exactly what it creates without them. Setting `GraphEnabled=true` deploys them in **broker mode**: Graph requests are made by a second function, the Graph broker, and never by the function that parses email. Why, and what crosses between the two, is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#graph-broker).
 
 Before deploying, create the read-only Entra app registration and store its certificate in Secrets Manager as described in [docs/CONFIGURATION.md](docs/CONFIGURATION.md#microsoft-graph-optional).
 
@@ -47,6 +47,8 @@ Before deploying, create the read-only Entra app registration and store its cert
 | `GraphOriginalFetchEnabled` | `false` | Original-message lookup |
 | `GraphBlastRadiusEnabled` | `false` | Blast radius |
 | `GraphSenderHistoryEnabled` | `false` | Sender-relationship check |
+| `GraphFanoutScanEnabled` | `false` | Scheduled fan-out scan (see below). Needs `GraphEnabled` and `IntelligenceDbSecretArn` |
+| `GraphFanoutScanIntervalMinutes` | `5` | Minutes between scans (2-60) |
 | `GraphBrokerReservedConcurrency` | `5` | Most broker instances that can run at once; `0` reserves nothing |
 
 A deploy with `GraphEnabled=true` and one of the three required values missing is rejected before anything is created.
@@ -71,6 +73,20 @@ The feature flags are set on both functions from the same parameters. Other Grap
 - The certificate **secret** (about USD 0.40 a month) is needed in either mode.
 
 After deploying, alarm on `GraphBrokerCalls` with any `Outcome` other than `ok`, and see [docs/CONFIGURATION.md](docs/CONFIGURATION.md#graph-broker-optional) for what each outcome means.
+
+#### Optional: the scheduled fan-out scan
+
+`GraphFanoutScanEnabled=true` makes Phishy look at recent inbound mail flow every few minutes, without waiting for a report, and email the security team (`SecurityTeamDistribution`, nobody else) when an established external contact suddenly sends one subject to many internal people. It is read-only and involves no AI model. How it works and what it cannot see: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#scheduled-fan-out-scan).
+
+It needs `GraphEnabled=true` and the intelligence database (`IntelligenceDbSecretArn`): the scan keeps its lock, its window and the alerts it has sent there. A deploy that asks for the scan without either is rejected before anything is created. **Apply `migrations/005_fanout_scan.sql` to the database before enabling it**; until then every scan logs that the migration is missing and does nothing else. The read app registration needs `ExchangeMessageTrace.Read.All`, as for the sender-relationship check.
+
+What the stack adds when the scan is enabled (and nothing at all when it is not):
+
+- **`FanoutScanSchedule`** — an EventBridge rule, `rate(<GraphFanoutScanIntervalMinutes> minutes)`, targeting the **main** function with the constant input `{"phishyScheduledTask":"graph_fanout_scan","version":1}`. No retries: a scan that did not run is covered by the next one's overlapping window.
+- **`FanoutScanInvokePermission`** — lets that rule, and only that rule (`SourceArn`), invoke the main function.
+- **`PHISHY_GRAPH_FANOUT_SCAN_ENABLED=true`** on both the main function and the broker (the broker refuses the operation without it).
+
+No other permission is needed: the main function already invokes the broker, reads the database and sends email, and the broker already reads message trace. Each scan is one more broker invocation of a few seconds; all scans together spend at most 20 message-trace requests per 5 minutes (counted in the database, separately from the on-report sender-relationship check), so a shorter interval means smaller scans, not more requests. To change the scan's other settings (`PHISHY_GRAPH_FANOUT_SCAN_*` in [docs/CONFIGURATION.md](docs/CONFIGURATION.md#scheduled-fan-out-scan-optional)), add them to the main function's environment. After deploying, watch `FanoutScans` by `Outcome` (`migration_missing` or `no_database` mean the scan is not running) and `FanoutScanIncomplete`.
 
 ## Option B: Manual Console Setup
 

@@ -105,6 +105,63 @@ const CampaignAlertConfigSchema = z.object({
   distributionList: z.string().email().optional(),
 });
 
+/** Default "if you already clicked" text in the employee warning */
+export const DEFAULT_ALREADY_CLICKED_INSTRUCTIONS =
+  'If you clicked a link in it, opened an attachment, or entered your password, contact your IT or security team straight away and change your password. You will not be in trouble: reporting it quickly is what limits the damage.';
+
+/**
+ * Campaign response configuration schema
+ * What Phishy does once a campaign crosses the alert threshold: an incident
+ * email for the security team, a warning to the people who actually received
+ * the attack (from blast radius) and proposed response actions approved over
+ * the command channel. Off by default; off means the campaign alert behaves
+ * exactly as before. Requires campaign alerts, the intelligence database and
+ * migration 006.
+ */
+const CampaignResponseConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  /**
+   * Who is warned: the distribution list (`campaignAlerts.distributionList`,
+   * the behaviour without campaign response), the recipients blast radius
+   * found, or both.
+   */
+  audience: z.enum(['distribution', 'recipients', 'both']).default('distribution'),
+  /** The targeted warning to recipients: approved by the security team first, sent at once, or never */
+  employeeWarning: z.enum(['off', 'approve', 'auto']).default('approve'),
+  /** The distribution-list broadcast: sent at once (as before), approved first, or never */
+  distributionWarning: z.enum(['off', 'approve', 'auto']).default('auto'),
+  /** How long a proposed action can be approved */
+  approvalTtlHours: z.number().positive().max(72).default(4),
+  /** Most employee emails (warnings and thank-you notes) one campaign may send */
+  maxWarningsPerCampaign: z.number().int().min(1).max(1000).default(100),
+  /** Most mailboxes and messages one removal action may name */
+  maxRemovalMailboxes: z.number().int().min(1).max(5000).default(500),
+  maxRemovalMessages: z.number().int().min(1).max(10000).default(1000),
+  /** Shortest gap between incident updates to the security team */
+  updateIntervalMinutes: z.number().int().min(1).max(1440).default(30),
+  /** The organization's own "if you already clicked" instructions (plain text) */
+  alreadyClickedInstructions: z
+    .string()
+    .min(1)
+    .max(1000)
+    .default(DEFAULT_ALREADY_CLICKED_INSTRUCTIONS),
+  /** IANA time zone the warning's times are written in */
+  timeZone: z
+    .string()
+    .default('UTC')
+    .refine(
+      zone => {
+        try {
+          new Intl.DateTimeFormat('en-US', { timeZone: zone });
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      { message: 'campaignResponse.timeZone must be an IANA time zone such as Europe/London' }
+    ),
+});
+
 /**
  * Email commands configuration schema
  * Lets the security team reply to Phishy's reports (or email Phishy
@@ -258,6 +315,34 @@ const GraphSenderHistoryConfigSchema = z.object({
 });
 
 /**
+ * Scheduled fan-out scan: every few minutes, without waiting for a report,
+ * look at recent inbound mail flow (message trace) and alert the security
+ * team when an established external contact suddenly sends one subject to
+ * many internal people (the sender-relationship rule, run proactively).
+ * Code-driven and read-only; no model is involved. Effective only when
+ * `graph.enabled` is true, and it needs the intelligence database for its
+ * state (dedupe, the scan lock, the window). The thresholds are the
+ * sender-relationship check's (`graph.senderHistory.*`).
+ */
+const GraphFanoutScanConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  /** Minutes each scan's window reaches back before the previous scan's end */
+  overlapMinutes: z.number().int().min(1).max(30).default(10),
+  /** Widest window one scan covers; after a longer gap the oldest part is skipped and said so */
+  maxWindowMinutes: z.number().int().min(5).max(120).default(60),
+  /** Message trace pages (of up to 5000 rows) one scan may read */
+  maxPages: z.number().int().min(1).max(10).default(4),
+  /** Candidates (most recipients first) whose sender history one scan checks */
+  maxCandidates: z.number().int().min(1).max(10).default(3),
+  /** Trace requests all scans together may spend in any 5 minutes (tenant limit: 100) */
+  requestAllowancePer5Min: z.number().int().min(5).max(40).default(20),
+  /** Hard limit on one scan's Graph work, in milliseconds */
+  budgetMs: z.number().int().min(10000).max(120000).default(60000),
+  /** A sender-and-subject wave quiet for this long is over; a new one alerts again */
+  dedupeHours: z.number().int().min(1).max(168).default(24),
+});
+
+/**
  * Lambda function name, alias-qualified name or ARN: the only way the main
  * function addresses the Graph broker. Checked so a stray value cannot turn
  * the invocation into anything else.
@@ -284,6 +369,8 @@ const GraphConfigFields = z.object({
   /** Who-else-received-it lookup for malicious verdicts */
   blastRadius: GraphBlastRadiusConfigSchema.optional(),
   senderHistory: GraphSenderHistoryConfigSchema.optional(),
+  /** Scheduled, proactive fan-out scan of recent inbound mail flow */
+  fanoutScan: GraphFanoutScanConfigSchema.optional(),
 });
 
 type GraphConfigFieldValues = z.infer<typeof GraphConfigFields>;
@@ -390,6 +477,7 @@ export const PhishyConfigSchema = z.object({
   profile: z.string().optional(), // Profile ID or S3 path
   intelligence: IntelligenceConfigSchema.optional(),
   campaignAlerts: CampaignAlertConfigSchema.optional(),
+  campaignResponse: CampaignResponseConfigSchema.optional(),
   campaignCache: CampaignCacheConfigSchema.optional(),
   commands: CommandsConfigSchema.optional(),
   reportButton: ReportButtonConfigSchema.optional(),
@@ -413,6 +501,7 @@ export type StorageConfig = z.infer<typeof StorageConfigSchema>;
 export type IntelligenceConfig = z.infer<typeof IntelligenceConfigSchema>;
 export type CampaignAlertConfig = z.infer<typeof CampaignAlertConfigSchema>;
 export type CampaignCacheConfig = z.infer<typeof CampaignCacheConfigSchema>;
+export type CampaignResponseConfig = z.infer<typeof CampaignResponseConfigSchema>;
 export type CommandsConfig = z.infer<typeof CommandsConfigSchema>;
 export type AgenticConfig = z.infer<typeof AgenticConfigSchema>;
 export type AttachmentAnalysisConfig = z.infer<typeof AttachmentAnalysisConfigSchema>;
@@ -422,6 +511,7 @@ export type GraphCredentialConfig = z.infer<typeof GraphCredentialConfigSchema>;
 export type GraphBlastRadiusConfig = z.infer<typeof GraphBlastRadiusConfigSchema>;
 export type ReportButtonConfig = z.infer<typeof ReportButtonConfigSchema>;
 export type GraphSenderHistoryConfig = z.infer<typeof GraphSenderHistoryConfigSchema>;
+export type GraphFanoutScanConfig = z.infer<typeof GraphFanoutScanConfigSchema>;
 
 /**
  * Partial configuration for merging

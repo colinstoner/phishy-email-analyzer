@@ -20,12 +20,13 @@ import { contentFacts, createLogger } from '../../utils/logger';
 import {
   extractEmailAddress,
   extractUrls,
-  extractHrefUrls,
+  extractFollowableUrls,
   containsHtml,
   stripHtml,
 } from '../../utils/validation';
 import { S3Service } from '../storage/s3.service';
 import { buildLinkFacts, canonicalizeText, findAnchorMismatches } from '../../utils/canonicalize';
+import { claimedSenderDomain } from '../../utils/addressing';
 import { detectUserReport } from './user.report';
 import {
   AttachmentAnalysisSettings,
@@ -481,8 +482,17 @@ export class EmailParserService {
       if (inner.from?.text) headerLines.push(`From: ${inner.from.text}`);
       if (inner.date) headerLines.push(`Date: ${inner.date.toUTCString()}`);
       if (inner.subject) headerLines.push(`Subject: ${inner.subject}`);
-      const innerTo = Array.isArray(inner.to) ? inner.to[0] : inner.to;
-      if (innerTo?.text) headerLines.push(`To: ${innerTo.text}`);
+      const addressText = (value: typeof inner.to): string =>
+        (Array.isArray(value) ? value : value ? [value] : [])
+          .map(v => v.text)
+          .filter(Boolean)
+          .join(', ');
+      const innerTo = addressText(inner.to);
+      if (innerTo) headerLines.push(`To: ${innerTo}`);
+      // Cc is written whenever the original had one, as mail clients do in
+      // a forward header: its absence is how "no Cc" is known downstream
+      const innerCc = addressText(inner.cc);
+      if (innerCc) headerLines.push(`Cc: ${innerCc}`);
       const innerReplyTo = inner.replyTo;
       if (innerReplyTo?.text) headerLines.push(`Reply-To: ${innerReplyTo.text}`);
       const authResults = inner.headers.get('authentication-results');
@@ -622,7 +632,10 @@ export class EmailParserService {
 
     const { canonical, flags } = canonicalizeText(emailData.text);
     emailData.canonicalText = canonical;
-    emailData.contentFlags = [...flags, ...findAnchorMismatches(emailData.html)];
+    emailData.contentFlags = [
+      ...flags,
+      ...findAnchorMismatches(emailData.html, { senderDomain: claimedSenderDomain(emailData) }),
+    ];
 
     return emailData;
   }
@@ -735,17 +748,12 @@ export class EmailParserService {
   private extractLinks(content: string): string[] {
     if (!content) return [];
 
-    const links = new Set<string>();
-
-    // Extract href URLs from HTML
-    const hrefUrls = extractHrefUrls(content);
-    hrefUrls.forEach(url => links.add(url));
-
-    // Extract raw URLs
-    const rawUrls = extractUrls(content);
-    rawUrls.forEach(url => links.add(url));
-
-    return Array.from(links);
+    // HTML: only URLs a reader could follow (anchors, forms, images, URLs in
+    // the visible text), never markup such as xmlns namespace declarations
+    if (containsHtml(content)) {
+      return extractFollowableUrls(content);
+    }
+    return extractUrls(content);
   }
 
   /**
@@ -797,7 +805,7 @@ export class EmailParserService {
       /Begin forwarded message:\s*\n([\s\S]*?)(?:\n\n|\r\n\r\n|$)/i,
       // Outlook style: no marker line — match through the end of the Subject
       // line so its value is part of the captured block
-      /From:.*\r?\nSent:.*\r?\nTo:.*\r?\nSubject:.*/i,
+      /From:.*\r?\nSent:.*\r?\nTo:.*\r?\n(?:Cc:.*\r?\n)?Subject:.*/i,
     ];
 
     let headerBlock = '';
@@ -820,14 +828,19 @@ export class EmailParserService {
 
     if (!headerBlock) return forwardedHeaders;
 
-    // Parse header lines
+    // Parse header lines. Each name is matched at the start of a line, so
+    // "To:" never matches inside "Reply-To:" (which would turn a Reply-To
+    // into the recipient list when the original had no To line).
+    const line = (name: string): RegExp =>
+      new RegExp(`(?:^|\\n)[ \\t>*]*${name}:\\s*(.+?)(?:\\r?\\n|$)`, 'i');
     const headerPatterns: Record<string, RegExp> = {
-      'Original-From': /From:\s*(.+?)(?:\r?\n|$)/i,
-      'Original-To': /To:\s*(.+?)(?:\r?\n|$)/i,
-      'Original-Date': /Date:\s*(.+?)(?:\r?\n|$)/i,
-      'Original-Subject': /Subject:\s*(.+?)(?:\r?\n|$)/i,
-      'Original-Reply-To': /Reply-To:\s*(.+?)(?:\r?\n|$)/i,
-      'Original-Sent': /Sent:\s*(.+?)(?:\r?\n|$)/i, // Outlook style
+      'Original-From': line('From'),
+      'Original-To': line('To'),
+      'Original-Cc': line('Cc'),
+      'Original-Date': line('Date'),
+      'Original-Subject': line('Subject'),
+      'Original-Reply-To': line('Reply-To'),
+      'Original-Sent': line('Sent'), // Outlook style
     };
 
     for (const [headerName, pattern] of Object.entries(headerPatterns)) {

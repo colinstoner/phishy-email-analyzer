@@ -10,6 +10,7 @@ import {
   isValidUrl,
   extractUrls,
   extractHrefUrls,
+  extractFollowableUrls,
   containsHtml,
   stripHtml,
   normalizeWhitespace,
@@ -182,5 +183,39 @@ describe('normalizeWhitespace', () => {
 
   it('should trim', () => {
     expect(normalizeWhitespace('  hello world  ')).toBe('hello world');
+  });
+});
+
+describe('extractFollowableUrls', () => {
+  it('takes anchors, areas, forms, images and visible-text URLs', () => {
+    const html =
+      '<a href="https://a.example/x?p=1&amp;q=2">x</a><area href=https://b.example/y>' +
+      '<form action="https://c.example/post"><button formaction="https://d.example/b">go</button></form>' +
+      '<img src="https://e.example/i.png"><p>Visit https://f.example/page today</p>';
+    expect(extractFollowableUrls(html).sort()).toEqual([
+      'https://a.example/x?p=1&q=2',
+      'https://b.example/y',
+      'https://c.example/post',
+      'https://d.example/b',
+      'https://e.example/i.png',
+      'https://f.example/page',
+    ]);
+  });
+
+  it('ignores namespace declarations, DOCTYPE, head, comments and non-followable attributes', () => {
+    const html =
+      '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">' +
+      '<html xmlns="http://www.w3.org/1999/xhtml" xmlns:m="http://schemas.microsoft.com/office/2004/12/omml">' +
+      '<head><title>https://title.example/t</title><link href="https://css.example/s.css"><style>a{background:url(https://style.example/b)}</style></head>' +
+      '<body><!-- https://comment.example/c --><div data-x="https://data.example/d">' +
+      '<o:p></o:p><a href="mailto:ap@example.com">mail</a><img src="cid:img1@x"></div></body></html>';
+    expect(extractFollowableUrls(html)).toEqual(['mailto:ap@example.com']);
+  });
+
+  it('keeps a plain-text URL written in angle brackets', () => {
+    expect(extractFollowableUrls('<p>Docs</p> <https://g.example/doc>')).toEqual([
+      'https://g.example/doc',
+    ]);
+    expect(extractFollowableUrls('')).toEqual([]);
   });
 });

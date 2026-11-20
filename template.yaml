@@ -164,6 +164,27 @@ Parameters:
     AllowedValues: ['true', 'false']
     Default: 'false'
     Description: Before analysis, check the claimed sender's history with the organization in message trace. Needs GraphEnabled.
+  GraphFanoutScanEnabled:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Default: 'false'
+    Description: >
+      Scheduled fan-out scan: every GraphFanoutScanIntervalMinutes, read recent
+      inbound mail flow (message trace) and email the security team when an
+      established external contact suddenly sends one subject to many internal
+      people. Read-only; no AI model. Needs GraphEnabled and the intelligence
+      database (IntelligenceDbSecretArn) with migrations/005_fanout_scan.sql
+      applied manually.
+  GraphFanoutScanIntervalMinutes:
+    Type: Number
+    Default: 5
+    MinValue: 2
+    MaxValue: 60
+    Description: >
+      Minutes between fan-out scans. All scans together spend at most 20
+      message-trace requests per 5 minutes (tracked in the database), so a
+      shorter interval means smaller scans, not more requests. Used only when
+      GraphFanoutScanEnabled is true.
   GraphBrokerReservedConcurrency:
     Type: Number
     Default: 5
@@ -187,6 +208,13 @@ Rules:
         AssertDescription: GraphReadClientId is required when GraphEnabled is true
       - Assert: !Not [!Equals [!Ref GraphCertificateSecretArn, '']]
         AssertDescription: GraphCertificateSecretArn is required when GraphEnabled is true
+  FanoutScanRequirements:
+    RuleCondition: !Equals [!Ref GraphFanoutScanEnabled, 'true']
+    Assertions:
+      - Assert: !Equals [!Ref GraphEnabled, 'true']
+        AssertDescription: GraphFanoutScanEnabled needs GraphEnabled=true
+      - Assert: !Not [!Equals [!Ref IntelligenceDbSecretArn, '']]
+        AssertDescription: GraphFanoutScanEnabled needs the intelligence database (IntelligenceDbSecretArn) for its state
 
 Conditions:
   UseAnthropic: !Equals [!Ref AIProvider, anthropic]
@@ -227,6 +255,12 @@ Conditions:
   UseGraphSenderHistory: !And
     - !Condition UseGraph
     - !Equals [!Ref GraphSenderHistoryEnabled, 'true']
+  # The scan keeps its lock, window and dedupe state in the intelligence
+  # database, so it is deployed only with one (the rule above says so)
+  UseGraphFanoutScan: !And
+    - !Condition UseGraph
+    - !Condition UseIntelligence
+    - !Equals [!Ref GraphFanoutScanEnabled, 'true']
   ReserveGraphBrokerConcurrency: !And
     - !Condition UseGraph
     - !Not [!Equals [!Ref GraphBrokerReservedConcurrency, 0]]
@@ -324,6 +358,7 @@ Resources:
           PHISHY_GRAPH_ORIGINAL_FETCH_ENABLED: !If [UseGraphOriginalFetch, 'true', !Ref AWS::NoValue]
           PHISHY_GRAPH_BLAST_RADIUS_ENABLED: !If [UseGraphBlastRadius, 'true', !Ref AWS::NoValue]
           PHISHY_GRAPH_SENDER_HISTORY_ENABLED: !If [UseGraphSenderHistory, 'true', !Ref AWS::NoValue]
+          PHISHY_GRAPH_FANOUT_SCAN_ENABLED: !If [UseGraphFanoutScan, 'true', !Ref AWS::NoValue]
       VpcConfig: !If
         - UseIntelligence
         - SecurityGroupIds:
@@ -429,6 +464,8 @@ Resources:
           PHISHY_GRAPH_ORIGINAL_FETCH_ENABLED: !Ref GraphOriginalFetchEnabled
           PHISHY_GRAPH_BLAST_RADIUS_ENABLED: !Ref GraphBlastRadiusEnabled
           PHISHY_GRAPH_SENDER_HISTORY_ENABLED: !Ref GraphSenderHistoryEnabled
+          # Set only when the scan is deployed, so turning it off changes nothing here
+          PHISHY_GRAPH_FANOUT_SCAN_ENABLED: !If [UseGraphFanoutScan, 'true', !Ref AWS::NoValue]
 
   GraphBrokerLogGroup:
     Type: AWS::Logs::LogGroup
@@ -553,6 +590,35 @@ Resources:
       SubnetIds: !Split [',', !Ref SubnetIds]
       SecurityGroupIds:
         - !Ref EndpointSecurityGroup
+
+  # The fan-out scan's schedule: invokes the MAIN function (which owns email
+  # and the database) with Phishy's own constant payload. The function
+  # refuses any other payload that claims to be a scheduled task. Only
+  # created with GraphFanoutScanEnabled=true, Graph and the database.
+  FanoutScanSchedule:
+    Type: AWS::Events::Rule
+    Condition: UseGraphFanoutScan
+    Properties:
+      Description: Phishy scheduled fan-out scan (read-only message trace; no AI model)
+      ScheduleExpression: !Sub 'rate(${GraphFanoutScanIntervalMinutes} minutes)'
+      State: ENABLED
+      Targets:
+        - Id: phishy-fanout-scan
+          Arn: !GetAtt PhishyFunction.Arn
+          Input: '{"phishyScheduledTask":"graph_fanout_scan","version":1}'
+          RetryPolicy:
+            # A scan that did not run is simply the next one's window
+            MaximumRetryAttempts: 0
+            MaximumEventAgeInSeconds: 60
+
+  FanoutScanInvokePermission:
+    Type: AWS::Lambda::Permission
+    Condition: UseGraphFanoutScan
+    Properties:
+      FunctionName: !Ref PhishyFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt FanoutScanSchedule.Arn
 
   SESInvokePermission:
     Type: AWS::Lambda::Permission

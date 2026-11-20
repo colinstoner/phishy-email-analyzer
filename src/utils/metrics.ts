@@ -482,3 +482,129 @@ export function emitGraphBrokerCallMetric(
 
   process.stdout.write(`${JSON.stringify(emf)}\n`);
 }
+
+/**
+ * How one scheduled fan-out scan ended (`services/hunting/fanout.job.ts`).
+ * `ok`: the window was read (possibly incomplete; see `FanoutScanIncomplete`).
+ * The rest say why no window was read: another scan held the lock, no
+ * intelligence database or its migration, the trace allowance was spent,
+ * Graph refused or timed out, or the scan failed.
+ */
+export type FanoutScanMetricOutcome =
+  | 'ok'
+  | 'skipped_running'
+  | 'no_database'
+  | 'migration_missing'
+  | 'rate_limited'
+  | 'forbidden'
+  | 'timeout'
+  | 'error';
+
+export interface FanoutScanMetric {
+  outcome: FanoutScanMetricOutcome;
+  durationMs: number;
+  rowsScanned: number;
+  candidates: number;
+  flagged: number;
+  alertsSent: number;
+  incomplete: boolean;
+  traceRequests: number;
+}
+
+/** Emit one scheduled fan-out scan */
+export function emitFanoutScanMetric(metric: FanoutScanMetric): void {
+  if (process.env.PHISHY_DISABLE_METRICS === 'true') {
+    return;
+  }
+
+  const emf = {
+    _aws: {
+      Timestamp: Date.now(),
+      CloudWatchMetrics: [
+        {
+          Namespace: NAMESPACE,
+          Dimensions: [['Outcome']],
+          Metrics: [
+            { Name: 'FanoutScans', Unit: 'Count' },
+            { Name: 'FanoutScanDurationMs', Unit: 'Milliseconds' },
+            { Name: 'FanoutScanRowsScanned', Unit: 'Count' },
+            { Name: 'FanoutScanCandidates', Unit: 'Count' },
+            { Name: 'FanoutScanFlags', Unit: 'Count' },
+            { Name: 'FanoutScanAlertsSent', Unit: 'Count' },
+            { Name: 'FanoutScanIncomplete', Unit: 'Count' },
+            { Name: 'FanoutScanTraceRequests', Unit: 'Count' },
+          ],
+        },
+      ],
+    },
+    Outcome: metric.outcome,
+    FanoutScans: 1,
+    FanoutScanDurationMs: metric.durationMs,
+    FanoutScanRowsScanned: metric.rowsScanned,
+    FanoutScanCandidates: metric.candidates,
+    FanoutScanFlags: metric.flagged,
+    FanoutScanAlertsSent: metric.alertsSent,
+    FanoutScanIncomplete: metric.incomplete ? 1 : 0,
+    FanoutScanTraceRequests: metric.traceRequests,
+  };
+
+  // Raw EMF on stdout, bypassing the logger so `_aws` stays at the JSON root
+  process.stdout.write(`${JSON.stringify(emf)}\n`);
+}
+
+/**
+ * What happened in campaign response. Each name is its own metric:
+ * - `CampaignWarningsSent` / `CampaignThanksSent`: employee emails sent
+ *   (dimension `Audience`: `recipients` or `distribution`)
+ * - `CampaignWarningsSkipped`: recipients not emailed (dimension `Reason`)
+ * - `CampaignWarningSendFailures`: SES refused or failed a send
+ * - `CampaignIncidentsOpened` (dimension `Trigger`), `CampaignIncidentUpdates`
+ * - `ResponseActionsProposed`, `ResponseActionApprovals`,
+ *   `ResponseActionApprovalsRejected` (dimension `Reason`),
+ *   `ResponseActionsExpired`, `ResponseActionsDryRun`
+ *   (all dimensioned by `ActionType`)
+ */
+export type CampaignResponseMetricName =
+  | 'CampaignWarningsSent'
+  | 'CampaignThanksSent'
+  | 'CampaignWarningsSkipped'
+  | 'CampaignWarningSendFailures'
+  | 'CampaignIncidentsOpened'
+  | 'CampaignIncidentUpdates'
+  | 'ResponseActionsProposed'
+  | 'ResponseActionApprovals'
+  | 'ResponseActionApprovalsRejected'
+  | 'ResponseActionsExpired'
+  | 'ResponseActionsDryRun';
+
+/**
+ * Emit one campaign-response count. Dimension values are fixed words chosen
+ * by code (an action type, an audience, a reason), never data.
+ */
+export function emitCampaignResponseMetric(
+  name: CampaignResponseMetricName,
+  count: number,
+  dimensions: Record<string, string> = {}
+): void {
+  if (process.env.PHISHY_DISABLE_METRICS === 'true' || count <= 0) {
+    return;
+  }
+  const keys = Object.keys(dimensions);
+
+  const emf = {
+    _aws: {
+      Timestamp: Date.now(),
+      CloudWatchMetrics: [
+        {
+          Namespace: NAMESPACE,
+          Dimensions: keys.length > 0 ? [keys, []] : [[]],
+          Metrics: [{ Name: name, Unit: 'Count' }],
+        },
+      ],
+    },
+    ...dimensions,
+    [name]: count,
+  };
+
+  process.stdout.write(`${JSON.stringify(emf)}\n`);
+}

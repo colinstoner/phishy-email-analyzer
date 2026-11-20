@@ -20,15 +20,25 @@ export interface SESNotifierConfig {
   configSet?: string;
 }
 
+/**
+ * The domain of the Message-ID header SES writes (`<id@domain>`):
+ * `email.amazonses.com` in us-east-1, `<region>.amazonses.com` elsewhere.
+ */
+export function sesMessageIdDomain(region: string): string {
+  return region === 'us-east-1' ? 'email.amazonses.com' : `${region}.amazonses.com`;
+}
+
 export class SESNotifier {
   private client: SES;
   private senderEmail: string;
   private senderName: string;
   private securityTeamDistribution: string[];
   private configSet?: string;
+  private region: string;
 
   constructor(config: SESNotifierConfig) {
     this.client = new SES({ region: config.region });
+    this.region = config.region;
     this.senderEmail = config.senderEmail;
     this.senderName = config.senderName ?? 'Phishy';
     this.securityTeamDistribution = config.securityTeamDistribution ?? [];
@@ -142,6 +152,78 @@ export class SESNotifier {
         shouldRetry: isRetryableHttpError,
       }
     );
+  }
+
+  /**
+   * Send one email as a reply in an existing thread: `In-Reply-To` and
+   * `References` name the earlier email by the Message-ID SES gave it. SES's
+   * SendEmail cannot set those headers, so this builds the MIME itself
+   * (multipart/alternative, base64 parts, an RFC 2047 subject). Every
+   * header value is code-written or checked; nothing here can add a header.
+   */
+  async sendThreadedEmail(
+    recipients: string[],
+    subject: string,
+    htmlBody: string,
+    textBody: string,
+    inReplyToSesMessageId?: string
+  ): Promise<EmailSendResult> {
+    const to = recipients.filter(address => /^[^\s<>,;"]+@[^\s<>,;"]+$/.test(address));
+    if (to.length === 0) {
+      return { success: false, error: 'no valid recipient' };
+    }
+    const reference =
+      inReplyToSesMessageId && /^[A-Za-z0-9-]{1,120}$/.test(inReplyToSesMessageId)
+        ? `<${inReplyToSesMessageId}@${sesMessageIdDomain(this.region)}>`
+        : undefined;
+    const boundary = `phishy-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    const encodedSubject = `=?UTF-8?B?${Buffer.from(subject.replace(/[\r\n]+/g, ' '), 'utf8').toString('base64')}?=`;
+    const base64 = (text: string): string =>
+      (
+        Buffer.from(text, 'utf8')
+          .toString('base64')
+          .match(/.{1,76}/g) ?? []
+      ).join('\r\n');
+    const fromName = this.senderName.replace(/["\r\n\\]/g, '');
+    const mime = [
+      `From: "${fromName}" <${this.senderEmail}>`,
+      `To: ${to.join(', ')}`,
+      `Subject: ${encodedSubject}`,
+      'MIME-Version: 1.0',
+      ...(reference ? [`In-Reply-To: ${reference}`, `References: ${reference}`] : []),
+      `Content-Type: multipart/alternative; boundary="${boundary}"`,
+      '',
+      `--${boundary}`,
+      'Content-Type: text/plain; charset=UTF-8',
+      'Content-Transfer-Encoding: base64',
+      '',
+      base64(textBody),
+      `--${boundary}`,
+      'Content-Type: text/html; charset=UTF-8',
+      'Content-Transfer-Encoding: base64',
+      '',
+      base64(htmlBody),
+      `--${boundary}--`,
+      '',
+    ].join('\r\n');
+
+    try {
+      return await withRetry(
+        async () => {
+          const result = await this.client.sendRawEmail({
+            RawMessage: { Data: Buffer.from(mime, 'utf8') },
+            ConfigurationSetName: this.configSet,
+          });
+          return { success: true, messageId: result.MessageId };
+        },
+        { maxRetries: 3, baseDelayMs: 1000, shouldRetry: isRetryableHttpError }
+      );
+    } catch (error) {
+      logger.error('Failed to send threaded email', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
   }
 
   /**

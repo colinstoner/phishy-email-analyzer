@@ -63,15 +63,18 @@ function formatDate(date: Date, style: ForwardStyle): string {
 /** The header block a mail client writes above forwarded content */
 function forwardHeaderLines(
   style: ForwardStyle,
-  fields: { from: string; to: string; subject: string; date: Date }
+  fields: { from: string; to: string; cc?: string; subject: string; date: Date }
 ): string[] {
   const date = formatDate(fields.date, style);
+  // Gmail and Outlook both print a Cc line when the original had one
+  const cc = fields.cc ? [`Cc: ${fields.cc}`] : [];
   if (style === 'outlook') {
     return [
       '________________________________',
       `From: ${fields.from}`,
       `Sent: ${date}`,
       `To: ${fields.to}`,
+      ...cc,
       `Subject: ${fields.subject}`,
     ];
   }
@@ -90,6 +93,7 @@ function forwardHeaderLines(
     `Date: ${date}`,
     `Subject: ${fields.subject}`,
     `To: ${fields.to}`,
+    ...cc,
   ];
 }
 
@@ -178,6 +182,7 @@ export async function buildForward(
     const headerLines = forwardHeaderLines(options.style, {
       from: firstAddressText(original.from),
       to: firstAddressText(original.to) || reporter,
+      cc: firstAddressText(original.cc) || undefined,
       subject: originalSubject,
       date: originalDate,
     });
