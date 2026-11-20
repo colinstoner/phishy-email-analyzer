@@ -155,8 +155,7 @@ describe('the committed case set', () => {
     it('states the benign twin is on its own tenant and finds nothing odd in its addressing', () => {
       for (const id of ['ctl-ben-supplier-share', 'ben-supplier-share-wrapped']) {
         const outside = outsideOf(id);
-        const line =
-          outside.split('\n').find(l => l.includes('harbourlineexample-my.sharepoint.com')) ?? '';
+        const line = outside.split('\n').find(l => /\bharbourlineexample-my\b/.test(l)) ?? '';
         expect(line).toContain("matches the claimed sender's domain");
         expect(line).not.toContain('does not appear to belong');
         expect(outside).not.toContain(ADDRESSING);

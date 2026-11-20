@@ -170,12 +170,13 @@ const NON_LINK_HREF_ELEMENTS = new Set(['link', 'base']);
 
 /** `&amp;` and friends in an attribute value: the browser decodes them before following */
 function decodeAttributeEntities(value: string): string {
-  return value
-    .replace(/&amp;/gi, '&')
-    .replace(/&#0*38;/g, '&')
-    .replace(/&#x0*26;/gi, '&')
-    .replace(/&quot;/gi, '"')
-    .replace(/&#0*39;|&apos;/gi, "'");
+  // One pass, so `&amp;quot;` decodes to `&quot;` and no further
+  return value.replace(/&(amp|quot|apos|#0*38|#x0*26|#0*39);/gi, (_, name: string) => {
+    const n = name.toLowerCase();
+    if (n === 'quot') return '"';
+    if (n === 'apos' || /^#0*39$/.test(n)) return "'";
+    return '&';
+  });
 }
 
 /**

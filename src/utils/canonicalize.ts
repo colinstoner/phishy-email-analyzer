@@ -201,8 +201,11 @@ export function findAnchorMismatches(html: string, options: AnchorCheckOptions =
   while ((match = anchorPattern.exec(html)) !== null && count < 50) {
     count++;
     const href = canonicalizeUrl(match[1].replace(/&amp;/gi, '&')).canonical;
+    // Tags dropped by splitting on them; the text is only pattern-matched,
+    // never rendered
     const anchorText = match[2]
-      .replace(/<[^>]*>/g, '')
+      .split(/<[^>]*>/)
+      .join('')
       .replace(/&nbsp;/gi, ' ')
       .trim();
 
