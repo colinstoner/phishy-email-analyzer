@@ -434,6 +434,12 @@ export interface IncidentEmailContext {
   done: string[];
   /** Other code-written notes (why something was not proposed) */
   notes: string[];
+  /**
+   * Why nothing is waiting for approval, in one plain sentence written by
+   * code from the actions' real state (shown under the headline when no
+   * action is proposed)
+   */
+  idleReason?: string;
   /** Set for an update to an existing incident: what changed */
   changes?: string[];
   commandsEnabled: boolean;
@@ -739,7 +745,7 @@ function proposals(context: IncidentEmailContext): Proposals {
     intro =
       'The email command channel is off (PHISHY_EMAIL_COMMANDS_ENABLED), so Phishy cannot receive approvals. These actions are listed for information only.';
   } else if (context.proposed.length === 0) {
-    intro = 'No action is waiting for approval.';
+    intro = 'None. There is nothing to approve in this email.';
   } else {
     const expiry = context.proposed[0].expiresAt;
     intro = `Reply to this email with the line shown, on a line of its own. Each approval is good until ${displayTime(expiry.toISOString(), context.timeZone) ?? expiry.toISOString()} and applies to this incident only.${context.proposed.some(a => a.type === 'send_warning') ? ' For the warning only, a reply to this email with just the two words "approve warning" also works.' : ''}`;
@@ -753,14 +759,26 @@ function proposals(context: IncidentEmailContext): Proposals {
       ...(notIncluded ? { notIncluded } : {}),
     };
   });
-  if (context.incident.summary.analysisId) {
-    items.push({
-      title: 'Mark the campaign as a false positive',
-      reply: 'false positive',
-      does: 'records "false positive" for every report in this campaign, lowers its threat indicators and cancels the proposed actions above.',
-    });
-  }
   return { intro, items };
+}
+
+const FALSE_POSITIVE_HEADING = 'If this is not phishing';
+const FALSE_POSITIVE_LEAD =
+  'If your team decides this email is legitimate, you can say so instead.';
+
+/**
+ * The verdict correction's "What it does" line, or nothing when it is not
+ * offered. It is kept apart from the approvals: an option, never a pending
+ * action, and never numbered with them. Offered only when the incident
+ * carries the Analysis ID the reply is matched by.
+ */
+function falsePositiveWhat(context: IncidentEmailContext): string | undefined {
+  if (!context.incident.summary.analysisId) {
+    return undefined;
+  }
+  return context.proposed.length > 0
+    ? 'What it does: records "false positive" for every report in this campaign, lowers its threat indicators and cancels the proposed actions above.'
+    : 'What it does: records "false positive" for every report in this campaign and lowers its threat indicators.';
 }
 
 /**
@@ -805,11 +823,37 @@ function decisionHeadline(context: IncidentEmailContext): string {
     return 'For information: approvals are off';
   }
   if (waiting === 0) {
-    return 'No action is waiting for you';
+    return 'Nothing is waiting for your approval';
   }
   return waiting === 1
     ? '1 action is waiting for your approval'
     : `${waiting} actions are waiting for your approval`;
+}
+
+/**
+ * What the headline means, in plain sentences under it: how to approve when
+ * something waits (by replying to this email), or why nothing does (from the
+ * actions' real state, written by the service).
+ */
+function decisionStatus(context: IncidentEmailContext): string[] {
+  const lines: string[] = [];
+  if (!context.commandsEnabled) {
+    lines.push(
+      'Phishy cannot receive approvals: the email command channel is off (PHISHY_EMAIL_COMMANDS_ENABLED).'
+    );
+  } else if (context.proposed.length > 0) {
+    lines.push(
+      `To approve, reply to this email with the line shown under "Proposed actions".${
+        context.changes
+          ? ' Use this update: lines in earlier incident emails may have been replaced.'
+          : ''
+      }`
+    );
+  }
+  if (context.proposed.length === 0 && context.idleReason) {
+    lines.push(context.idleReason);
+  }
+  return lines;
 }
 
 /**
@@ -827,6 +871,8 @@ export function buildIncidentEmail(context: IncidentEmailContext): RenderedEmail
     : `Phishy incident ${incident.reference}`;
   const lead = inShort(incident);
   const headline = decisionHeadline(context);
+  const status = decisionStatus(context);
+  const falsePositive = falsePositiveWhat(context);
   const reach = reachView(incident);
   const attack = attackView(incident);
   const timeline = timelineFacts(incident, context.timeZone);
@@ -846,7 +892,7 @@ export function buildIncidentEmail(context: IncidentEmailContext): RenderedEmail
         tone,
         word: verdict.label,
         headline,
-        html: `${paragraph(lead)}${riskScoreHtml(risk)}`,
+        html: `${status.map(line => paragraph(line, { bold: true })).join('')}${paragraph(lead)}${riskScoreHtml(risk)}`,
       })
     ),
     block(reachHtml(incident, reach))
@@ -857,6 +903,15 @@ export function buildIncidentEmail(context: IncidentEmailContext): RenderedEmail
   rows.push(block(`${heading('Proposed actions')}${paragraph(proposed.intro)}`, { bottom: 12 }));
   for (const card of proposalHtml(proposed)) {
     rows.push(block(card, { bottom: 12 }));
+  }
+  if (falsePositive) {
+    rows.push(
+      block(
+        `${heading(FALSE_POSITIVE_HEADING)}${paragraph(FALSE_POSITIVE_LEAD)}${paragraphHtml(
+          `Reply with this line:&nbsp; ${codeInline('false positive')}`
+        )}${paragraph(falsePositive, { quiet: true })}`
+      )
+    );
   }
   rows.push(
     block(divider(), { bottom: 18 }),
@@ -892,6 +947,7 @@ export function buildIncidentEmail(context: IncidentEmailContext): RenderedEmail
       (context.changes ?? []).map(line => `- ${line}`)
     ),
     `${headline}.`,
+    ...status,
     lead,
     '',
     `Verdict: ${verdict.label}`,
@@ -903,6 +959,12 @@ export function buildIncidentEmail(context: IncidentEmailContext): RenderedEmail
       done.map(line => `- ${line}`)
     ),
     ...textSection('Proposed actions', proposalText(proposed)),
+    ...textSection(
+      FALSE_POSITIVE_HEADING,
+      falsePositive
+        ? [FALSE_POSITIVE_LEAD, 'Reply with this line:  false positive', falsePositive]
+        : []
+    ),
     ...textSection('What the attack is', attackText(attack)),
     ...textSection('Timeline', textFacts(timeline)),
     ...textSection('Recipients', recipientsText(reach)),

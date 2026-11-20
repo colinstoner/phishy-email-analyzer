@@ -362,7 +362,8 @@ describe('incident email', () => {
     });
     expect(update.subject).toBe(`Re: ${email.subject}`);
     expect(update.text).toContain('WHAT CHANGED');
-    expect(update.text).toContain('No action is waiting for approval.');
+    expect(update.text).toContain('Nothing is waiting for your approval.');
+    expect(update.text).toContain('None. There is nothing to approve in this email.');
     // An update leads with what changed, in both formats
     expect(update.text.indexOf('WHAT CHANGED')).toBeLessThan(
       update.text.indexOf('9 people have reported')
@@ -397,5 +398,100 @@ describe('incident email', () => {
     expect(none.text).toContain(
       'Blast radius is not enabled, so Phishy cannot say who else received it'
     );
+  });
+
+  describe('makes the state obvious', () => {
+    const base = {
+      incident,
+      done: [],
+      notes: [],
+      timeZone: 'UTC',
+    };
+    const numbered = (text: string): string[] =>
+      text.split('\n').filter(line => /^\d+\. /.test(line));
+
+    it('actions waiting: says replying to this email approves, with the short form for the warning', () => {
+      const first = buildIncidentEmail({ ...base, proposed: [warning], commandsEnabled: true });
+      expect(first.text).toContain('1 action is waiting for your approval.');
+      expect(first.text).toContain(
+        'To approve, reply to this email with the line shown under "Proposed actions".'
+      );
+      expect(first.html).toContain(
+        'To approve, reply to this email with the line shown under &quot;Proposed actions&quot;.'
+      );
+      expect(first.text).toContain(
+        'For the warning only, a reply to this email with just the two words "approve warning" also works.'
+      );
+      expect(first.text).not.toContain('Use this update');
+      // The false-positive option is separate, not numbered with the approvals
+      expect(numbered(first.text)).toEqual(['1. Warn the people who received it']);
+      expect(first.text).toContain('IF THIS IS NOT PHISHING');
+      expect(first.text).toContain('Reply with this line:  false positive');
+      expect(first.text).toContain('and cancels the proposed actions above.');
+      expect(first.html).toMatch(
+        /Reply with this line:&nbsp; <span[^>]*>false positive<\/span><\/p>/
+      );
+
+      const update = buildIncidentEmail({
+        ...base,
+        proposed: [warning],
+        changes: ['1 new report(s) since the last email (4 in all).'],
+        commandsEnabled: true,
+      });
+      expect(update.text).toContain(
+        'Use this update: lines in earlier incident emails may have been replaced.'
+      );
+    });
+
+    it('nothing waiting: says why under the headline, and the false positive is only an option', () => {
+      const why =
+        'The warning was already approved by soc@example.com at Tue, 17 Nov 2026, 10:05 UTC and sent to 3 people.';
+      const idle = buildIncidentEmail({
+        ...base,
+        proposed: [],
+        idleReason: why,
+        commandsEnabled: true,
+      });
+      const lines = idle.text.split('\n');
+      const headline = lines.indexOf('Nothing is waiting for your approval.');
+      expect(headline).toBeGreaterThan(-1);
+      expect(lines[headline + 1]).toBe(why);
+      expect(idle.html).toContain(why);
+      expect(idle.text).not.toContain('To approve, reply');
+      expect(idle.text).toContain('None. There is nothing to approve in this email.');
+      expect(numbered(idle.text)).toEqual([]);
+      expect(idle.text).toContain('Reply with this line:  false positive');
+      expect(idle.text).not.toContain('cancels the proposed actions');
+      expect(idle.html).not.toContain('cancels the proposed actions');
+      expect(idle.text).not.toContain('Mark the campaign');
+    });
+
+    it('approvals off: says so under the headline, plus why nothing is waiting', () => {
+      const off = buildIncidentEmail({
+        ...base,
+        proposed: [],
+        idleReason: 'No warning can be proposed: warnings are turned off in the configuration.',
+        commandsEnabled: false,
+      });
+      expect(off.text).toContain('For information: approvals are off.');
+      expect(off.text).toContain(
+        'Phishy cannot receive approvals: the email command channel is off (PHISHY_EMAIL_COMMANDS_ENABLED).'
+      );
+      expect(off.text).toContain(
+        'No warning can be proposed: warnings are turned off in the configuration.'
+      );
+      expect(off.text).not.toContain('To approve, reply');
+    });
+
+    it('offers no false positive without an Analysis ID', () => {
+      const bare = buildIncidentEmail({
+        ...base,
+        incident: { ...incident, summary: { ...incident.summary, analysisId: undefined } },
+        proposed: [],
+        commandsEnabled: true,
+      });
+      expect(bare.text).not.toContain('false positive');
+      expect(bare.text).not.toContain('IF THIS IS NOT PHISHING');
+    });
   });
 });
