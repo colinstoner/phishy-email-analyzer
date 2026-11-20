@@ -1177,6 +1177,28 @@ describe('EmailParserService', () => {
       expect(headers['Original-Subject']).toBe('Quarterly report');
     });
 
+    it('parses an Outlook for Mac block (Date instead of Sent) below a long note', () => {
+      const parser = makeParser();
+      const text = [
+        'Can you check this one? '.repeat(30),
+        '',
+        '________________________________',
+        'From: Alice Example <alice@example.org>',
+        'Date: Monday, June 1, 2026 at 9:00 AM',
+        'To: Bob Example <bob@example.com>',
+        'Subject: Quarterly report',
+        '',
+        'See the report attached.',
+      ].join('\n');
+
+      const headers = parser.extractForwardedHeaders(text);
+
+      expect(headers['Original-From']).toBe('Alice Example <alice@example.org>');
+      expect(headers['Original-Date']).toBe('Monday, June 1, 2026 at 9:00 AM');
+      expect(headers['Original-To']).toBe('Bob Example <bob@example.com>');
+      expect(headers['Original-Subject']).toBe('Quarterly report');
+    });
+
     it('should capture the Outlook subject with CRLF line endings', () => {
       const parser = makeParser();
       const text =
