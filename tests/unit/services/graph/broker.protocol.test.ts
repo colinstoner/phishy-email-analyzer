@@ -241,6 +241,12 @@ describe('original_message_lookup result', () => {
     expect(parsed).toEqual({ outcome: 'ambiguous', reason: 'several_candidates' });
   });
 
+  it('carries an unknown mailbox as a not-found outcome', () => {
+    expect(
+      OriginalMessageLookupResultSchema.parse({ outcome: 'not_found', reason: 'mailbox_not_found' })
+    ).toEqual({ outcome: 'not_found', reason: 'mailbox_not_found' });
+  });
+
   it('rejects junk', () => {
     const rejects = (value: unknown): boolean =>
       !OriginalMessageLookupResultSchema.safeParse(value).success;

@@ -9,6 +9,7 @@ import {
   enrichWithOriginalMessage,
   fetchOriginalMessage,
   parseClaimedSentTime,
+  plusAddressBase,
   searchWindow,
 } from '../../../../src/services/graph';
 import { EmailParserService } from '../../../../src/services/email/parser.service';
@@ -463,6 +464,114 @@ describe('enrichWithOriginalMessage', () => {
     expect(graph.requests).toHaveLength(0);
     expect(emailData.retrievedOriginal).toBeUndefined();
     expect(emitted()[0]).toMatchObject({ Outcome: 'skipped' });
+  });
+
+  describe('a reporter address that is not a mailbox name', () => {
+    const PLUS = 'reporter+phish@example.com';
+    const PLUS_PATH = '/users/reporter%2Bphish%40example.com/';
+    const plusReport = (address = PLUS): { msg: EmailMessage; emailData: ExtractedEmailData } => {
+      const { msg } = report();
+      const plusMsg: EmailMessage = {
+        ...msg,
+        from_email: address,
+        headers: { From: `Reporter <${address}>` },
+      };
+      return { msg: plusMsg, emailData: parser.extractEmailData(plusMsg) };
+    };
+    const unknownMailbox =
+      (prefix: string): FakeResponder =>
+      request =>
+        request.path.startsWith(prefix)
+          ? graphErrorResponse(404, 'ErrorInvalidUser', 'The requested user is invalid.')
+          : undefined;
+
+    it('resolves a plus-address through its base address', async () => {
+      const { msg, emailData } = plusReport();
+      const graph = fakeGraph([unknownMailbox(PLUS_PATH), ...mailbox([stored()])]);
+      const result = await enrichWithOriginalMessage(
+        graph.client,
+        parser,
+        msg,
+        emailData,
+        SAFE_DOMAINS
+      );
+
+      expect(result.outcome).toBe('found');
+      expect(emailData.retrievedOriginal?.headers).toHaveLength(HEADERS.length);
+      // First the confirmed address, then once its base: never anything else
+      const mailboxes = [...new Set(graph.requests.map(r => r.path.split('/')[2]))];
+      expect(mailboxes).toEqual(['reporter%2Bphish%40example.com', 'reporter%40example.com']);
+      expect(graph.requests.every(r => r.method === 'GET')).toBe(true);
+      expect(emitted()).toHaveLength(1);
+      expect(emitted()[0]).toMatchObject({ Outcome: 'found' });
+    });
+
+    it('ends as not found when the base address is not a mailbox either', async () => {
+      const { msg, emailData } = plusReport();
+      const graph = fakeGraph([unknownMailbox('/users/')]);
+      const result = await enrichWithOriginalMessage(
+        graph.client,
+        parser,
+        msg,
+        emailData,
+        SAFE_DOMAINS
+      );
+      expect(result).toEqual({ outcome: 'not_found', reason: 'mailbox_not_found' });
+      expect(emailData.retrievedOriginal).toBeUndefined();
+      expect(emitted()[0]).toMatchObject({ Outcome: 'not_found' });
+      // One retry, not a loop
+      const mailboxes = new Set(graph.requests.map(r => r.path.split('/')[2]));
+      expect(mailboxes.size).toBe(2);
+    });
+
+    it('ends as not found, without a retry, for an unknown address with no +tag', async () => {
+      const { msg, emailData } = report();
+      const graph = fakeGraph([unknownMailbox('/users/')]);
+      const result = await enrichWithOriginalMessage(
+        graph.client,
+        parser,
+        msg,
+        emailData,
+        SAFE_DOMAINS
+      );
+      expect(result).toEqual({ outcome: 'not_found', reason: 'mailbox_not_found' });
+      expect(graph.requests).toHaveLength(2);
+    });
+
+    it('still refuses an address that is not on a safe domain, with or without a +tag', async () => {
+      for (const address of ['reporter+phish@example.net', 'reporter@example.net']) {
+        const { msg, emailData } = plusReport(address);
+        const graph = fakeGraph(mailbox([stored()]));
+        const result = await enrichWithOriginalMessage(
+          graph.client,
+          parser,
+          msg,
+          emailData,
+          SAFE_DOMAINS
+        );
+        expect(result).toEqual({ outcome: 'skipped', reason: 'reporter_not_confirmed' });
+        expect(graph.requests).toHaveLength(0);
+      }
+      expect(plusAddressBase('reporter+phish@example.net', SAFE_DOMAINS)).toBeUndefined();
+      expect(plusAddressBase('reporter+phish@example.com', SAFE_DOMAINS)).toBe(
+        'reporter@example.com'
+      );
+      expect(plusAddressBase('+phish@example.com', SAFE_DOMAINS)).toBeUndefined();
+      expect(plusAddressBase('reporter@example.com', SAFE_DOMAINS)).toBeUndefined();
+    });
+
+    it('keeps other failures errors: a missing message or folder is not a missing mailbox', async () => {
+      const { msg, emailData } = plusReport();
+      const graph = fakeGraph([() => graphErrorResponse(404, 'ErrorItemNotFound')]);
+      const result = await enrichWithOriginalMessage(
+        graph.client,
+        parser,
+        msg,
+        emailData,
+        SAFE_DOMAINS
+      );
+      expect(result).toEqual({ outcome: 'error', reason: 'graph_http' });
+    });
   });
 
   it('survives a parser that throws', async () => {

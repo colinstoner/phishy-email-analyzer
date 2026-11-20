@@ -198,6 +198,63 @@ describe('DirectGraphGateway', () => {
   });
 });
 
+describe('BrokerGraphGateway with a plus-addressed reporter', () => {
+  const PLUS = 'reporter+phish@example.com';
+
+  function plusEmail(): ExtractedEmailData {
+    return {
+      ...email(),
+      from_email: PLUS,
+      headers: { From: `Reporter <${PLUS}>` },
+      sender: PLUS,
+      original_sender: PLUS,
+      originalForwarder: PLUS,
+    };
+  }
+
+  beforeEach(() => {
+    jest.spyOn(metrics, 'emitOriginalFetchMetric').mockImplementation(() => undefined);
+  });
+
+  it('asks the broker once more for the base address when the mailbox is unknown', async () => {
+    const call = jest.fn((_operation: string, params: { mailbox: string }, _waitMs: number) =>
+      Promise.resolve(
+        params.mailbox === PLUS
+          ? { ok: true, result: { outcome: 'not_found', reason: 'mailbox_not_found' } }
+          : { ok: true, result: { outcome: 'not_found', reason: 'no_candidate' } }
+      )
+    );
+    const gateway = brokerGateway({ call } as unknown as GraphBrokerClient);
+    const sink = { attachRetrievedOriginal: jest.fn() };
+
+    const result = await gateway.enrichWithOriginalMessage(
+      sink,
+      AUTHENTICATED,
+      plusEmail(),
+      SAFE_DOMAINS
+    );
+
+    expect(result).toEqual({ outcome: 'not_found', reason: 'no_candidate' });
+    expect(call.mock.calls.map(c => c[1].mailbox)).toEqual([PLUS, REPORTER]);
+    // The retry waits only for what is left of the 8 s budget
+    expect(call.mock.calls[1][2]).toBeLessThanOrEqual(8000);
+  });
+
+  it('does not retry an ordinary not-found', async () => {
+    const { broker, call } = stubBroker({
+      ok: true,
+      result: { outcome: 'not_found', reason: 'no_candidate' },
+    });
+    await brokerGateway(broker).enrichWithOriginalMessage(
+      { attachRetrievedOriginal: jest.fn() },
+      AUTHENTICATED,
+      plusEmail(),
+      SAFE_DOMAINS
+    );
+    expect(call).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('BrokerGraphGateway when the broker call fails', () => {
   let fetchMetric: jest.SpyInstance;
   let historyMetric: jest.SpyInstance;
