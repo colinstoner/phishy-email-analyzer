@@ -32,6 +32,20 @@ Two manual steps remain, because CloudFormation cannot do them:
 
 If you deploy with SAM, you can skip to Section 9 (production access) and Section 10 (testing). The sections below document the same setup done manually via the console.
 
+### Optional: campaign response, the command channel and attachment analysis
+
+All off by default; each is one parameter.
+
+| Parameter | Default | |
+|---|---|---|
+| `EmailCommandsEnabled` | `false` | Security-team replies record verdicts and approve response actions. Needs the intelligence database and `migrations/002_analysis_feedback.sql` |
+| `CampaignResponseEnabled` | `false` | Incident email, targeted warning and approved actions. Needs `CampaignAlertsEnabled`, the intelligence database and `migrations/006_campaign_response.sql`; approvals need `EmailCommandsEnabled` |
+| `CampaignResponseAudience` | `distribution` | `distribution`, `recipients` (needs `GraphBlastRadiusEnabled`) or `both` |
+| `CampaignResponseEmployeeWarning` | `approve` | `approve`, `auto` or `off` |
+| `AttachmentAnalysisEnabled` | `false` | Static inspection of attachments |
+
+With `CampaignResponseEnabled`, `CampaignAlertDistribution` may be left empty: no broadcast is sent and only the individual recipients are warned. The other campaign-response and attachment settings keep their defaults unless set in a config file (see [docs/CONFIGURATION.md](docs/CONFIGURATION.md)).
+
 ### Optional: Microsoft Graph (the Graph broker function)
 
 Phishy's optional Microsoft Graph features (original-message lookup, sender-relationship check, blast radius, and the scheduled fan-out scan) are off by default, and with `GraphEnabled=false` the template creates exactly what it creates without them. Setting `GraphEnabled=true` deploys them in **broker mode**: Graph requests are made by a second function, the Graph broker, and never by the function that parses email. Why, and what crosses between the two, is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#graph-broker).

@@ -12,6 +12,9 @@ import { AUDIT_DEACTIVATION_MARKER, REPORT_KEY_HISTORY } from './indicator.polic
 
 const logger = createLogger('intelligence-db');
 
+/** A raw result row: column values stay `unknown` until mapped. */
+type DbRow = Record<string, unknown>;
+
 /**
  * Strip SSL-mode overrides from a Postgres connection string so a pinned CA
  * (config.ssl) is never silently discarded. `pg` gives connection-string
@@ -489,7 +492,7 @@ export class IntelligenceDatabaseService {
       const allValues = [...values, ...opt.map(o => o.value)];
       const placeholders = allValues.map((_, i) => `$${i + 1}`).join(', ');
       try {
-        const result = await this.pool.query(
+        const result = await this.pool.query<DbRow>(
           `INSERT INTO email_analyses (${allColumns.join(', ')})
            VALUES (${placeholders})
            RETURNING id`,
@@ -520,7 +523,7 @@ export class IntelligenceDatabaseService {
   async getAnalysis(id: string): Promise<EmailAnalysisRecord | null> {
     await this.initialize();
 
-    const result = await this.pool.query('SELECT * FROM email_analyses WHERE id = $1', [id]);
+    const result = await this.pool.query<DbRow>('SELECT * FROM email_analyses WHERE id = $1', [id]);
 
     if (result.rows.length === 0) {
       return null;
@@ -581,10 +584,10 @@ export class IntelligenceDatabaseService {
       SELECT * FROM email_analyses
       ${whereClause}
       ORDER BY created_at DESC
-      LIMIT $${paramIndex++} OFFSET $${paramIndex++}
+      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
     `;
 
-    const result = await this.pool.query(query, params);
+    const result = await this.pool.query<DbRow>(query, params);
     return result.rows.map(row => this.mapRowToAnalysis(row));
   }
 
@@ -613,7 +616,7 @@ export class IntelligenceDatabaseService {
     const reportKey = options.reportKey ?? `unkeyed:${randomUUID()}`;
     const metadata = { ...(indicator.metadata ?? {}), reportKeys: [reportKey] };
 
-    const result = await this.pool.query(
+    const result = await this.pool.query<DbRow>(
       `INSERT INTO threat_indicators
        (indicator_type, indicator_value, indicator_hash, confidence_score,
         severity, times_seen, first_seen_at, last_seen_at, is_active, expires_at, metadata)
@@ -693,7 +696,7 @@ export class IntelligenceDatabaseService {
    */
   async scanIndicators(afterId: string | null, limit: number): Promise<ThreatIndicatorRecord[]> {
     const safeLimit = Math.min(Math.max(1, Math.floor(limit)), 5000);
-    const result = await this.pool.query(
+    const result = await this.pool.query<DbRow>(
       `SELECT * FROM threat_indicators
        WHERE ($1::uuid IS NULL OR id > $1::uuid)
        ORDER BY id
@@ -709,7 +712,7 @@ export class IntelligenceDatabaseService {
    */
   async deactivateIndicators(ids: string[], rule: string): Promise<number> {
     if (ids.length === 0) return 0;
-    const result = await this.pool.query(
+    const result = await this.pool.query<DbRow>(
       `UPDATE threat_indicators
        SET is_active = FALSE,
            metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
@@ -725,7 +728,7 @@ export class IntelligenceDatabaseService {
 
   /** Reactivate every indicator the audit CLI deactivated */
   async restoreAuditDeactivations(): Promise<number> {
-    const result = await this.pool.query(
+    const result = await this.pool.query<DbRow>(
       `UPDATE threat_indicators
        SET is_active = TRUE,
            metadata = metadata - 'deactivatedBy' - 'deactivatedRule' - 'deactivatedAt'
@@ -743,7 +746,7 @@ export class IntelligenceDatabaseService {
 
     const hashes = values.map(v => this.hashIndicator(type, v));
 
-    const result = await this.pool.query(
+    const result = await this.pool.query<DbRow>(
       `SELECT * FROM threat_indicators
        WHERE indicator_type = $1
        AND indicator_hash = ANY($2)
@@ -779,7 +782,7 @@ export class IntelligenceDatabaseService {
     params.push(safeLimit);
     query += ` ORDER BY last_seen_at DESC LIMIT $${limitParamIndex}`;
 
-    const result = await this.pool.query(query, params);
+    const result = await this.pool.query<DbRow>(query, params);
     return result.rows.map(row => this.mapRowToIndicator(row));
   }
 
@@ -789,7 +792,7 @@ export class IntelligenceDatabaseService {
   async upsertPattern(pattern: DetectedPatternRecord): Promise<string> {
     await this.initialize();
 
-    const result = await this.pool.query(
+    const result = await this.pool.query<DbRow>(
       `INSERT INTO detected_patterns
        (pattern_name, pattern_type, pattern_criteria, match_count,
         is_confirmed_threat, first_detected_at, last_detected_at)
@@ -831,7 +834,7 @@ export class IntelligenceDatabaseService {
     };
 
     // Get basic counts
-    const countsResult = await this.pool.query(`
+    const countsResult = await this.pool.query<DbRow>(`
       SELECT
         (SELECT COUNT(*) FROM email_analyses) as total_analyses,
         (SELECT COUNT(*) FROM email_analyses WHERE is_phishing = TRUE) as phishing_detected,
@@ -842,15 +845,15 @@ export class IntelligenceDatabaseService {
     `);
 
     const counts = countsResult.rows[0];
-    stats.totalAnalyses = parseInt(counts.total_analyses, 10);
-    stats.phishingDetected = parseInt(counts.phishing_detected, 10);
-    stats.activeIndicators = parseInt(counts.active_indicators, 10);
-    stats.detectedPatterns = parseInt(counts.detected_patterns, 10);
-    stats.analysesLast24h = parseInt(counts.analyses_24h, 10);
-    stats.analysesLast7d = parseInt(counts.analyses_7d, 10);
+    stats.totalAnalyses = parseInt(counts.total_analyses as string, 10);
+    stats.phishingDetected = parseInt(counts.phishing_detected as string, 10);
+    stats.activeIndicators = parseInt(counts.active_indicators as string, 10);
+    stats.detectedPatterns = parseInt(counts.detected_patterns as string, 10);
+    stats.analysesLast24h = parseInt(counts.analyses_24h as string, 10);
+    stats.analysesLast7d = parseInt(counts.analyses_7d as string, 10);
 
     // Get top threatened domains
-    const domainsResult = await this.pool.query(`
+    const domainsResult = await this.pool.query<DbRow>(`
       SELECT from_domain as domain, COUNT(*) as count
       FROM email_analyses
       WHERE is_phishing = TRUE
@@ -861,18 +864,18 @@ export class IntelligenceDatabaseService {
 
     stats.topThreatenedDomains = domainsResult.rows.map(row => ({
       domain: row.domain as string,
-      count: parseInt(row.count, 10),
+      count: parseInt(row.count as string, 10),
     }));
 
     // Get risk distribution
-    const riskResult = await this.pool.query(`
+    const riskResult = await this.pool.query<DbRow>(`
       SELECT risk_level, COUNT(*) as count
       FROM email_analyses
       GROUP BY risk_level
     `);
 
     for (const row of riskResult.rows) {
-      stats.riskDistribution[row.risk_level as string] = parseInt(row.count, 10);
+      stats.riskDistribution[row.risk_level as string] = parseInt(row.count as string, 10);
     }
 
     return stats;
@@ -884,7 +887,7 @@ export class IntelligenceDatabaseService {
   async hasBeenAnalyzed(messageId: string): Promise<boolean> {
     await this.initialize();
 
-    const result = await this.pool.query(
+    const result = await this.pool.query<DbRow>(
       'SELECT 1 FROM email_analyses WHERE message_id = $1 LIMIT 1',
       [messageId]
     );
@@ -915,7 +918,7 @@ export class IntelligenceDatabaseService {
       await client.query('BEGIN');
 
       // Upsert campaign record
-      const result = await client.query(
+      const result = await client.query<DbRow>(
         `INSERT INTO campaigns
          (campaign_signature, sender_domain, subject_pattern, detection_count,
           unique_recipients, risk_level, sample_indicators, first_seen_at, last_seen_at)
@@ -1005,7 +1008,9 @@ export class IntelligenceDatabaseService {
   async getCampaignDetails(campaignId: string): Promise<CampaignRecord | null> {
     await this.initialize();
 
-    const result = await this.pool.query('SELECT * FROM campaigns WHERE id = $1', [campaignId]);
+    const result = await this.pool.query<DbRow>('SELECT * FROM campaigns WHERE id = $1', [
+      campaignId,
+    ]);
     return result.rows.length > 0 ? this.mapRowToCampaign(result.rows[0]) : null;
   }
 
@@ -1016,9 +1021,10 @@ export class IntelligenceDatabaseService {
   async getCampaignBySignature(signature: string): Promise<CampaignRecord | null> {
     await this.initialize();
 
-    const result = await this.pool.query('SELECT * FROM campaigns WHERE campaign_signature = $1', [
-      signature,
-    ]);
+    const result = await this.pool.query<DbRow>(
+      'SELECT * FROM campaigns WHERE campaign_signature = $1',
+      [signature]
+    );
     return result.rows.length > 0 ? this.mapRowToCampaign(result.rows[0]) : null;
   }
 
@@ -1054,7 +1060,10 @@ export class IntelligenceDatabaseService {
     ): Promise<{ rows: Array<Record<string, unknown>>; rowCount: number | null }>;
   } {
     return {
-      query: async (sql, params) => {
+      query: async (
+        sql,
+        params
+      ): Promise<{ rows: Array<Record<string, unknown>>; rowCount: number | null }> => {
         await this.initialize();
         const result = await this.pool.query(sql, params);
         return { rows: result.rows as Array<Record<string, unknown>>, rowCount: result.rowCount };
@@ -1095,7 +1104,7 @@ export class IntelligenceDatabaseService {
     await this.initialize();
 
     try {
-      const result = await this.pool.query(
+      const result = await this.pool.query<DbRow>(
         'SELECT id FROM email_analyses WHERE report_message_id = $1 LIMIT 1',
         [sesMessageId]
       );
@@ -1117,7 +1126,7 @@ export class IntelligenceDatabaseService {
     await this.initialize();
 
     try {
-      const result = await this.pool.query(
+      const result = await this.pool.query<DbRow>(
         `INSERT INTO analysis_feedback (analysis_id, verdict, source, submitted_by, notes)
          VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (analysis_id)
@@ -1148,7 +1157,8 @@ export class IntelligenceDatabaseService {
       // 42P01 = undefined_table
       if ((error as { code?: string }).code === '42P01') {
         throw new Error(
-          'analysis_feedback table is missing — apply migrations/002_analysis_feedback.sql before enabling feedback'
+          'analysis_feedback table is missing — apply migrations/002_analysis_feedback.sql before enabling feedback',
+          { cause: error }
         );
       }
       throw error;
@@ -1189,7 +1199,7 @@ export class IntelligenceDatabaseService {
 
     let result;
     try {
-      result = await this.pool.query(
+      result = await this.pool.query<DbRow>(
         updateSql(`metadata->>'sourceAnalysisId' IN (
            SELECT sibling.id::text FROM email_analyses sibling
            WHERE sibling.id = $1
@@ -1204,7 +1214,9 @@ export class IntelligenceDatabaseService {
       if ((error as { code?: string }).code !== '42703') {
         throw error;
       }
-      result = await this.pool.query(updateSql(`metadata->>'sourceAnalysisId' = $1`), [analysisId]);
+      result = await this.pool.query<DbRow>(updateSql(`metadata->>'sourceAnalysisId' = $1`), [
+        analysisId,
+      ]);
     }
 
     const adjusted = result.rowCount ?? 0;
@@ -1222,7 +1234,7 @@ export class IntelligenceDatabaseService {
   async storeAIUsage(record: AIUsageRecord): Promise<string> {
     await this.initialize();
 
-    const result = await this.pool.query(
+    const result = await this.pool.query<DbRow>(
       `INSERT INTO ai_usage
        (analysis_id, provider, model, input_tokens, output_tokens, total_tokens, estimated_cost_usd)
        VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -1255,7 +1267,7 @@ export class IntelligenceDatabaseService {
     await this.initialize();
 
     // Get aggregate stats
-    const statsResult = await this.pool.query(`
+    const statsResult = await this.pool.query<DbRow>(`
       SELECT
         COUNT(*) as total_requests,
         COALESCE(SUM(input_tokens), 0) as total_input_tokens,
@@ -1275,7 +1287,7 @@ export class IntelligenceDatabaseService {
     const row = statsResult.rows[0];
 
     // Get usage by model
-    const modelResult = await this.pool.query(`
+    const modelResult = await this.pool.query<DbRow>(`
       SELECT
         model,
         COUNT(*) as requests,
@@ -1287,23 +1299,23 @@ export class IntelligenceDatabaseService {
     `);
 
     return {
-      totalRequests: parseInt(row.total_requests, 10),
-      totalInputTokens: parseInt(row.total_input_tokens, 10),
-      totalOutputTokens: parseInt(row.total_output_tokens, 10),
-      totalTokens: parseInt(row.total_tokens, 10),
-      estimatedTotalCostUsd: parseFloat(row.total_cost),
-      avgInputTokensPerRequest: parseFloat(row.avg_input_tokens),
-      avgOutputTokensPerRequest: parseFloat(row.avg_output_tokens),
-      avgCostPerRequest: parseFloat(row.avg_cost),
-      requestsLast24h: parseInt(row.requests_24h, 10),
-      requestsLast7d: parseInt(row.requests_7d, 10),
-      costLast24h: parseFloat(row.cost_24h),
-      costLast7d: parseFloat(row.cost_7d),
+      totalRequests: parseInt(row.total_requests as string, 10),
+      totalInputTokens: parseInt(row.total_input_tokens as string, 10),
+      totalOutputTokens: parseInt(row.total_output_tokens as string, 10),
+      totalTokens: parseInt(row.total_tokens as string, 10),
+      estimatedTotalCostUsd: parseFloat(row.total_cost as string),
+      avgInputTokensPerRequest: parseFloat(row.avg_input_tokens as string),
+      avgOutputTokensPerRequest: parseFloat(row.avg_output_tokens as string),
+      avgCostPerRequest: parseFloat(row.avg_cost as string),
+      requestsLast24h: parseInt(row.requests_24h as string, 10),
+      requestsLast7d: parseInt(row.requests_7d as string, 10),
+      costLast24h: parseFloat(row.cost_24h as string),
+      costLast7d: parseFloat(row.cost_7d as string),
       usageByModel: modelResult.rows.map(r => ({
         model: r.model as string,
-        requests: parseInt(r.requests, 10),
-        totalTokens: parseInt(r.total_tokens, 10),
-        estimatedCostUsd: parseFloat(r.estimated_cost),
+        requests: parseInt(r.requests as string, 10),
+        totalTokens: parseInt(r.total_tokens as string, 10),
+        estimatedCostUsd: parseFloat(r.estimated_cost as string),
       })),
     };
   }
@@ -1366,7 +1378,7 @@ export class IntelligenceDatabaseService {
     const windowHours = Math.max(1, maxAgeHours);
 
     try {
-      const result = await this.pool.query(
+      const result = await this.pool.query<DbRow>(
         `SELECT ea.id, ea.analysis_result, ea.created_at,
                 af.verdict AS feedback_verdict, af.submitted_by AS feedback_by
          FROM email_analyses ea
@@ -1391,7 +1403,7 @@ export class IntelligenceDatabaseService {
       // 42P01 = analysis_feedback table missing (migration 002 not applied) —
       // cache still works, just without security-team verdict overrides
       if (code === '42P01') {
-        const result = await this.pool.query(
+        const result = await this.pool.query<DbRow>(
           `SELECT id, analysis_result, created_at
            FROM email_analyses
            WHERE campaign_signature = $1

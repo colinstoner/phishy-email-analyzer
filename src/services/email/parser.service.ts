@@ -147,7 +147,7 @@ export class EmailParserService {
 
       // Case 1: Direct SES invocation
       if (this.isSESEvent(rawInput)) {
-        const sesEvent = rawInput as SESEvent;
+        const sesEvent = rawInput;
         const result = await this.parseSESRecords(sesEvent.Records);
         logger.info('Parsed SES records', { count: result.length });
         return result;
@@ -158,7 +158,10 @@ export class EmailParserService {
 
       // Try JSON parsing
       try {
-        const jsonBody = JSON.parse(bodyStr);
+        // A non-object (e.g. `null`) throws on property access below and is
+        // handled by the catch, exactly as before
+        const jsonBody = JSON.parse(bodyStr) as
+          unknown[] | { Records?: unknown; email_events?: unknown };
 
         if (Array.isArray(jsonBody)) {
           return this.validateEventShapes(jsonBody);
@@ -171,7 +174,7 @@ export class EmailParserService {
         if (jsonBody.email_events) {
           const events = Array.isArray(jsonBody.email_events)
             ? jsonBody.email_events
-            : JSON.parse(jsonBody.email_events as string);
+            : (JSON.parse(jsonBody.email_events as string) as unknown);
           return Array.isArray(events) ? this.validateEventShapes(events) : [];
         }
       } catch {
@@ -184,7 +187,7 @@ export class EmailParserService {
           const params = new URLSearchParams(bodyStr);
           const emailEvents = params.get('email_events');
           if (emailEvents) {
-            const events = JSON.parse(emailEvents);
+            const events = JSON.parse(emailEvents) as unknown;
             return Array.isArray(events) ? this.validateEventShapes(events) : [];
           }
         } catch {
@@ -219,7 +222,7 @@ export class EmailParserService {
     for (const event of events) {
       const result = ExternalEmailEventSchema.safeParse(event);
       if (result.success) {
-        valid.push(result.data as EmailEvent);
+        valid.push(result.data);
       }
     }
 
@@ -307,7 +310,7 @@ export class EmailParserService {
   private async extractEmailContent(
     record: SESRecord
   ): Promise<{ content: string; s3Location: S3Location | null }> {
-    let s3Location: S3Location | null = null;
+    let s3Location: S3Location | null;
 
     // Check for direct content in various locations
     if (record.ses.content) {
@@ -497,6 +500,7 @@ export class EmailParserService {
       if (innerReplyTo?.text) headerLines.push(`Reply-To: ${innerReplyTo.text}`);
       const authResults = inner.headers.get('authentication-results');
       if (authResults) {
+        // eslint-disable-next-line @typescript-eslint/no-base-to-string -- mailparser keeps Authentication-Results unstructured (string, or string[] when repeated); String() is the existing rendering
         headerLines.push(`Authentication-Results: ${String(authResults)}`);
       }
 
@@ -585,6 +589,7 @@ export class EmailParserService {
     if (typeof input === 'string') return input;
     if (Buffer.isBuffer(input)) return input.toString('utf8');
     if (typeof input === 'object') return JSON.stringify(input);
+    // eslint-disable-next-line @typescript-eslint/no-base-to-string -- only non-object values (primitives) reach here; String() is the intended coercion
     return String(input);
   }
 
@@ -845,7 +850,7 @@ export class EmailParserService {
 
     for (const [headerName, pattern] of Object.entries(headerPatterns)) {
       const match = headerBlock.match(pattern);
-      if (match && match[1]) {
+      if (match?.[1]) {
         // Clean up the value - remove HTML entities and extra whitespace
         let value = match[1].trim();
         value = value.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');

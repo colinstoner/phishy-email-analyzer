@@ -552,6 +552,7 @@ function parseBedrockBody(rawResponse: string): unknown {
       responseLength: rawResponse.length,
       error: parseError instanceof Error ? parseError.message : String(parseError),
     });
+    // eslint-disable-next-line preserve-caught-error -- the SyntaxError message can quote the body (model output derived from the reported email); not attached as a cause
     throw new Error('Invalid JSON response from Bedrock');
   }
 

@@ -102,7 +102,7 @@ export interface RunOutcome {
 export function normalizeForMatch(text: string): string {
   return text
     .normalize('NFKC')
-    .replace(/[​-‍⁠﻿]/g, '')
+    .replace(/[\u200b-\u200d\u2060\ufeff]/g, '')
     .toLowerCase()
     .replace(/hxxp/g, 'http')
     .replace(/\[\.\]|\(\.\)|\[dot\]/g, '.')

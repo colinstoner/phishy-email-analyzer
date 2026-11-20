@@ -26,6 +26,15 @@ const MAX_RESULT_CHARS = 4000;
 
 const LOOKUP_TYPES: IndicatorType[] = ['domain', 'ip', 'url', 'email'];
 
+/**
+ * A model-authored tool argument as text: missing (null/undefined) becomes ''.
+ * The argument can be any JSON value; String() coercion is the contract.
+ */
+function inputText(value: unknown): string {
+  // eslint-disable-next-line @typescript-eslint/no-base-to-string -- model input can be any JSON value; String() coercion is the existing contract
+  return String(value ?? '');
+}
+
 export interface ToolExecutionResult {
   content: string;
   isError?: boolean;
@@ -151,7 +160,7 @@ export class AgenticToolExecutor {
       let result: unknown;
       switch (name) {
         case 'examine_url':
-          result = examineUrl(String(input.url ?? ''));
+          result = examineUrl(inputText(input.url));
           break;
         case 'lookup_indicators':
           result = await this.lookupIndicators(input);
@@ -160,7 +169,7 @@ export class AgenticToolExecutor {
           result = await this.checkCampaign(input);
           break;
         case 'check_profile':
-          result = this.checkProfile(String(input.value ?? ''));
+          result = this.checkProfile(inputText(input.value));
           break;
         default:
           return { content: JSON.stringify({ error: `Unknown tool: ${name}` }), isError: true };
@@ -191,7 +200,7 @@ export class AgenticToolExecutor {
       throw new Error('Threat intelligence database not available');
     }
 
-    const type = String(input.indicator_type ?? '') as IndicatorType;
+    const type = inputText(input.indicator_type) as IndicatorType;
     if (!LOOKUP_TYPES.includes(type)) {
       throw new Error(`indicator_type must be one of: ${LOOKUP_TYPES.join(', ')}`);
     }
@@ -229,8 +238,8 @@ export class AgenticToolExecutor {
       throw new Error('Threat intelligence database not available');
     }
 
-    const senderDomain = String(input.sender_domain ?? '');
-    const subject = String(input.subject ?? '');
+    const senderDomain = inputText(input.sender_domain);
+    const subject = inputText(input.subject);
     if (!senderDomain || !subject) {
       throw new Error('sender_domain and subject are required');
     }
