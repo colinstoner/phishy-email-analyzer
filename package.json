@@ -2,7 +2,7 @@
   "name": "phishy-email-analyzer",
   "version": "3.0.0",
   "description": "Phishing-report desk on AWS Lambda: employees forward suspicious emails, Claude analyzes them, and Phishy replies with a report; optional threat intelligence, campaign response and read-only Microsoft Graph lookups",
-  "main": "index.js",
+  "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
     "phishy-try": "dist/cli/try.js",
@@ -14,6 +14,7 @@
     "indicators:audit": "esbuild src/cli/indicator-audit.ts --bundle --platform=node --target=node22 --loader:.pem=text --log-level=warning --outfile=dist/cli-bundles/indicator-audit.cjs && node dist/cli-bundles/indicator-audit.cjs",
     "eval:injection": "esbuild src/cli/injection-eval.ts --bundle --platform=node --target=node22 --loader:.pem=text --log-level=warning --outfile=dist/eval/injection-eval.cjs && node dist/eval/injection-eval.cjs",
     "build": "tsc",
+    "postbuild": "node scripts/build-pem-modules.js",
     "build:watch": "tsc --watch",
     "clean": "rm -rf dist",
     "prebuild": "npm run clean",
@@ -25,8 +26,8 @@
     "format": "prettier --write \"src/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\"",
     "typecheck": "tsc --noEmit",
-    "deploy": "npm run build && zip -r function.zip dist node_modules package.json index.js && aws lambda update-function-code --function-name phishyAWS --zip-file fileb://function.zip",
-    "deploy:legacy": "zip -r function.zip index.js node_modules package.json && aws lambda update-function-code --function-name phishy --zip-file fileb://function.zip"
+    "package": "node scripts/package-lambda.js",
+    "deploy": "node scripts/package-lambda.js --deploy"
   },
   "keywords": [
     "security",

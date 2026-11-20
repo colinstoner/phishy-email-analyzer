@@ -78,7 +78,7 @@ Parameters:
   CampaignAlertDistribution:
     Type: String
     Default: ''
-    Description: Address the campaign broadcast is sent to (e.g. all-staff@example.com). Required when CampaignAlertsEnabled is true, unless CampaignResponseEnabled is true and its audience is recipients. Known issue - this value currently fails configuration validation when passed as an environment variable; leave it empty and set campaignAlerts.distributionList in a configuration file (docs/CONFIGURATION.md).
+    Description: Address the campaign broadcast is sent to (e.g. all-staff@example.com). Required when CampaignAlertsEnabled is true, unless CampaignResponseEnabled is true and its audience is recipients.
   CampaignResponseEnabled:
     Type: String
     AllowedValues: ['true', 'false']
@@ -516,8 +516,9 @@ Resources:
   # only one that can read the Graph certificate. It is deliberately NOT
   # attached to the VPC (it needs the internet route the main function must
   # not have) and has no trigger: no function URL, API or event source. The
-  # main function invokes it directly with one of three typed requests; see
-  # docs/ARCHITECTURE.md, "Graph broker".
+  # main function invokes it directly with a request for one of four typed
+  # operations (original_message_lookup, sender_history_lookup,
+  # blast_radius_lookup, fanout_scan); see docs/ARCHITECTURE.md, "Graph broker".
   GraphBrokerFunction:
     Type: AWS::Serverless::Function
     Condition: UseGraph

@@ -62,16 +62,14 @@ Forward any email to your `RecipientEmail` from an address on one of your `SafeD
 
 ## Without SAM (manual function)
 
-If you deploy the function yourself, build it the way the SAM template does, with esbuild (the plain `npm run build` output cannot run on Lambda: it does not bundle the RDS certificate file the database module imports):
+If you deploy the function yourself, build it the way the SAM template does, as an esbuild bundle (same settings as `template.yaml`):
 
 ```bash
 npm ci
-npx esbuild src/index.ts --bundle --platform=node --target=node22 \
-  --loader:.pem=text '--external:@aws-sdk/*' --outfile=dist/lambda/index.js
-(cd dist/lambda && zip ../../function.zip index.js)
+npm run package        # writes dist/lambda/phishy.zip (index.js)
 ```
 
-Create a Node.js 22 function with handler `index.handler`, 1024 MB and a **180-second** timeout (the Bedrock retry budget needs it), upload `function.zip`, and set at least:
+Create a Node.js 22 function with handler `index.handler`, 1024 MB and a **180-second** timeout (the Bedrock retry budget needs it), upload `dist/lambda/phishy.zip` (later updates: `npm run deploy -- <function-name>`), and set at least:
 
 ```bash
 SAFE_DOMAINS=example.com

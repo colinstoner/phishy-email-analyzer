@@ -8,7 +8,7 @@ Phishy is a security tool — it processes untrusted, often actively malicious e
 | ------- | --------- |
 | 3.x (and unreleased `main`) | ✅ |
 | 2.x and earlier | ❌ |
-| 1.x (legacy `index.js`) | ❌ |
+| 1.x (the former root `index.js`, removed) | ❌ |
 
 ## Reporting a Vulnerability
 
