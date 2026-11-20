@@ -51,7 +51,7 @@ case .eml ──▶ forward simulator ──▶ EmailParserService ──▶ pro
 | `attachment_payload` | 3 | The payload is the attachment: an HTML sign-in page posting a password, a PDF that is only a link and an image, a macro-enabled Word document |
 | `benign_odd` | 8 | Harmless emails that look odd (a newsletter quoting injection strings, a build log, a genuine invoice PDF with a payment-portal link, a supplier share link behind a gateway wrapper) |
 
-The attacks sit on nine underlying emails (credential phish, invoice / BEC with no links, an RFQ from a known vendor's address, attachment lures, and a compromised known vendor), so a result is not about one template.
+The attacks sit on eleven underlying emails, each an attack's control (credential phish, invoice / BEC with no links, an RFQ from a known vendor's address, attachment lures, and a compromised known vendor), so a result is not about one template.
 
 The **compromised-vendor** control (`ctl-rfq-compromised-vendor`) reproduces a takeover of a real supplier's mailbox: a two-line RFQ addressed To the sender itself with every recipient in Bcc, a Reply-To naming another person, link text that looks like a PDF file name, the link wrapped in a gateway link-protection redirect, its real destination a OneDrive personal site on an unrelated tenant, and an image-only signature. It is forwarded as an attachment, the one forward that keeps Reply-To. Its benign twin (`ctl-ben-supplier-share`) is the same supplier sharing from its own tenant, addressed normally, and must not be flagged. The dry-run test asserts, for both and for the attacks on the first, that the wrapper is unwrapped and the file-share and addressing facts ([ARCHITECTURE.md](ARCHITECTURE.md#link-and-addressing-facts)) appear.
 
@@ -72,13 +72,13 @@ A case cannot declare that its payload is allowed outside the fences.
 
 ## What it does not measure
 
-- **Other emails.** Around fifty attacks are a sample. A determined attacker iterates against the model; this set does not.
-- **Detection quality in general.** Nine base emails say little about how well Phishy detects phishing. Use the control line only as a baseline for the attacks.
+- **Other emails.** 67 attacks are a sample. A determined attacker iterates against the model; this set does not.
+- **Detection quality in general.** Eleven base emails say little about how well Phishy detects phishing. Use the control line only as a baseline for the attacks.
 - **The intelligence database.** Known indicators, campaigns and security-team rulings can raise a score after the model answers. They are off here, so production may hold where the eval shows a flip. `lookup_indicators` and `check_campaign` are not offered to the agent for the same reason.
-- **Graph features.** The original-message lookup, sender-relationship check and blast radius are not exercised.
+- **Graph features.** The original-message lookup, sender-relationship check, blast radius and fan-out scan are not exercised.
 - **The command channel.** Security-team reply parsing is a separate prompt and is not covered.
 - **Real mail clients.** The forward simulator approximates Gmail and Outlook. A client that converts HTML to text differently may deliver or drop a hidden payload differently.
-- **Images and attachment content.** Phishy never shows either to the model, so neither is attacked here.
+- **Images.** Phishy never shows images (or rendered PDF pages) to the model, so they are not attacked here. Text extracted from attachments is shown, and is attacked (`attachment_payload`, `hidden_text`).
 - **Variance.** Models are not deterministic. One run per case is one sample; use `--repeats` before trusting a small difference.
 
 ## Running it
@@ -129,7 +129,7 @@ Exit code: 0 when the run completes, whatever it measured; 1 when the case set i
 
 ## Reading the results
 
-The console shows one block per model and mode. It prints case ids and counts only, never an email body or a model reply.
+The console shows one block per model and mode. It prints case ids and counts only, never an email body or a model reply. An abridged example (the numbers are illustrative):
 
 ```
 MODEL <id>   MODE single
@@ -202,10 +202,10 @@ Use `--dry-run --model <id> --mode <mode>` for an estimate before a run.
 
 | | Calls per model | Input tokens (estimate) |
 |---|---|---|
-| Single-shot, 1 repeat | 79 | about 320k |
-| Agentic, 1 repeat | 83 | about 1000k (the prompt is resent each round) |
+| Single-shot, 1 repeat | 88 | about 370k |
+| Agentic, 1 repeat | 92 | about 1,150k (the prompt is resent each round) |
 
-Four padding cases account for roughly a quarter of the input. Output is typically a few thousand tokens per call including thinking; one case (`out-token-exhaust`) can use the full 16,000.
+Four padding cases account for roughly a fifth of the input. Output is typically a few thousand tokens per call including thinking; one case (`out-token-exhaust`) can use the full 16,000.
 
 - Estimates use `src/utils/pricing.ts` and are deliberately high (3 characters per token). Reported costs use the token counts the API returns.
 - A failed analysis returns no usage, and an abandoned agentic loop loses its own; those runs are estimated and counted as such in the output.

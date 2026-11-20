@@ -15,22 +15,55 @@ This document provides step-by-step instructions for deploying Phishy on AWS.
 
 ## Option A: Deploy with AWS SAM (recommended)
 
-The [template.yaml](template.yaml) in the repo root provisions everything except DNS: the Lambda function (built from TypeScript via esbuild), the S3 email bucket with SES write access and a 90-day lifecycle rule, the SES receipt rule set (S3 action first, then Lambda), IAM permissions, and — when you pick the `bedrock` provider — the Bedrock invoke policy.
+The [template.yaml](template.yaml) in the repo root provisions everything except DNS: the Lambda function (Node.js 22, 1024 MB, 180 s, built from TypeScript via esbuild), the S3 email bucket with SES write access and a 90-day lifecycle rule on `emails/`, the SES receipt rule set (S3 action first, then Lambda), IAM permissions, and — when you pick the `bedrock` provider — the Bedrock invoke policy. Optional layers add their own resources only when enabled.
 
 ```bash
-# Prerequisites: AWS SAM CLI, authenticated AWS CLI
+# Prerequisites: AWS SAM CLI, authenticated AWS CLI, Node.js 22
 sam build
-sam deploy --guided   # prompts for recipient/sender emails, AI provider, etc.
+sam deploy --guided   # prompts for every parameter below
 ```
 
 Two manual steps remain, because CloudFormation cannot do them:
 
 1. **Verify your domain in SES** (Section 1 below) and point your domain's MX record at SES — e.g. `10 inbound-smtp.us-east-1.amazonaws.com`.
-2. **Activate the rule set**: SES allows only one active receipt rule set per account, so the template won't force a switch. In the SES console: Email receiving → Rule sets → `phishy-rules` → Set as active.
+2. **Activate the rule set**: SES allows only one active receipt rule set per account, so the template won't force a switch. In the SES console: Email receiving → Rule sets → `<stack name>-rules` (the `ReceiptRuleSetName` output) → Set as active.
 
 > SES email receiving is only available in certain regions (including us-east-1, us-west-2, and eu-west-1) — deploy the stack in one of them.
 
-If you deploy with SAM, you can skip to Section 9 (production access) and Section 10 (testing). The sections below document the same setup done manually via the console.
+If you deploy with SAM, you can skip to Section 9 (production access) and Section 10 (testing). Option B below documents the same setup done manually via the console.
+
+### Core parameters
+
+| Parameter | Default | |
+|---|---|---|
+| `RecipientEmail` | - | The address employees forward to. Its domain must be verified in SES with MX records pointing to SES |
+| `SenderEmail` | - | The SES-verified address reports are sent from |
+| `ReplyToEmail` | empty | `Reply-To` on Phishy's emails. Empty: `RecipientEmail` when `EmailCommandsEnabled` is true, none otherwise |
+| `SecurityTeamDistribution` | - | Security-team address(es), comma-separated: Cc'd on reports, the only senders whose replies count as commands |
+| `SafeDomains` | - | Your domain(s), comma-separated. Phishy answers only reports from these domains |
+| `SafeSenders` | empty | Individual addresses that may also report (outside `SafeDomains`) |
+| `SafeSenderSecurity` | empty | Cc'd instead of the security team on reports from `SafeSenders` |
+| `AIProvider` | `bedrock` | `bedrock` (IAM, no key) or `anthropic` |
+| `AnthropicApiKey` | empty | Required with `AIProvider=anthropic` |
+| `BedrockModelId` | empty | Pin a Bedrock inference profile (for example a `us.` geography profile); empty uses Phishy's default |
+| `DeleteEmailsAfterProcessing` | `false` | Delete the raw email from S3 once processed |
+| `ProfileS3Uri` | empty | `s3://` URI of an enterprise profile; store it under `profiles/` in the stack's email bucket |
+| `ReportButtonEnabled` | `false` | Handle Outlook Report-button submissions silently ([CONFIGURATION.md](docs/CONFIGURATION.md#outlook-report-button-intake)) |
+
+### Optional: the intelligence database
+
+| Parameter | Default | |
+|---|---|---|
+| `IntelligenceDbSecretArn` | empty | Secrets Manager secret holding the PostgreSQL 13+ connection string (raw, JSON with `connectionString`/`url`, or `username`/`password`/`host` fields). Empty: no database and nothing that needs one |
+| `VpcId`, `SubnetIds` | empty | Required with the database: the function is attached to this VPC to reach it privately |
+| `DatabaseSecurityGroupId` | empty | When set, an ingress rule for port 5432 from the function's security group is added to it |
+| `CreateVpcEndpoints` | `true` | Interface endpoints for bedrock-runtime (with Bedrock), SES and Secrets Manager, plus Lambda with Graph, so the VPC-attached function needs no NAT. Set `false` if the VPC already has them or a NAT gateway. The VPC must also have an S3 gateway endpoint or NAT route |
+| `CampaignAlertsEnabled` | `false` | Broadcast warning once several people report one email |
+| `CampaignAlertDistribution` | empty | Where that broadcast goes. **Known issue:** the value currently fails configuration validation as an environment variable; leave it empty and set `campaignAlerts` in a configuration file ([CONFIGURATION.md](docs/CONFIGURATION.md#configuration-priority)) |
+
+With `AIProvider=anthropic`, a VPC-attached function also needs NAT egress to reach `api.anthropic.com`: interface endpoints only cover AWS services.
+
+Phishy creates the baseline schema (migration 001) on first connection. **Apply later migrations by hand** before enabling what needs them: `migrations/002_analysis_feedback.sql` (email commands), `003_campaign_verdict_cache.sql` (verdict cache), `004_structured_verdict.sql` (queryable verdict columns), `005_fanout_scan.sql` (fan-out scan), `006_campaign_response.sql` (campaign response). See [docs/DATABASE.md](docs/DATABASE.md). The verdict cache and agentic analysis have no template parameter; set them through a configuration file or by adding their variables to the function's environment.
 
 ### Optional: campaign response, the command channel and attachment analysis
 
@@ -45,7 +78,7 @@ All off by default; each is one parameter.
 | `CampaignResponseReachThreshold` | `5` | Open the incident on the first malicious report when its blast radius found at least this many delivered recipients besides the reporters (needs `GraphBlastRadiusEnabled`); `0` waits for the report count. Automatic warnings still wait for a second reporter |
 | `AttachmentAnalysisEnabled` | `false` | Static inspection of attachments |
 
-With `CampaignResponseEnabled`, `CampaignAlertDistribution` may be left empty: no broadcast is sent and only the individual recipients are warned. The other campaign-response and attachment settings keep their defaults unless set in a config file (see [docs/CONFIGURATION.md](docs/CONFIGURATION.md)).
+With `CampaignResponseEnabled`, `CampaignAlertDistribution` may be left empty: no broadcast is sent, so choose `CampaignResponseAudience=recipients` (or `both`) and enable blast radius, or nobody is warned. The other campaign-response and attachment settings keep their defaults unless set in a config file (see [docs/CONFIGURATION.md](docs/CONFIGURATION.md)). Campaign response needs `CampaignAlertsEnabled=true` and `IntelligenceDbSecretArn`; a deploy without them is rejected.
 
 ### Optional: Microsoft Graph (the Graph broker function)
 
@@ -91,7 +124,7 @@ After deploying, alarm on `GraphBrokerCalls` with any `Outcome` other than `ok`,
 
 #### Optional: the scheduled fan-out scan
 
-`GraphFanoutScanEnabled=true` makes Phishy look at recent inbound mail flow every few minutes, without waiting for a report, and email the security team (`SecurityTeamDistribution`, nobody else) when an established external contact suddenly sends one subject to many internal people. It is read-only and involves no AI model. How it works and what it cannot see: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#scheduled-fan-out-scan).
+`GraphFanoutScanEnabled=true` makes Phishy look at recent inbound mail flow every few minutes, without waiting for a report, and email the security team (`SecurityTeamDistribution`, nobody else) when an established external contact suddenly sends one subject to many internal people. With `CampaignResponseEnabled` too, that email is a campaign-response incident email (every action waiting for approval) instead of the plain alert. It is read-only and involves no AI model. How it works and what it cannot see: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#scheduled-fan-out-scan).
 
 It needs `GraphEnabled=true` and the intelligence database (`IntelligenceDbSecretArn`): the scan keeps its lock, its window and the alerts it has sent there. A deploy that asks for the scan without either is rejected before anything is created. **Apply `migrations/005_fanout_scan.sql` to the database before enabling it**; until then every scan logs that the migration is missing and does nothing else. The read app registration needs `ExchangeMessageTrace.Read.All`, as for the sender-relationship check.
 
@@ -114,38 +147,34 @@ No other permission is needed: the main function already invokes the broker, rea
 5. Add the provided DNS records to your domain
 6. Wait for verification (can take 24-48 hours)
 
-### 2. Create IAM Role for SES Mail Manager
+### 2. Create the S3 Bucket
 
-1. When prompted to select an IAM role during rule creation, click "Create new role"
-2. Name the role something descriptive like `SESMailManagerPhishyRole`
-3. The console will automatically include the necessary trust relationship for SES
-4. Add permissions to invoke Lambda:
-   - Click on "View Role"
-   - Select "Create inline policy" from the "Add Permissions" dropdown
-   - Use the JSON editor and enter:
-   ```json
-   {
-       "Version": "2012-10-17",
-       "Statement": [
-           {
-               "Effect": "Allow",
-               "Action": "lambda:InvokeFunction",
-               "Resource": "arn:aws:lambda:YOUR-REGION:YOUR-ACCOUNT-ID:function:phishy"
-           }
-       ]
-   }
-   ```
-   - Replace `YOUR-REGION` and `YOUR-ACCOUNT-ID` with your AWS region and account ID
-   - Name the policy "SESInvokeLambdaPolicy" and create it
-5. Select the newly created role for your SES rule
-6. Save Rule Set
+Create a bucket for raw emails (for example `my-phishy-emails`), with public access blocked. SES needs permission to write to it; the console adds a bucket policy when you create the bucket from the receipt-rule wizard, otherwise add one like this (the same policy the SAM template creates):
+
+```json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "AllowSESPuts",
+            "Effect": "Allow",
+            "Principal": { "Service": "ses.amazonaws.com" },
+            "Action": "s3:PutObject",
+            "Resource": "arn:aws:s3:::my-phishy-emails/emails/*",
+            "Condition": { "StringEquals": { "aws:SourceAccount": "YOUR-ACCOUNT-ID" } }
+        }
+    ]
+}
+```
+
+A lifecycle rule expiring `emails/` after 90 days (as the template does) keeps the bucket from growing.
 
 ### 3. Create Lambda Function
 
 1. Go to [Lambda Console](https://console.aws.amazon.com/lambda/)
 2. Create function:
    - Author from scratch
-   - Name: `phishyAWS`
+   - Name: `phishy`
    - Runtime: Node.js 22.x
    - Architecture: x86_64
    - Create a new role with basic Lambda permissions
@@ -155,49 +184,51 @@ No other permission is needed: the main function already invokes the broker, rea
 1. In SES Console, go to "Email receiving" under the left sidebar
 2. Create a rule set if none exists
 3. Create a new rule:
-   - Recipients: `phishy@yourdomain.com`
+   - Recipients: `phishy@example.com` (your address)
    - Add two actions in this order:
      1. First action: "S3" action
-        - S3 bucket: Create a new bucket or select an existing one
+        - S3 bucket: the bucket from step 2
         - Object key prefix: `emails/`
-        - Enable SNS notifications: Optional but helpful
      2. Second action: "Lambda function"
-        - Select your Lambda function
-        - Select "Include original message" option
-        - Use the IAM role created in step 2
+        - Select your `phishy` function
+        - Invocation type: Event
+        - When the console offers to add the permission SES needs to invoke the function, accept. Without the console, add it yourself: `aws lambda add-permission --function-name phishy --statement-id ses-invoke --action lambda:InvokeFunction --principal ses.amazonaws.com --source-account YOUR-ACCOUNT-ID`
 4. Save the rule set and set it as active
 
 > **CRITICAL**: The S3 action MUST be the FIRST action in your rule. This ensures the full email content is stored in S3 before the Lambda is invoked. Without this exact configuration, the Lambda will only receive email headers and metadata, not the actual email body content. Make sure you set the `S3_BUCKET_NAME` environment variable to match the bucket you configure here.
 
 ### 5. Prepare Lambda Code
 
-1. Clone the Phishy repository
-2. Install dependencies:
-   ```bash
-   npm install
-   ```
-3. Create a deployment package:
-   ```bash
-   zip -r function.zip index.js node_modules package.json
-   ```
-4. Upload the zip file to your Lambda function
+Build the function the way the SAM template does, as one esbuild bundle (the plain `npm run build` output cannot run on Lambda: it does not bundle the RDS certificate file the database module imports, so it fails at load):
+
+```bash
+git clone https://github.com/colinstoner/phishy-email-analyzer.git
+cd phishy-email-analyzer
+npm ci
+npx esbuild src/index.ts --bundle --platform=node --target=node22 \
+  --loader:.pem=text '--external:@aws-sdk/*' --outfile=dist/lambda/index.js
+(cd dist/lambda && zip ../../function.zip index.js)
+```
+
+Upload `function.zip` to the function and set the handler to `index.handler`. The AWS SDK is left out of the bundle because the Node.js 22 runtime provides it.
 
 ### 6. Configure Lambda Function
 
 1. Set environment variables:
-   - `ANTHROPIC_API_KEY`: Your Claude API key
-   - `SAFE_DOMAINS`: Your domain(s), comma-separated (e.g., `yourdomain.com`)
-   - `SAFE_SENDERS`: Any trusted email addresses (comma-separated)
+   - `SAFE_DOMAINS`: Your domain(s), comma-separated (e.g., `example.com`). Phishy answers only reports from these domains
+   - `SAFE_SENDERS`: Any individual addresses that may also report (comma-separated, optional)
    - `SENDER_EMAIL`: Email address for analysis reports (must be verified)
-   - `SECURITY_TEAM_DISTRIBUTION`: Email address(es) for security team, comma-separated (will be CC'd on all analyses)
-   - `PHISHY_AWS_REGION`: Your AWS region
+   - `SECURITY_TEAM_DISTRIBUTION`: Email address(es) for security team, comma-separated (Cc'd on reports)
    - `S3_BUCKET_NAME`: The name of the S3 bucket where SES stores emails (must match the bucket configured in SES rules)
+   - `PHISHY_AI_PROVIDER`: `bedrock` (default in the SAM template) or `anthropic`; with `anthropic`, also `ANTHROPIC_API_KEY`
+   - `PHISHY_AWS_REGION`: Your AWS region (optional; defaults to the function's region)
    - `DELETE_EMAILS_AFTER_PROCESSING`: Set to "true" to automatically delete emails from S3 after they've been processed
 
+   Every other setting is in [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+
 2. Adjust function settings:
-   - Memory: 512 MB (minimum recommended, 1024 MB preferred for better performance)
-   - Timeout: 60 seconds (Claude API can take up to 30+ seconds to respond)
-   - Execution role: Will be configured in next step
+   - Memory: 1024 MB (what the SAM template uses)
+   - Timeout: 180 seconds. The Bedrock retry budget (four attempts backing off about 15, 30 and 60 seconds) needs it; a shorter timeout turns a transient provider error into a lost report
 
 ### 7. Set Lambda Permissions
 
@@ -228,56 +259,53 @@ No other permission is needed: the main function already invokes the broker, rea
        ]
    }
    ```
-   - Replace `YOUR-EMAIL-BUCKET-NAME` with the bucket name you created in step 4
+   - Replace `YOUR-EMAIL-BUCKET-NAME` with the bucket name you created in step 2
+   - Add `s3:GetObject` on wherever you keep an enterprise profile or configuration file, and `secretsmanager:GetSecretValue` on the database secret if you use one
 5. Name the policy "PhishyPermissions" and create
 
-### 7b. (Optional) Use AWS Bedrock Instead of Anthropic API
+### 7b. AWS Bedrock (default) or the Anthropic API
 
-If you prefer to use AWS Bedrock instead of the Anthropic API, add this permission:
+With `PHISHY_AI_PROVIDER=bedrock`, add this permission. The default model is a global inference profile, so both resources are needed:
 
 ```json
 {
     "Effect": "Allow",
     "Action": ["bedrock:InvokeModel"],
-    "Resource": ["arn:aws:bedrock:*::foundation-model/anthropic.claude-*"]
+    "Resource": [
+        "arn:aws:bedrock:*::foundation-model/anthropic.claude-*",
+        "arn:aws:bedrock:*:YOUR-ACCOUNT-ID:inference-profile/*"
+    ]
 }
 ```
 
-Then set these environment variables instead:
-- `PHISHY_AI_PROVIDER`: Set to `bedrock`
-- `PHISHY_BEDROCK_REGION`: Your AWS region (e.g., `us-east-1`)
-- Remove `ANTHROPIC_API_KEY` - not needed with Bedrock
+Set `PHISHY_BEDROCK_REGION` to your region if it differs from the function's. The refusal-fallback model (see [docs/CONFIGURATION.md](docs/CONFIGURATION.md#refusals)) needs the same access.
+
+With `PHISHY_AI_PROVIDER=anthropic`, set `ANTHROPIC_API_KEY` instead; the function then needs outbound internet access to `api.anthropic.com`.
 
 **Benefits of Bedrock**:
 - No external API key to manage
-- Data stays within your AWS account
 - Uses IAM for authentication
-- Better audit trails via CloudTrail
+- Audit trails via CloudTrail
 
 ### 8. Understanding Email Content Handling
 
-The application uses a multi-step approach to extract email content from AWS SES:
+SES delivers mail to Phishy in two steps:
 
 1. **SES Email Flow**:
-   - When an email is received by SES, it stores the raw email in S3 (first action)
-   - Then SES invokes the Lambda function (second action)
-   - The Lambda function receives only email metadata, not the full content
-   - The Lambda must retrieve the full content from S3
+   - SES stores the raw email in S3 (first action)
+   - Then SES invokes the Lambda function (second action) with the email's metadata and the S3 location, not its content
+   - The function reads the raw email from S3 and parses it (MIME, forwarded headers, attachments)
 
 2. **Content Extraction Process**:
-   - First checks direct SES event fields for content
-   - Then retrieves the email from S3 using the path information in the SES receipt
-   - Falls back to a standard path pattern using the message ID if path info isn't available
-   - For multipart MIME emails, extracts the text or HTML parts
-   - If all else fails, creates a minimal representation from available headers
+   - Uses content carried in the event itself, when there is any (SES receipt events normally carry none)
+   - Otherwise reads the bucket and key named in the SES receipt's S3 action
+   - Otherwise tries `emails/<message-id>` in `S3_BUCKET_NAME`
+   - If all of these fail, analyzes a minimal representation built from the headers, which gives a much weaker analysis
 
 3. **Important Configuration Points**:
    - The `S3_BUCKET_NAME` environment variable must match your actual S3 bucket name
-   - The Lambda IAM role needs s3:GetObject permissions for the bucket
-   - The S3 action must be the first action in your SES rule
-   - The standard path format is `emails/[message-id]`
-   - Set `DELETE_EMAILS_AFTER_PROCESSING` to "true" to automatically clean up processed emails from S3
-   - If cleanup is enabled, the Lambda role will need s3:DeleteObject permissions
+   - The S3 action must be the first action in your SES rule, with the prefix `emails/`
+   - Set `DELETE_EMAILS_AFTER_PROCESSING` to "true" to clean up processed emails (the role then needs `s3:DeleteObject`)
 
 > **Note**: Without proper S3 configuration, the Lambda will only have access to email headers, not the actual email body, resulting in limited analysis capabilities.
 
@@ -294,7 +322,7 @@ For production environments:
 
 ### 10. Test the Setup
 
-1. Send a test email to `phishy@yourdomain.com`
+1. Forward a test email to `phishy@example.com` (your address) from an address on one of your safe domains
 2. Check CloudWatch Logs:
    - Go to CloudWatch Console
    - "Log groups" → `/aws/lambda/phishy`
@@ -315,11 +343,14 @@ For production environments:
 
 - Verify all environment variables are set correctly
 - Check IAM permissions
-- Increase timeout if processing large emails
+- Keep the timeout at 180 seconds (the Bedrock retry budget needs it)
+- A `Cannot find module './rds-global-bundle.pem'` error means the package was built with `tsc` rather than the esbuild bundle in step 5
 - Check that the `S3_BUCKET_NAME` environment variable matches your actual S3 bucket name
 
 ### No Analysis Emails Sent
 
+- Check that the reporter's address is on one of `SAFE_DOMAINS` (or in `SAFE_SENDERS`): other senders are not answered
+- Look for `Configuration validation failed` in the logs: an invalid setting stops every invocation
 - Verify your sender email is verified in SES
 - Check if SES is still in sandbox mode
 - Confirm Lambda has permissions to send via SES
@@ -336,7 +367,7 @@ For production environments:
 For production-ready deployment:
 
 1. Use infrastructure as code (AWS SAM, CloudFormation, Terraform)
-2. Set up CloudWatch Alarms for Lambda errors
+2. Set up CloudWatch Alarms for Lambda errors and for Phishy's own metrics (namespace `Phishy`), at least `AnalysisFailureCount` and, with the optional layers, those their sections name
 3. Configure separate development/production environments
 4. Set up a Dead Letter Queue for failed executions
 5. Consider SES configuration sets for email tracking
@@ -347,4 +378,4 @@ For production-ready deployment:
 2. Encrypt sensitive data and environment variables
 3. Regularly update dependencies
 4. Monitor for unusual patterns
-5. Use AWS WAF if exposing any public endpoints
+5. Do not expose the function through API Gateway without an authorizer: its intelligence API (`/api/v1/...`) has no authentication of its own

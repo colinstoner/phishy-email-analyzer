@@ -21,5 +21,7 @@ body:
       description: |
         Phishy has hard invariants (see CLAUDE.md): the suspicious email is
         hostile data everywhere; only the security team triggers actions;
-        agentic tools never fetch from the network. Note anything your idea
-        touches.
+        agentic tools never fetch from the network; Graph access is
+        code-driven and read-only; approvals are exact-form and never read by
+        the model; warnings go only to safe-domain, in-scope recipients. Note
+        anything your idea touches.

@@ -18,15 +18,16 @@
     "fallbackProvider": "bedrock"
   },
   "email": {
-    "safeDomains": ["yourcompany.com", "example.com"],
-    "safeSenders": ["security@yourcompany.com"],
+    "safeDomains": ["example.com"],
+    "safeSenders": ["contractor@partner.example"],
     "deleteAfterProcessing": false
   },
   "notification": {
-    "senderEmail": "phishy@yourcompany.com",
-    "replyToEmail": "phishy@yourcompany.com",
+    "senderEmail": "phishy@example.com",
+    "replyToEmail": "phishy@example.com",
     "senderName": "Phishy Security",
-    "securityTeamDistribution": ["security-team@yourcompany.com"],
+    "securityTeamDistribution": ["security-team@example.com"],
+    "safeSenderSecurity": ["security-team@example.com"],
     "sesConfigSet": "phishy-config-set"
   },
   "storage": {
@@ -34,14 +35,15 @@
     "s3Prefix": "emails",
     "region": "us-east-1"
   },
+  "profile": "s3://phishy-emails/profiles/my-org.profile.json",
   "intelligence": {
-    "enabled": true,
+    "enabled": false,
     "type": "postgres",
     "connectionString": "postgresql://user:password@localhost:5432/phishy"
   },
   "campaignAlerts": {
     "enabled": false,
-    "distributionList": "all-staff@yourcompany.com"
+    "distributionList": "all-staff@example.com"
   },
   "campaignResponse": {
     "enabled": false,

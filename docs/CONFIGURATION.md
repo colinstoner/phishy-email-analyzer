@@ -1,33 +1,68 @@
 # Configuration Guide
 
-Phishy supports multiple configuration methods with a clear priority chain. This guide covers all options from simple environment variables to full enterprise profiles.
+Phishy is configured with environment variables, optionally on top of a JSON file in S3. This guide lists every setting: the core ones first, then each optional layer.
 
 ## Quick Start (Environment Variables Only)
 
-For simple deployments, you only need these environment variables:
+A working deployment needs these:
 
 ```bash
-# Required
-ANTHROPIC_API_KEY=sk-ant-...          # Your Anthropic API key
+# AI provider: either an Anthropic API key ...
+ANTHROPIC_API_KEY=sk-ant-...
+# ... or AWS Bedrock (IAM, no key)
+# PHISHY_AI_PROVIDER=bedrock
 
-# Recommended
-S3_BUCKET_NAME=my-phishy-emails       # S3 bucket for email storage
-SENDER_EMAIL=phishy@yourcompany.com   # Email address for notifications
-SECURITY_TEAM_DISTRIBUTION=security@yourcompany.com  # Where to send alerts
+S3_BUCKET_NAME=my-phishy-emails              # bucket SES stores raw email in
+SENDER_EMAIL=phishy@example.com              # SES-verified From address for reports
+SAFE_DOMAINS=example.com                     # your organization's domain(s): who may report
+SECURITY_TEAM_DISTRIBUTION=security@example.com  # Cc'd on reports; the only senders allowed to issue commands
 ```
 
-That's it! Phishy will work with just these settings.
+`SAFE_DOMAINS` matters: Phishy only answers reports from an address on one of these domains (or listed in `SAFE_SENDERS`), and only ever sends a report to such an address. Its built-in default is `example.com`, so without it nothing your employees forward is analyzed.
 
 ---
 
 ## Configuration Priority
 
-When the same setting is defined in multiple places, Phishy uses this priority (highest wins):
+When the same setting is defined in more than one place, the highest wins:
 
-1. **Environment Variables** - Runtime overrides, always win
-2. **S3 Configuration** - `PHISHY_CONFIG_S3=s3://bucket/config.json`
-3. **Local File** - `./config/phishy.config.json`
-4. **Defaults** - Built-in sensible defaults
+1. **Environment variables** — always win
+2. **S3 configuration file** — `PHISHY_CONFIG_S3=s3://bucket/config.json`
+3. **Built-in defaults**
+
+There is no local configuration file in the deployed function: `config/phishy.config.json` is only a convenient place to keep a file before uploading it to S3 (it is gitignored). A Secrets Manager ARN in `PHISHY_DB_CONNECTION` is resolved after the sources are merged; one in `PHISHY_GRAPH_READ_CERTIFICATE` on the first Graph call.
+
+Environment variables are parsed as follows: `true` / `false` become booleans, a value made only of digits becomes an integer, and variables whose name contains `DOMAINS`, `SENDERS`, `DISTRIBUTION` or `SAFE_SENDER_SECURITY` are split on commas. Two consequences:
+
+- A setting that takes a decimal (`PHISHY_GRAPH_SENDER_HISTORY_FANOUT_MULTIPLIER`) accepts only whole numbers from the environment; put a value such as `2.5` in the S3 file.
+- **Known issue:** `PHISHY_CAMPAIGN_ALERTS_DISTRIBUTION` contains `DISTRIBUTION`, so it is split into a list, and configuration validation then fails at startup (`campaignAlerts.distributionList` must be a single address). Until this is fixed, set `campaignAlerts.distributionList` in the S3 configuration file instead. The SAM template's `CampaignAlertDistribution` parameter sets that variable, so leave the parameter empty and set both `campaignAlerts.enabled` and `campaignAlerts.distributionList` in the file (with the parameter empty and campaign response off, the template does not set `PHISHY_CAMPAIGN_ALERTS_ENABLED`).
+
+The SAM template has no parameter for a configuration file. To use one with it, add `PHISHY_CONFIG_S3` to the function's environment in `template.yaml`; an object under `profiles/` in the stack's email bucket is already readable by the function's role.
+
+---
+
+## Feature Flags at a Glance
+
+Everything beyond forward-and-reply is off by default and switched on independently. Each row links to its section.
+
+| Flag (env var) | Default | Needs | Effect |
+|---|---|---|---|
+| `PHISHY_INTELLIGENCE_ENABLED` + `PHISHY_DB_CONNECTION` | off | PostgreSQL 13+ (migration 001 is created automatically) | [Threat intelligence](#threat-intelligence-database-optional): analyses, indicators and campaigns are stored and feed later verdicts |
+| `PHISHY_CAMPAIGN_ALERTS_ENABLED` | off | intelligence DB; a distribution list | [Campaign alerts](#campaign-alerts): one broadcast warning once several people report the same email |
+| `PHISHY_CAMPAIGN_CACHE_ENABLED` | off | intelligence DB + migration 003 | [Verdict cache](#campaign-verdict-cache): repeat reports of one campaign reuse the first verdict |
+| `PHISHY_EMAIL_COMMANDS_ENABLED` | off | intelligence DB + migration 002 | [Email commands](#email-commands-security-team-correspondence): the security team confirms or overturns a verdict by replying |
+| `PHISHY_CAMPAIGN_RESPONSE_ENABLED` | off | campaign alerts, intelligence DB + migration 006; email commands for approvals; blast radius for targeted warnings | [Campaign response](#campaign-response-optional): incident email, targeted warning, actions approved by reply (removal is a dry run) |
+| `PHISHY_AGENTIC_ENABLED` | off | nothing (database tools appear when the DB is on) | [Agentic analysis](#agentic-analysis): Claude may consult Phishy's own data before its verdict |
+| `PHISHY_SCORING_MODE=checklist` | `model` | nothing | [Checklist scoring](#risk-score-mode-experimental) (experimental): the risk score is computed by code from a fixed checklist |
+| `PHISHY_ATTACHMENT_ANALYSIS_ENABLED` | off | nothing (in process, no network) | [Attachment analysis](#attachment-analysis-optional): Phishy inspects attachment bytes statically |
+| `PHISHY_REPORT_BUTTON_ENABLED` | off | Microsoft 365 user-reported settings delivering to Phishy | [Report-button intake](#outlook-report-button-intake): Outlook Report-button submissions handled silently |
+| `PHISHY_GRAPH_ENABLED` | off | Entra app registration with a certificate; a route to Microsoft, or broker mode | [Microsoft Graph](#microsoft-graph-optional) foundation; changes nothing on its own |
+| `PHISHY_GRAPH_ORIGINAL_FETCH_ENABLED` | off | Graph; `Mail.Read` on reporters' mailboxes | [Original-message lookup](#original-message-lookup): the forwarded email's real headers from the reporter's mailbox |
+| `PHISHY_GRAPH_SENDER_HISTORY_ENABLED` | off | Graph; `ExchangeMessageTrace.Read.All` | [Sender-relationship check](#sender-relationship-check-optional): message-trace counts about the claimed sender |
+| `PHISHY_GRAPH_BLAST_RADIUS_ENABLED` | off | Graph; read permissions listed in that section | [Blast radius](#blast-radius-optional): who else received a malicious email (security team's copy only) |
+| `PHISHY_GRAPH_FANOUT_SCAN_ENABLED` | off | Graph; `ExchangeMessageTrace.Read.All`; intelligence DB + migration 005; a schedule | [Scheduled fan-out scan](#scheduled-fan-out-scan-optional): proactive alert when a known external sender suddenly mails many people (no model) |
+
+Migrations past 001 are applied by hand (`psql -f migrations/00N_*.sql`); see [DATABASE.md](DATABASE.md). A feature whose migration is missing logs which file to apply and stays off.
 
 ---
 
@@ -45,7 +80,7 @@ When the same setting is defined in multiple places, Phishy uses this priority (
 | `PHISHY_AI_EFFORT` | `medium` | How much the model thinks: `low`, `medium`, `high`, `xhigh`, or `max` (`ai.effort`) |
 | `PHISHY_AI_REFUSAL_FALLBACK_MODEL` | `claude-opus-4-8` / `global.anthropic.claude-opus-4-8` | Model a declined request is retried on once (`ai.refusalFallbackModel`). On Bedrock the default keeps the primary model's routing prefix (a `us.` primary retries on `us.anthropic.claude-opus-4-8`). Set to an empty string to disable the retry |
 
-> Max tokens and request timeout are file-config only (`ai.anthropic.maxTokens` / `ai.bedrock.timeout`, etc.) — see the example configuration below. Both providers default to `maxTokens: 16000` and `timeout: 60000`.
+> Max tokens and request timeout are file-config only (`ai.anthropic.maxTokens`, `ai.anthropic.timeout`, `ai.bedrock.maxTokens`, `ai.bedrock.timeout`). Both providers default to `maxTokens: 16000` and `timeout: 60000`. So is `ai.fallbackProvider` (see [Provider Fallback](#provider-fallback)).
 
 #### Effort and max tokens
 
@@ -74,38 +109,51 @@ Refusals in the `reasoning_extraction` category are not retried: they mean the p
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SAFE_DOMAINS` | - | Comma-separated safe sender domains |
-| `SAFE_SENDERS` | - | Comma-separated safe sender emails |
-| `DELETE_EMAILS_AFTER_PROCESSING` | `false` | Delete emails from S3 after analysis |
+| `SAFE_DOMAINS` | `example.com` | Comma-separated domains whose addresses may report emails (subdomains included). Reports are only ever sent to addresses on these domains. Set it |
+| `SAFE_SENDERS` | - | Comma-separated individual addresses that may report in addition to `SAFE_DOMAINS`. Their reports skip the enterprise profile, are not written to the intelligence database, and Cc `SAFE_SENDER_SECURITY` instead of the security team |
+| `DELETE_EMAILS_AFTER_PROCESSING` | `false` | Delete the raw email from S3 after analysis |
 
 ### Notification Settings
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SENDER_EMAIL` | - | From address for notification emails |
+| `SENDER_EMAIL` | - | From address for everything Phishy sends; must be verified in SES. Required |
 | `REPLY_TO_EMAIL` | - | `Reply-To` for everything Phishy sends. Set it to the address Phishy receives mail at when `SENDER_EMAIL` is a different address (a no-reply sender): the command channel works by reply. The SAM template sets it to `RecipientEmail` when `EmailCommandsEnabled` is true |
-| `SECURITY_TEAM_DISTRIBUTION` | - | Comma-separated CC recipients for enterprise users |
-| `SAFE_SENDER_SECURITY` | - | Comma-separated CC recipients for safelist users (optional, separate from enterprise) |
-| `SES_CONFIG_SET` | - | Optional SES configuration set |
+| `SECURITY_TEAM_DISTRIBUTION` | - | Comma-separated security-team addresses: Cc'd on reports, sent security-only emails (incident emails, fan-out alerts, silent Report-button reports), and the only senders whose replies count as commands |
+| `SAFE_SENDER_SECURITY` | - | Comma-separated addresses Cc'd instead of the security team on reports from `SAFE_SENDERS` addresses |
+| `SES_CONFIG_SET` | - | Optional SES configuration set for outbound mail |
+
+The display name on outbound mail (`notification.senderName`, default `Phishy`) is file-config only.
 
 ### Storage Settings
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `S3_BUCKET_NAME` | - | S3 bucket for email storage |
-| `S3_PREFIX` | `emails` | Prefix for stored emails |
-| `AWS_REGION` | `us-east-1` | AWS region for S3/SES |
+| `S3_BUCKET_NAME` | - | S3 bucket SES stores raw emails in. Required |
+| `PHISHY_AWS_REGION` / `AWS_REGION` | the Lambda's region, else `us-east-1` | Region for S3 and SES (`storage.region`) |
+| `S3_PREFIX` | `emails` | Accepted but not currently read: the object key comes from the SES receipt, and the fallback key is always `emails/<message-id>`. Keep SES's prefix `emails/` |
 
-### Enterprise Features
+### Profile and Configuration File
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PHISHY_CONFIG_S3` | - | S3 path to config file |
-| `PHISHY_PROFILE` | - | S3 path or JSON of enterprise profile |
-| `PHISHY_INTELLIGENCE_ENABLED` | `false` | Enable threat intelligence DB |
-| `PHISHY_DB_CONNECTION` | - | PostgreSQL connection string or Secrets Manager ARN |
-| `PHISHY_CAMPAIGN_ALERTS_ENABLED` | `false` | Enable campaign flood detection alerts |
-| `PHISHY_CAMPAIGN_ALERTS_DISTRIBUTION` | - | Email to receive campaign alerts |
+| `PHISHY_CONFIG_S3` | - | `s3://bucket/key` of a JSON configuration file (same structure as `config/phishy.config.example.json`). The function's role needs `s3:GetObject` on it |
+| `PHISHY_PROFILE` | - | Enterprise profile: an `s3://` URI or the profile JSON itself (`profile` in the file). See [Enterprise Profiles](#enterprise-profiles) |
+
+### Threat Intelligence and Campaign Alerts
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PHISHY_INTELLIGENCE_ENABLED` | `false` | Enable the threat-intelligence database. See [below](#threat-intelligence-database-optional) |
+| `PHISHY_DB_CONNECTION` | - | PostgreSQL connection string or Secrets Manager ARN (`intelligence.connectionString`) |
+| `PHISHY_CAMPAIGN_ALERTS_ENABLED` | `false` | Enable campaign alerts (needs the database) |
+| `PHISHY_CAMPAIGN_ALERTS_DISTRIBUTION` | - | The address the campaign broadcast goes to, typically an all-staff list (`campaignAlerts.distributionList`). See the known issue under [Configuration Priority](#configuration-priority): set it in the file |
+
+`intelligence.type` accepts `postgres` (the default) and `dynamodb`, but only PostgreSQL is implemented; `intelligence.tableName` is unused.
+
+#### Campaign alerts
+
+With the database and `PHISHY_CAMPAIGN_ALERTS_ENABLED` on, every report flagged as phishing (a malicious verdict, or `suspicious` at a risk score of 55 or more) is counted against its campaign; reports from `SAFE_SENDERS` addresses are not. A campaign is the reporting employee's domain (the `From` of the forward, not the attacker's) plus the subject with `re:`/`fw:` prefixes, digits and punctuation normalized away, so "Invoice #4821" and "Invoice #4822" match. When a campaign reaches **3 reports from at least 2 different reporters within 4 hours** and the current report is high or critical risk, Phishy emails one warning to the distribution list, at most once per 24 hours per campaign. With [campaign response](#campaign-response-optional) on, that threshold opens an incident instead.
 
 ### Agentic Analysis
 
@@ -143,7 +191,7 @@ How the 0-100 risk score in the report is produced. With `model` (the default) i
 
 When a phishing campaign hits many inboxes at once, every recipient may forward the same email. With the cache enabled, the **first** report gets a full AI analysis; reports matching the same campaign within the cache window reuse that verdict — every reporter gets a consistent answer, instantly and at no extra AI cost. Reports served from the cache say so in the summary, and a `CampaignCacheHits` / `EstimatedCostSavedUSD` metric is emitted (see Cost Tracking below).
 
-Campaign matching uses the same signature as flood detection: sender domain plus the subject with numbers normalized out, so "Invoice #4821" and "Invoice #4822" match.
+Campaign matching uses the same signature as [campaign alerts](#campaign-alerts): the reporting employee's domain plus the normalized subject, so "Invoice #4821" and "Invoice #4822" match.
 
 This composes with Email Commands: when the security team replies "confirmed phishing" or "false positive" to **any one** report, that ruling overrides the AI verdict for the whole campaign — subsequent reporters are told their security team has already reviewed it.
 
@@ -177,7 +225,7 @@ With [campaign response](#campaign-response-optional) on, the channel also accep
 
 ### Campaign Response (Optional)
 
-What Phishy does once a campaign crosses the alert threshold (at least 3 reports from at least 2 people within 4 hours), or earlier, once one report shows the email reached enough people (below). Off by default; off means the campaign alert behaves exactly as before: one generic warning to `PHISHY_CAMPAIGN_ALERTS_DISTRIBUTION`.
+What Phishy does once a campaign crosses the [campaign-alert](#campaign-alerts) threshold (at least 3 reports from at least 2 people within 4 hours), or earlier, once one report shows the email reached enough people (below). Off by default; off means the campaign alert behaves as described above: one generic warning to the distribution list.
 
 When on, each campaign becomes an **incident**:
 
@@ -211,6 +259,8 @@ Requires campaign alerts (`PHISHY_CAMPAIGN_ALERTS_ENABLED`), the intelligence da
 Default "already clicked" text: *If you clicked a link in it, opened an attachment, or entered your password, contact your IT or security team straight away and change your password. You will not be in trouble: reporting it quickly is what limits the damage.* Replace it with your organization's own instructions (who to call, how to reach them out of hours).
 
 Sending notes: warnings are sent one per person through SES, so `maxWarningsPerCampaign` emails count against your SES sending rate and quota; in `auto` mode they are sent from the Lambda that crossed the threshold, after the reports, and anything not sent before the function runs short of time is counted and proposed again. The targeted warning reaches at most the 100 recipients a blast-radius lookup lists; a larger campaign's incident email says how many have no known address, and `audience: both` covers them with the broadcast.
+
+**Metrics** (namespace `Phishy`): `CampaignIncidentsOpened` (dimension `Trigger`), `CampaignIncidentUpdates`, `CampaignWarningsSent` (`Audience`), `CampaignWarningsSkipped` (`Reason`), `CampaignWarningSendFailures`, `CampaignRemovalNoticesSent` (always zero until a mailbox write tier exists), and `ResponseActionsProposed`, `ResponseActionApprovals`, `ResponseActionApprovalsRejected` (`Reason`), `ResponseActionsExpired`, `ResponseActionsDryRun`, dimensioned by `ActionType`.
 
 ### Outlook Report Button Intake
 
@@ -252,7 +302,7 @@ Every limit that stops an inspection is disclosed to the model, and the step log
 
 ### Microsoft Graph (Optional)
 
-Phishy can authenticate to Microsoft Graph on your own Microsoft 365 tenant. `PHISHY_GRAPH_ENABLED` is a **foundation**: on its own it does not change how emails are analyzed. Each feature that uses Graph has its own flag — today the [original-message lookup](#original-message-lookup), the [sender-relationship check](#sender-relationship-check-optional) and [blast radius](#blast-radius-optional) (checking who else received a malicious email) — so that features share one safe, already-reviewed way to reach the tenant. Leave it off unless you are enabling one of them. See [ARCHITECTURE.md](ARCHITECTURE.md#microsoft-graph-optional-foundation) for the trust rules.
+Phishy can authenticate to Microsoft Graph on your own Microsoft 365 tenant, read-only. `PHISHY_GRAPH_ENABLED` is a **foundation**: on its own it does not change how emails are analyzed. Each feature that uses Graph has its own flag — the [original-message lookup](#original-message-lookup), the [sender-relationship check](#sender-relationship-check-optional), [blast radius](#blast-radius-optional) (checking who else received a malicious email) and the [scheduled fan-out scan](#scheduled-fan-out-scan-optional) — so that features share one safe, already-reviewed way to reach the tenant. Leave it off unless you are enabling one of them. Phishy has no Graph write code: nothing it does changes a mailbox. See [ARCHITECTURE.md](ARCHITECTURE.md#microsoft-graph-optional-foundation) for the trust rules.
 
 To find out which Graph calls work in your tenant — with which permissions and licences — before any feature depends on them, run the read-only probe: [GRAPH_PROBE.md](GRAPH_PROBE.md). It runs locally (`npm run graph:probe`), takes the same tenant ID, client ID and certificate, and does not need `PHISHY_GRAPH_ENABLED`.
 
@@ -266,7 +316,7 @@ To find out which Graph calls work in your tenant — with which permissions and
 | `PHISHY_GRAPH_READ_CERTIFICATE` | - | Secrets Manager ARN (recommended) or inline PEM holding the app's private key and certificate. Required when enabled (in `broker` mode: on the broker function only) |
 | `PHISHY_GRAPH_ORIGINAL_FETCH_ENABLED` | `false` | Before analysis, read the original message's real headers from the reporter's own mailbox. Has effect only when `PHISHY_GRAPH_ENABLED` is also `true`. See [Original-message lookup](#original-message-lookup) |
 
-Blast radius has its own variables, listed under [Blast radius](#blast-radius-optional).
+Blast radius, the sender-relationship check and the fan-out scan have their own variables, listed in their sections below.
 
 File configuration uses the same names: `graph.enabled`, `graph.mode`, `graph.brokerFunctionName`, `graph.tenantId`, `graph.read.clientId`, `graph.read.certificate`, `graph.originalFetch.enabled`. With `graph.enabled` set, a missing or malformed value fails configuration at startup; with it unset, the other values are ignored.
 
@@ -580,12 +630,7 @@ Useful starting points: a dashboard widget on `SUM(EstimatedCostUSD)` per day, a
 
 ## File-Based Configuration
 
-For more complex setups, use a JSON configuration file.
-
-### Location Options
-
-1. **Local file**: `./config/phishy.config.json`
-2. **S3**: Set `PHISHY_CONFIG_S3=s3://bucket/path/config.json`
+For more complex setups, use a JSON configuration file. Upload it to S3 and set `PHISHY_CONFIG_S3=s3://bucket/path/config.json`; the function's role needs `s3:GetObject` on that object. Environment variables still override what the file says. Keep your working copy as `config/phishy.config.json`, which is gitignored.
 
 ### Example Configuration
 
@@ -604,14 +649,15 @@ For more complex setups, use a JSON configuration file.
     "fallbackProvider": "anthropic"
   },
   "email": {
-    "safeDomains": ["yourcompany.com", "trusted-partner.com"],
-    "safeSenders": ["ceo@yourcompany.com"],
+    "safeDomains": ["example.com", "example.org"],
+    "safeSenders": ["contractor@partner.example"],
     "deleteAfterProcessing": false
   },
   "notification": {
-    "senderEmail": "phishy@yourcompany.com",
+    "senderEmail": "phishy@example.com",
+    "replyToEmail": "phishy@example.com",
     "senderName": "Phishy Security",
-    "securityTeamDistribution": ["security@yourcompany.com", "soc@yourcompany.com"]
+    "securityTeamDistribution": ["security@example.com", "soc@example.com"]
   },
   "storage": {
     "s3Bucket": "phishy-emails",
@@ -622,7 +668,7 @@ For more complex setups, use a JSON configuration file.
 }
 ```
 
-See `config/phishy.config.example.json` for a complete example.
+See `config/phishy.config.example.json` for a complete example with every key at its default (optional features off).
 
 ---
 
@@ -679,11 +725,13 @@ Enterprise profiles provide organization-specific context for better phishing de
 
 ### Quick Setup
 
-1. Copy the example: `cp config/profile.example.json config/profile.json`
+1. Copy the example: `cp config/profile.example.json config/my-org.profile.json` (files named `*.profile.json` are gitignored)
 2. Customize for your organization
-3. Set the path: `export PHISHY_PROFILE=./config/profile.json`
+3. Upload it to S3 and point Phishy at it: `PHISHY_PROFILE=s3://bucket/profiles/my-org.profile.json`. With the SAM template, put it under `profiles/` in the stack's email bucket and pass the URI as `ProfileS3Uri`; the function's role can read that prefix.
 
-Or store in S3: `export PHISHY_PROFILE=s3://bucket/profiles/mycompany.json`
+`PHISHY_PROFILE` also accepts the profile JSON itself as its value. A local file path is not supported.
+
+Reports from `SAFE_SENDERS` addresses are analyzed without the profile.
 
 ### What Profiles Enable
 
@@ -708,16 +756,18 @@ export PHISHY_INTELLIGENCE_ENABLED=true
 export PHISHY_DB_CONNECTION=postgresql://user:pass@host:5432/phishy
 ```
 
+Requires PostgreSQL 13+. In a SAM deployment, pass the secret's ARN as `IntelligenceDbSecretArn` with `VpcId` and `SubnetIds` ([AWS.md](../AWS.md)).
+
 ### What It Provides
 
-- **IOC Tracking**: Automatically extract and store indicators
-- **Pattern Detection**: Identify related phishing campaigns
-- **Historical Analysis**: Query past threats
-- **STIX Export**: Share threat intel in standard format
+- **Analysis history**: every analysis stored (sender, subject, verdict, score, model, cost)
+- **Indicators**: IOCs from malicious verdicts, which raise the risk of later emails that reuse them ([INTELLIGENCE.md](INTELLIGENCE.md#which-indicators-count))
+- **Campaigns**: repeat reports of one email grouped, for [campaign alerts](#campaign-alerts), the [verdict cache](#campaign-verdict-cache) and [campaign response](#campaign-response-optional)
+- **The data the other layers need**: email commands, the fan-out scan and campaign response keep their state here
 
 ### Database Schema
 
-The database is automatically initialized on first connection. See `src/services/intelligence/database.service.ts` for the schema.
+Phishy creates the baseline schema (migration 001) on first connection. Everything later ships as a numbered file in `migrations/` that you apply by hand before enabling the feature that needs it (002 email commands, 003 verdict cache, 004 structured verdict columns, 005 fan-out scan, 006 campaign response). See [DATABASE.md](DATABASE.md).
 
 ---
 
@@ -734,16 +784,16 @@ If you're upgrading from the original Phishy, your existing environment variable
 | `S3_BUCKET_NAME` | ✓ | `storage.s3Bucket` |
 | `SECURITY_TEAM_DISTRIBUTION` | ✓ | `notification.securityTeamDistribution` |
 
-**Zero changes required** - your v1 deployment will work with v2.
+These names are unchanged in v3. The v1 runtime itself (the root `index.js`) is not supported.
 
 ---
 
 ## Validation
 
-Phishy validates all configuration at startup using Zod schemas. Invalid configuration will fail fast with clear error messages:
+Phishy validates all configuration at startup using Zod schemas. Invalid configuration fails fast: the function logs `Configuration validation failed` with the offending paths, for example:
 
 ```
-Configuration error: ai.anthropic.apiKey must start with 'sk-ant-'
+{"campaignAlerts":{"distributionList":{"_errors":["Invalid input: expected string, received array"]}}}
 ```
 
-Validation runs on every cold start, so a misconfigured deployment fails immediately and loudly in CloudWatch logs rather than silently misbehaving. To catch problems before deploying, compare your config against [config/phishy.config.example.json](../config/phishy.config.example.json) — every key is documented in this file.
+Validation runs on every cold start, so a misconfigured deployment fails immediately and loudly in CloudWatch logs rather than silently misbehaving. To catch problems before deploying, compare your config against [config/phishy.config.example.json](../config/phishy.config.example.json) — every key in it is documented in this file.

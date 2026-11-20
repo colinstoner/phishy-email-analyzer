@@ -7,10 +7,10 @@ The intelligence module is **optional** and provides organizational learning cap
 ### Internal Benefits
 
 1. **Institutional Memory**: Track what phishing attempts have targeted your organization
-2. **Pattern Detection**: Automatically identify coordinated campaigns (same sender across multiple employees)
-3. **Deduplication**: Don't re-analyze the same phishing email forwarded by multiple users
-4. **Trend Analysis**: See how threats evolve over time (weekly reports, quarterly trends)
-5. **VIP Targeting**: Identify when specific executives are being targeted
+2. **Campaign Detection**: Group repeat reports of the same email from several employees ([below](#campaign-flood-detection))
+3. **Known-threat scoring**: Indicators from confirmed attacks raise the risk of later emails that reuse them ([Which indicators count](#which-indicators-count))
+4. **Deduplication** (optional verdict cache, migration 003): Don't re-analyze the same phishing email forwarded by multiple users
+5. **VIP Targeting**: Each analysis records whether an executive in the enterprise profile was impersonated
 
 ### Security Team Value
 
@@ -24,28 +24,18 @@ The intelligence module is **optional** and provides organizational learning cap
 - Does not share data externally (stays in your database)
 - Does not require external threat feeds
 - Does not phone home to any service
-- Does not impact the core email analysis functionality
+- Is not needed for the core email analysis
 
 ## Architecture
 
 ```
-┌─────────────────┐     ┌──────────────────┐
-│  Email Analysis │────▶│ Intelligence DB  │
-│    (Lambda)     │     │   (PostgreSQL)   │
-└─────────────────┘     └──────────────────┘
-                               │
-                               ▼
-                        ┌──────────────────┐
-                        │   REST API       │
-                        │  (API Gateway)   │
-                        └──────────────────┘
-                               │
-              ┌────────────────┼────────────────┐
-              ▼                ▼                ▼
-        ┌─────────┐     ┌───────────┐    ┌───────────┐
-        │  SIEM   │     │ Dashboard │    │  Alerts   │
-        │ Webhook │     │  (Future) │    │  (Future) │
-        └─────────┘     └───────────┘    └───────────┘
+┌─────────────────┐  writes analyses, indicators,  ┌──────────────────┐
+│  Email Analysis │  campaigns, usage; reads them  │ Intelligence DB  │
+│    (Lambda)     │◀──────────────────────────────▶│   (PostgreSQL)   │
+└─────────────────┘  for risk fusion and tools     └──────────────────┘
+                                                            │
+                                         optional, not deployed by the template:
+                                         read-only REST API (API Gateway → same function)
 ```
 
 ## Enabling Intelligence
@@ -56,7 +46,7 @@ The intelligence module is **optional** and provides organizational learning cap
 # Enable the feature
 export PHISHY_INTELLIGENCE_ENABLED=true
 
-# PostgreSQL connection (any PostgreSQL 12+ works)
+# PostgreSQL connection (PostgreSQL 13+)
 export PHISHY_DB_CONNECTION=postgresql://user:pass@host:5432/phishy
 ```
 
@@ -64,17 +54,20 @@ export PHISHY_DB_CONNECTION=postgresql://user:pass@host:5432/phishy
 
 1. **AWS RDS PostgreSQL** - Managed, recommended for production
 2. **Aurora Serverless v2** - Auto-scaling, cost-effective for variable load
-3. **Self-hosted PostgreSQL** - Any PostgreSQL 12+ on EC2, container, etc.
+3. **Self-hosted PostgreSQL** - Any PostgreSQL 13+ on EC2, container, etc. (12 works after `CREATE EXTENSION pgcrypto;`)
 4. **Local development** - Docker: `docker run -p 5432:5432 postgres:15`
 
 ### Tables Created Automatically
 
-When intelligence is enabled, these tables are created on first run:
+When intelligence is enabled, migration 001 is created on first run:
 
 - `email_analyses` - Every analyzed email with results
 - `threat_indicators` - Extracted IOCs (domains, IPs, URLs, hashes) with provenance metadata
-- `campaigns` - Coordinated attack tracking (same sender pattern across multiple recipients)
-- `detected_patterns` - Identified attack patterns (reserved for future use)
+- `campaigns` - Repeat reports of one email (same reporter domain and normalized subject)
+- `ai_usage` - Tokens and estimated cost per model call
+- `detected_patterns` - Identified attack patterns (the pipeline does not write it today)
+
+Later migrations (002–006) are applied by hand; see [DATABASE.md](DATABASE.md).
 
 ### IOC Provenance
 
@@ -84,14 +77,14 @@ Each threat indicator includes metadata linking back to its source:
 {
   "sourceAnalysisId": "uuid-of-analysis",
   "sourceMessageId": "email-message-id",
-  "sourceFromEmail": "attacker@malicious.com",
-  "sourceFromDomain": "malicious.com",
+  "sourceFromEmail": "attacker@malicious.example",
+  "sourceFromDomain": "malicious.example",
   "sourceSubject": "Urgent: Verify your account",
   "extractionContext": "url_in_content"
 }
 ```
 
-Extraction contexts: `sender_email`, `sender_domain`, `url_domain`, `url_in_content`, `ip_in_content`, `hash_in_content`
+Extraction contexts include `original_sender_email`, `sender_domain`, `url_in_content`, `final_url`, `final_url_domain`, `redirect_intermediary`, `ip_in_content`, `hash_in_content`, the attachment variants `url_in_attachment`, `final_url_in_attachment` and `attachment_url_domain` (with attachment analysis on), and `ai_nominated:<role>` for indicators the model nominated.
 
 Stored indicators also record why they were stored and what part they played (see [DATABASE.md](DATABASE.md#threat_indicators) for every key):
 
@@ -177,86 +170,62 @@ npm run indicators:audit -- --restore       # reactivate everything this tool de
 
 `--apply` only sets `is_active = FALSE` and marks the row (`metadata.deactivatedBy`), so `--restore` reverses it; nothing is ever deleted. The tool reads in pages, uses parameterized SQL only, does not create tables, prints indicator values with control and bidi characters removed and email local parts masked (unless `--show-values`), and never prints the connection string. A Secrets Manager ARN in `PHISHY_DB_CONNECTION` is not resolved; pass the connection string with `--connection`.
 
-## API Endpoints
+## API Endpoints (optional)
 
-When you deploy the API Lambda (optional), these endpoints are available:
+The function also answers API Gateway events (the unified handler routes any event with an `httpMethod` to `handlers/api.handler.ts`). The SAM template creates no API; if you add one, these read-only endpoints are available:
 
 ```
 GET  /api/v1/analyses              List recent analyses
 GET  /api/v1/analyses/:id          Get single analysis
 POST /api/v1/analyses/search       Search with filters
-GET  /api/v1/indicators            List extracted IOCs
-GET  /api/v1/indicators/export     Export in STIX format
+GET  /api/v1/analyses/stats        Aggregate statistics
+GET  /api/v1/indicators            List active IOCs
+POST /api/v1/indicators/lookup     Look up indicators
+GET  /api/v1/indicators/export     Export as a STIX 2.1 bundle
 GET  /api/v1/patterns              Detected patterns
 GET  /api/v1/stats                 Aggregate statistics
+GET  /api/v1/usage                 AI usage and cost
+GET  /api/v1/health                Database health
 ```
+
+**The API has no authentication of its own.** It returns analysis history, sender addresses and subjects, so put an IAM or Lambda authorizer (or a private API) in front of it before exposing it.
 
 ## SIEM/SOAR Integration
 
-Register a webhook to receive real-time alerts:
-
-```bash
-curl -X POST https://your-api/api/v1/webhooks \
-  -H "Content-Type: application/json" \
-  -d '{
-    "url": "https://your-siem.com/webhook",
-    "events": ["threat.detected", "vip.impersonation"],
-    "secret": "your-hmac-secret"
-  }'
-```
-
-### Webhook Events
-
-| Event | Description |
-|-------|-------------|
-| `threat.detected` | High-confidence phishing detected |
-| `vip.impersonation` | Executive impersonation attempt |
-| `pattern.detected` | New attack pattern identified |
-
-### Payload Format
-
-```json
-{
-  "event": "threat.detected",
-  "timestamp": "2024-01-15T10:30:00Z",
-  "severity": "high",
-  "data": {
-    "analysisId": "uuid",
-    "fromEmail": "attacker@fake-domain.com",
-    "subject": "Urgent wire transfer",
-    "indicators": [
-      {"type": "domain", "value": "fake-domain.com"},
-      {"type": "url", "value": "https://fake-domain.com/login"}
-    ]
-  }
-}
-```
+There is no webhook delivery in the pipeline today. `WebhookService` (`src/handlers/webhook.handler.ts`, exported from the package) is a client for HMAC-signed webhooks with event types `threat.detected`, `threat.high_confidence`, `pattern.detected` and `vip.impersonation`, but nothing in Phishy calls it and there is no endpoint to register a webhook. For SIEM integration today, read the database, the API above, or the CloudWatch metrics and logs.
 
 ## Campaign Flood Detection
 
-When multiple phishing emails with similar patterns hit your organization, Phishy can alert your security team automatically.
+When several employees report the same phishing email, Phishy can broadcast one warning to everyone on a distribution list (typically all staff), so people who have not reported it yet know not to act on it. With [campaign response](CONFIGURATION.md#campaign-response-optional) on, the same threshold opens an incident for the security team instead.
 
 ### Enabling Campaign Alerts
 
 ```bash
 export PHISHY_CAMPAIGN_ALERTS_ENABLED=true
-export PHISHY_CAMPAIGN_ALERTS_DISTRIBUTION=security@yourcompany.com
 ```
+
+and set the broadcast address in the S3 configuration file:
+
+```json
+{ "campaignAlerts": { "enabled": true, "distributionList": "all-staff@example.com" } }
+```
+
+The `PHISHY_CAMPAIGN_ALERTS_DISTRIBUTION` environment variable currently fails configuration validation (it is parsed as a list; see [CONFIGURATION.md](CONFIGURATION.md#configuration-priority)).
 
 ### Alert Triggers
 
 An alert is sent when ALL of these conditions are met:
 
-- ≥3 detections with the same sender domain + subject pattern
-- ≥2 unique recipients targeted
+- ≥3 reports flagged as phishing with the same campaign signature
+- ≥2 different reporters
 - Within a 4-hour window
-- Risk level is high or critical
+- The current report's risk level is high or critical
 - No alert sent for this campaign in the last 24 hours
 
 ### How It Works
 
 1. Subject lines are normalized (numbers stripped, prefixes removed) to group similar emails
-2. A campaign signature is generated from sender domain + normalized subject
+2. A campaign signature is generated from the reporting employee's domain + normalized subject (the attacker's domain is not part of it: the email Phishy receives is from the employee)
 3. Each detection updates the campaign record
 4. When thresholds are met, an email alert is sent with campaign details
 

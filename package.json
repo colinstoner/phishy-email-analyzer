@@ -1,7 +1,7 @@
 {
   "name": "phishy-email-analyzer",
   "version": "3.0.0",
-  "description": "AI-powered phishing email analysis tool using Claude to evaluate suspicious emails",
+  "description": "Phishing-report desk on AWS Lambda: employees forward suspicious emails, Claude analyzes them, and Phishy replies with a report; optional threat intelligence, campaign response and read-only Microsoft Graph lookups",
   "main": "index.js",
   "types": "dist/index.d.ts",
   "bin": {
@@ -37,7 +37,12 @@
     "aws",
     "lambda",
     "bedrock",
-    "enterprise"
+    "ses",
+    "anthropic",
+    "threat-intelligence",
+    "microsoft-graph",
+    "incident-response",
+    "prompt-injection"
   ],
   "author": "Colin Stoner <colinstoner@gmail.com>",
   "license": "Apache-2.0",

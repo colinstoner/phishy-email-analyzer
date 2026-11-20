@@ -15,10 +15,10 @@ Description: >
 Parameters:
   RecipientEmail:
     Type: String
-    Description: Address users forward suspicious emails to (e.g. phishy@yourdomain.com). The domain must be verified in SES with MX records pointing to SES.
+    Description: Address users forward suspicious emails to (e.g. phishy@example.com). The domain must be verified in SES with MX records pointing to SES.
   SenderEmail:
     Type: String
-    Description: Verified address that analysis reports are sent from (e.g. phishy@yourdomain.com).
+    Description: Verified address that analysis reports are sent from (e.g. phishy@example.com).
   ReplyToEmail:
     Type: String
     Default: ''
@@ -28,10 +28,10 @@ Parameters:
       true (the command channel works by reply) and no Reply-To otherwise.
   SecurityTeamDistribution:
     Type: String
-    Description: Comma-separated address(es) CC'd on all analyses (e.g. security@yourdomain.com).
+    Description: Comma-separated security-team address(es) (e.g. security@example.com). CC'd on reports, sent incident emails and fan-out alerts, and the only senders whose replies count as commands.
   SafeDomains:
     Type: String
-    Description: Comma-separated domains allowed to submit emails for analysis (e.g. yourdomain.com).
+    Description: Comma-separated domains allowed to submit emails for analysis (e.g. example.com). Reports are only ever sent to addresses on these domains.
   AIProvider:
     Type: String
     AllowedValues: [anthropic, bedrock]
@@ -63,8 +63,9 @@ Parameters:
     Description: >
       When true, Phishy broadcasts an employee warning to CampaignAlertDistribution
       once the same attack is reported by multiple people in a short window
-      (>=3 reports, >=2 recipients, within 4 hours). Requires intelligence to be
-      enabled (a database) and CampaignAlertDistribution to be set.
+      (>=3 reports from >=2 reporters within 4 hours, high or critical risk).
+      Requires the intelligence database (IntelligenceDbSecretArn) and
+      CampaignAlertDistribution, unless CampaignResponseEnabled is true.
   ReportButtonEnabled:
     Type: String
     AllowedValues: ['true', 'false']
@@ -77,7 +78,7 @@ Parameters:
   CampaignAlertDistribution:
     Type: String
     Default: ''
-    Description: Address the campaign broadcast is sent to (e.g. all-staff@yourdomain.com). Required when CampaignAlertsEnabled is true, unless CampaignResponseEnabled is true and its audience is recipients.
+    Description: Address the campaign broadcast is sent to (e.g. all-staff@example.com). Required when CampaignAlertsEnabled is true, unless CampaignResponseEnabled is true and its audience is recipients. Known issue - this value currently fails configuration validation when passed as an environment variable; leave it empty and set campaignAlerts.distributionList in a configuration file (docs/CONFIGURATION.md).
   CampaignResponseEnabled:
     Type: String
     AllowedValues: ['true', 'false']
@@ -103,8 +104,9 @@ Parameters:
     Default: approve
     Description: >
       How the targeted employee warning is authorized: approve (a security-team
-      member replies with the approval line), auto (sent as soon as the campaign
-      is detected) or off. Used only when CampaignResponseEnabled is true.
+      member replies with the approval line), auto (sent as soon as at least two
+      people have reported the campaign) or off. Used only when
+      CampaignResponseEnabled is true.
   CampaignResponseReachThreshold:
     Type: Number
     Default: 5
@@ -138,7 +140,7 @@ Parameters:
   SafeSenderSecurity:
     Type: String
     Default: ''
-    Description: Optional. Address(es) treated as the security team for the email command channel.
+    Description: Optional. Comma-separated address(es) CC'd instead of SecurityTeamDistribution on reports from SafeSenders addresses.
   ProfileS3Uri:
     Type: String
     Default: ''
@@ -232,9 +234,10 @@ Parameters:
       Scheduled fan-out scan: every GraphFanoutScanIntervalMinutes, read recent
       inbound mail flow (message trace) and email the security team when an
       established external contact suddenly sends one subject to many internal
-      people. Read-only; no AI model. Needs GraphEnabled and the intelligence
-      database (IntelligenceDbSecretArn) with migrations/005_fanout_scan.sql
-      applied manually.
+      people (with CampaignResponseEnabled, an incident email instead).
+      Read-only; no AI model. Needs GraphEnabled and the intelligence database
+      (IntelligenceDbSecretArn) with migrations/005_fanout_scan.sql applied
+      manually.
   GraphFanoutScanIntervalMinutes:
     Type: Number
     Default: 5
