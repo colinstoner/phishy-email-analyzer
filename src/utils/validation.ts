@@ -141,6 +141,92 @@ export function extractHrefUrls(html: string): string[] {
 }
 
 /**
+ * Attributes a reader can follow, by element: link targets, form submission
+ * targets and images (image sources were always taken). Everything else in
+ * markup (`xmlns` namespace declarations, DOCTYPE identifiers, `<meta>`,
+ * `<link>` stylesheets, Office `<o:...>` and `<xml>` blocks) is not a link
+ * in the message and is never taken: Office-generated HTML declares
+ * namespace URLs such as schemas.microsoft.com and www.w3.org that would
+ * otherwise appear as links and spend the link budget.
+ */
+const FOLLOWABLE_ATTRIBUTES: ReadonlyArray<{ element: string; attribute: string }> = [
+  { element: 'form', attribute: 'action' },
+  { element: 'button', attribute: 'formaction' },
+  { element: 'input', attribute: 'formaction' },
+  { element: 'img', attribute: 'src' },
+  { element: 'input', attribute: 'src' },
+  { element: 'iframe', attribute: 'src' },
+  { element: 'embed', attribute: 'src' },
+];
+
+/**
+ * Elements whose `href` is not a link a reader follows. Every other
+ * element's `href` is taken: anchors and image-map areas, and also the
+ * elements some clients render as clickable (Outlook's VML buttons such as
+ * `<v:roundrect href>`, SVG anchors), which an attacker could otherwise use
+ * to show one client a link the analysis never saw.
+ */
+const NON_LINK_HREF_ELEMENTS = new Set(['link', 'base']);
+
+/** `&amp;` and friends in an attribute value: the browser decodes them before following */
+function decodeAttributeEntities(value: string): string {
+  // One pass, so `&amp;quot;` decodes to `&quot;` and no further
+  return value.replace(/&(amp|quot|apos|#0*38|#x0*26|#0*39);/gi, (_, name: string) => {
+    const n = name.toLowerCase();
+    if (n === 'quot') return '"';
+    if (n === 'apos' || /^#0*39$/.test(n)) return "'";
+    return '&';
+  });
+}
+
+/**
+ * URLs a reader of an HTML body could follow: the followable attributes
+ * above, plus URLs written in the visible text. Comments, `<style>`,
+ * `<script>`, `<head>` and conditional-comment blocks are not visible text.
+ */
+export function extractFollowableUrls(html: string): string[] {
+  if (!html) return [];
+
+  const safeHtml = html.length > MAX_CONTENT_LENGTH ? html.substring(0, MAX_CONTENT_LENGTH) : html;
+  const urls = new Set<string>();
+
+  const tagPattern = /<([a-z][a-z0-9]*(?::[a-z][a-z0-9]*)?)(?=[\s/>])([^>]*)>/gi;
+  let tag: RegExpExecArray | null;
+  while ((tag = tagPattern.exec(safeHtml)) !== null) {
+    const element = tag[1].toLowerCase();
+    const wanted = FOLLOWABLE_ATTRIBUTES.filter(f => f.element === element).map(f => f.attribute);
+    if (!NON_LINK_HREF_ELEMENTS.has(element)) wanted.push('href');
+    if (wanted.length === 0) continue;
+    const attrPattern = /([a-z-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/gi;
+    let attr: RegExpExecArray | null;
+    while ((attr = attrPattern.exec(tag[2])) !== null) {
+      if (!wanted.includes(attr[1].toLowerCase())) continue;
+      const value = decodeAttributeEntities((attr[2] ?? attr[3] ?? attr[4] ?? '').trim());
+      // Anchors keep every scheme they always had (mailto:, tel: ...); other
+      // attributes only web URLs, so an inline image's cid: is not a link
+      const schemeOk = attr[1].toLowerCase() === 'href' || /^https?:\/\//i.test(value);
+      if (schemeOk && value.length <= MAX_URL_LENGTH && isValidUrl(value)) {
+        urls.add(value);
+      }
+    }
+  }
+
+  const visibleText = safeHtml
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<[!?][^>]*>/g, ' ') // DOCTYPE, <![endif]>, <?xml ...?>
+
+    .replace(/<(style|script|head|xml|title)\b[\s\S]*?<\/\1\s*>/gi, ' ')
+    // Only real tags (`<p>`, `</a>`, `<o:p>`): a plain-text `<https://...>`
+    // or `<name@example.com>` is visible text and stays
+    .replace(/<\/?[a-z][a-z0-9]*(?::[a-z0-9]+)?(?=[\s/>])[^>]*>/gi, ' ');
+  for (const url of extractUrls(decodeAttributeEntities(visibleText))) {
+    urls.add(url);
+  }
+
+  return Array.from(urls);
+}
+
+/**
  * Sanitize string for safe logging (remove potential secrets)
  */
 export function sanitizeForLogging(value: string, maxLength = 100): string {

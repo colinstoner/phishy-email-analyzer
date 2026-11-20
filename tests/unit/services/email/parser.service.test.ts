@@ -433,6 +433,41 @@ describe('EmailParserService', () => {
       expect(forwarded['Original-Reply-To']).toContain('collect@example-evil.test');
     });
 
+    it('carries every To and Cc recipient of a forward-as-attachment original', async () => {
+      const innerEmail = [
+        'From: "Lena Vogt" <lena@vendor.example>',
+        'To: "Lena Vogt" <lena@vendor.example>, ops@example.com',
+        'Cc: Tom <tom@vendor.example>',
+        'Reply-To: "Marcus Hale" <marcus@vendor.example>',
+        'Subject: RFQ for your review',
+        'Content-Type: text/plain; charset=utf-8',
+        '',
+        'I have prepared the following RFQ for your review.',
+      ].join(CRLF);
+      const outerEmail = [
+        'From: employee@example.com',
+        'To: phishy@example.com',
+        'Subject: FW: RFQ for your review',
+        'MIME-Version: 1.0',
+        'Content-Type: multipart/mixed; boundary="outer-boundary"',
+        '',
+        '--outer-boundary',
+        'Content-Type: message/rfc822',
+        '',
+        innerEmail,
+        '--outer-boundary--',
+        '',
+      ].join(CRLF);
+
+      const parser = makeParser();
+      const events = await parser.parseSESRecords([makeSESRecord({ content: outerEmail })]);
+      const forwarded = parser.extractForwardedHeaders(events[0].msg.text);
+
+      expect(forwarded['Original-To']).toBe('"Lena Vogt" <lena@vendor.example>, ops@example.com');
+      expect(forwarded['Original-Cc']).toBe('"Tom" <tom@vendor.example>');
+      expect(forwarded['Original-Reply-To']).toBe('"Marcus Hale" <marcus@vendor.example>');
+    });
+
     describe('Outlook Report-button submissions', () => {
       const NMID = '11111111-2222-4333-8444-555555555555';
       const reportSubject = `Phishing:${NMID}|billing@examp1e-secure.test|(Your account is suspended) 06/01/2026 14:02:11`;
@@ -882,6 +917,40 @@ describe('EmailParserService', () => {
       expect(data.links).toHaveLength(2);
     });
 
+    it('does not take XML namespace or schema URLs from Office HTML as links', () => {
+      const parser = makeParser();
+      const msg = makeMessage({
+        html:
+          '<html xmlns:o="urn:schemas-microsoft-com:office:office" ' +
+          'xmlns:m="http://schemas.microsoft.com/office/2004/12/omml" xmlns="http://www.w3.org/TR/REC-html40">' +
+          '<head><meta name="Generator" content="Microsoft Word 15"><link rel="stylesheet" href="https://cdn.example.net/s.css"></head>' +
+          '<body><p>Review <a href="https://portal.example.org/rfq">RFQ.pdf</a><o:p></o:p></p>' +
+          '<img src="cid:image001.png@01D0"></body></html>',
+      });
+
+      const data = parser.extractEmailData(msg);
+
+      expect(data.links).toEqual(['https://portal.example.org/rfq']);
+    });
+
+    it('unwraps a gateway-wrapped link and flags file-name link text against the claimed sender', () => {
+      const parser = makeParser();
+      const target = 'https://quarryexample-my.sharepoint.com/:f:/g/personal/r_quarry_test/Ek';
+      const msg = makeMessage({
+        text: '---------- Forwarded message ---------\nFrom: Lena <lena@vendor.example>\nSubject: RFQ\nTo: lena@vendor.example\n\nSee below',
+        html: `<p><a href="https://linkprotect.cudasvc.com/url?a=${encodeURIComponent(target)}&amp;c=E,1,x&amp;typo=1">RFQ-1.pdf</a></p>`,
+      });
+
+      const data = parser.extractEmailData(msg);
+
+      expect(data.links).toEqual([target]);
+      expect(data.linkFacts?.[0].flags[0]).toContain('Barracuda Link Protection');
+      expect(data.linkFacts?.[0].fileShare?.ownerSegment).toBe('r_quarry_test');
+      expect(data.contentFlags).toContain(
+        'Link text looks like a file name (.pdf) but the link opens a web page on sharepoint.com, not a direct download of that file'
+      );
+    });
+
     it('should extract links from text when no HTML is present', () => {
       const parser = makeParser();
       const msg = makeMessage({ text: 'Go to https://login.example-verify.test/account now' });
@@ -1129,6 +1198,46 @@ describe('EmailParserService', () => {
       const headers = parser.extractForwardedHeaders(text);
 
       expect(headers['Original-From']).toBe('eve@example.org');
+    });
+
+    it('reads Cc, and never takes a Reply-To line for the To line', () => {
+      const parser = makeParser();
+      const noTo = [
+        '---------- Forwarded message ---------',
+        'From: Lena <lena@vendor.example>',
+        'Date: Tue, 17 Nov 2026 06:12:00 +0000',
+        'Subject: RFQ',
+        'Reply-To: Marcus <marcus@vendor.example>',
+        '',
+        'Body',
+      ].join('\n');
+      const headers = parser.extractForwardedHeaders(noTo);
+      expect(headers['Original-To']).toBeUndefined();
+      expect(headers['Original-Reply-To']).toBe('Marcus <marcus@vendor.example>');
+
+      const withCc = noTo.replace(
+        'Reply-To:',
+        'Cc: tom@vendor.example\nTo: lena@vendor.example\nReply-To:'
+      );
+      const parsed = parser.extractForwardedHeaders(withCc);
+      expect(parsed['Original-Cc']).toBe('tom@vendor.example');
+      expect(parsed['Original-To']).toBe('lena@vendor.example');
+    });
+
+    it('parses an Outlook block that has a Cc line', () => {
+      const parser = makeParser();
+      const text = [
+        'From: Alice Example <alice@example.org>',
+        'Sent: Monday, June 1, 2026 9:00 AM',
+        'To: bob@example.com',
+        'Cc: carol@example.com',
+        'Subject: Quarterly report',
+        '',
+        'See the report.',
+      ].join('\n');
+      const headers = parser.extractForwardedHeaders(text);
+      expect(headers['Original-Cc']).toBe('carol@example.com');
+      expect(headers['Original-Subject']).toBe('Quarterly report');
     });
 
     it('should return empty object when no forwarded markers or From lines exist', () => {
