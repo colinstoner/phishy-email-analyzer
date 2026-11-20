@@ -19,6 +19,13 @@ Parameters:
   SenderEmail:
     Type: String
     Description: Verified address that analysis reports are sent from (e.g. phishy@yourdomain.com).
+  ReplyToEmail:
+    Type: String
+    Default: ''
+    Description: >
+      Optional. Address that replies to Phishy's emails go to (a Reply-To
+      header). Leave empty to use RecipientEmail when EmailCommandsEnabled is
+      true (the command channel works by reply) and no Reply-To otherwise.
   SecurityTeamDistribution:
     Type: String
     Description: Comma-separated address(es) CC'd on all analyses (e.g. security@yourdomain.com).
@@ -304,6 +311,7 @@ Conditions:
   UseEmailCommands: !And
     - !Condition UseIntelligence
     - !Equals [!Ref EmailCommandsEnabled, 'true']
+  HasReplyToEmail: !Not [!Equals [!Ref ReplyToEmail, '']]
   UseAttachmentAnalysis: !Equals [!Ref AttachmentAnalysisEnabled, 'true']
   UseReportButton: !Equals [!Ref ReportButtonEnabled, 'true']
   # The GraphSettingsPresent rule rejects GraphEnabled without the secret ARN,
@@ -404,6 +412,11 @@ Resources:
           PHISHY_BEDROCK_MODEL: !If [HasBedrockModel, !Ref BedrockModelId, !Ref AWS::NoValue]
           S3_BUCKET_NAME: !Ref EmailBucket
           SENDER_EMAIL: !Ref SenderEmail
+          # Replies must reach Phishy for the command channel to work
+          REPLY_TO_EMAIL: !If
+            - HasReplyToEmail
+            - !Ref ReplyToEmail
+            - !If [UseEmailCommands, !Ref RecipientEmail, !Ref AWS::NoValue]
           SECURITY_TEAM_DISTRIBUTION: !Ref SecurityTeamDistribution
           SAFE_DOMAINS: !Ref SafeDomains
           PHISHY_AWS_REGION: !Ref AWS::Region

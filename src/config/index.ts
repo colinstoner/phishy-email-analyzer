@@ -48,6 +48,7 @@ const ENV_MAPPINGS: Record<string, string> = {
 
   // Notification
   SENDER_EMAIL: 'notification.senderEmail',
+  REPLY_TO_EMAIL: 'notification.replyToEmail',
   SECURITY_TEAM_DISTRIBUTION: 'notification.securityTeamDistribution',
   SAFE_SENDER_SECURITY: 'notification.safeSenderSecurity',
   SES_CONFIG_SET: 'notification.sesConfigSet',
