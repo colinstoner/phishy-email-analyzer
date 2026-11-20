@@ -361,6 +361,8 @@ describe('campaign response on', () => {
     expect(input.blastRadiusEnabled).toBe(true);
     expect(input.analysisId).toBe('3f2b8a1c-0d4e-4f6a-9b2c-7e8d1a5f3c9b');
     expect(input.risk.verdict).toBeDefined();
+    // The reporter's analysis went out, so the incident email may say so
+    expect(input.reporterReply).toBe('emailed');
 
     const deps = mockResponseCtor.mock.calls[0][0];
     expect(deps.safeDomains).toEqual(['example.com']);
@@ -413,7 +415,17 @@ describe('campaign response on', () => {
     expect(input.blastRadius).toBe(SECTION);
     expect(input.risk.verdict).toBeDefined();
     expect(input.analysis.analysisFailed).toBeFalsy();
+    // Campaign response is told the reporter was not emailed
+    expect(input.reporterReply).toBe('silent');
     expect(mockResponseCtor.mock.calls[0][0].config.reachThreshold).toBe(1);
+  });
+
+  it('tells campaign response when the reporter could not be sent their analysis', async () => {
+    mockConfig = config(on);
+    mockSendAnalysisReport.mockResolvedValue({ success: false, error: 'SES refused' });
+    await loadHandler()(forward(), {} as Context);
+    expect(mockHandleCampaignReport).toHaveBeenCalledTimes(1);
+    expect(mockHandleCampaignReport.mock.calls[0][0].reporterReply).toBe('not_sent');
   });
 
   it('never tracks or responds to a report from a safelist user', async () => {

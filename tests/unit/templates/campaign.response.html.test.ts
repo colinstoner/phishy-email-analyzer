@@ -238,7 +238,7 @@ describe('incident email', () => {
   const email = buildIncidentEmail({
     incident,
     proposed: [warning, removal],
-    done: ['Sent each reporter their own analysis.'],
+    done: ['Sent the reporter of this report their own analysis.'],
     notes: [],
     commandsEnabled: true,
     timeZone: 'UTC',

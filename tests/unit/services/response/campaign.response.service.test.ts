@@ -267,6 +267,26 @@ describe('opening an incident', () => {
     expect(store.incidents[0].threadMessageId).toBe('ses-1');
   });
 
+  it('says the reporter was sent their analysis only when it was', async () => {
+    const emailed = setup();
+    await emailed.service.handleCampaignReport(reportInput({ reporterReply: 'emailed' }));
+    expect(emailed.sent[0].text).toContain('Sent the reporter of this report their own analysis.');
+
+    const silent = setup();
+    await silent.service.handleCampaignReport(reportInput({ reporterReply: 'silent' }));
+    expect(silent.sent[0].text).not.toContain('their own analysis');
+    expect(silent.sent[0].text).toContain(
+      'This report came through the Report button, so its reporter was not emailed'
+    );
+
+    for (const reporterReply of ['not_sent', undefined] as const) {
+      const quiet = setup();
+      await quiet.service.handleCampaignReport(reportInput({ reporterReply }));
+      expect(quiet.sent[0].text).not.toContain('their own analysis');
+      expect(quiet.sent[0].text).not.toContain('Report button');
+    }
+  });
+
   it('sends at once, one email per person, when set to auto', async () => {
     const { service, sent, store } = setup({ employeeWarning: 'auto' });
     await service.handleCampaignReport(reportInput());

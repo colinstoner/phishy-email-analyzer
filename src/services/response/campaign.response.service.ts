@@ -123,7 +123,30 @@ export interface CampaignReportInput {
   /** This report's blast-radius lookup, when one ran */
   blastRadius?: BlastRadiusReport;
   blastRadiusEnabled: boolean;
+  /**
+   * How this report's own reporter was answered, so the incident email says
+   * only what happened: `emailed` (their analysis was sent), `silent` (an
+   * Outlook Report-button report: the reporter is deliberately never
+   * emailed) or `not_sent` (no valid reporter address, or the send failed).
+   * Earlier reports of the campaign are not described: how each was answered
+   * is not recorded.
+   */
+  reporterReply?: ReporterReply;
   getRemainingMs?: () => number | undefined;
+}
+
+export type ReporterReply = 'emailed' | 'silent' | 'not_sent';
+
+/** The incident email's "done" line for the report that opened it, if any */
+export function reporterReplyLine(reply: ReporterReply | undefined): string | undefined {
+  switch (reply) {
+    case 'emailed':
+      return 'Sent the reporter of this report their own analysis.';
+    case 'silent':
+      return 'This report came through the Report button, so its reporter was not emailed (button reports are silent).';
+    default:
+      return undefined;
+  }
 }
 
 export type CampaignResponseOutcome =
@@ -462,8 +485,9 @@ export class CampaignResponseService {
       reachStatus: reach.status,
     });
 
+    const replyLine = reporterReplyLine(input.reporterReply);
     await this.respond(incident, {
-      done: ['Sent each reporter their own analysis.'],
+      done: replyLine ? [replyLine] : [],
       forceApprove: false,
       getRemainingMs: input.getRemainingMs,
     });
