@@ -781,7 +781,7 @@ If you're upgrading from the original Phishy, your existing environment variable
 | `S3_BUCKET_NAME` | ✓ | `storage.s3Bucket` |
 | `SECURITY_TEAM_DISTRIBUTION` | ✓ | `notification.securityTeamDistribution` |
 
-These names are unchanged in v3. The v1 runtime itself (the root `index.js`) is not supported.
+These names are unchanged in v3. The v1 runtime itself (the former root `index.js`) has been removed; deploy with the SAM template or `npm run package`.
 
 ---
 

@@ -2,7 +2,7 @@
   "name": "phishy-email-analyzer",
   "version": "3.0.0",
   "description": "Phishing-report desk on AWS Lambda: employees forward suspicious emails, Claude analyzes them, and Phishy replies with a report; optional threat intelligence, campaign response and read-only Microsoft Graph lookups",
-  "main": "index.js",
+  "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
     "phishy-try": "dist/cli/try.js",
@@ -27,8 +27,7 @@
     "format:check": "prettier --check \"src/**/*.ts\"",
     "typecheck": "tsc --noEmit",
     "package": "node scripts/package-lambda.js",
-    "deploy": "node scripts/package-lambda.js --deploy",
-    "deploy:legacy": "zip -r function.zip index.js node_modules package.json && aws lambda update-function-code --function-name phishy --zip-file fileb://function.zip"
+    "deploy": "node scripts/package-lambda.js --deploy"
   },
   "keywords": [
     "security",

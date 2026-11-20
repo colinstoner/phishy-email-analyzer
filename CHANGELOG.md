@@ -92,6 +92,10 @@ Everything below is new or changed relative to v3.0.0. Every new layer is off by
 - `npm run lint` now lints every `.ts` file under `src/` (the unquoted glob covered one directory level).
 - Documentation describes the product as it is: a README for the current feature set, a feature-flag table and every setting in `docs/CONFIGURATION.md`, deployable manual-packaging steps (the esbuild bundle) in `docs/QUICK_START.md` and `AWS.md`, every SAM parameter, and corrected SAM parameter descriptions.
 
+### Removed
+
+- **The v1 compatibility entry point (the root `index.js`) is gone. Breaking change** for anyone still deploying that file: such a deployment stops working and must move to the SAM template (`sam build && sam deploy`) or the esbuild bundle (`npm run package`, then `index.handler`; see AWS.md). The file loaded `dist/handlers/lambda.handler` when it could and otherwise, silently, ran the unsupported v1 analyzer (Claude 3 Sonnet, none of the v2/v3 safeguards); since `dist/` could not load (see Fixed), it always fell back. It also still carried a stale GPL-3.0 header from before the Apache-2.0 relicensing. `package.json` `main` now points at `dist/index.js`, and the `deploy:legacy` script, which only zipped that file, is removed.
+
 ### Fixed
 
 - **`PHISHY_CAMPAIGN_ALERTS_DISTRIBUTION` no longer breaks startup.** Environment variables were split into lists whenever the variable's name contained `DOMAINS`, `SENDERS` or `DISTRIBUTION`, so this single-address variable (set by the SAM `CampaignAlertDistribution` parameter) became a list and configuration validation failed on every invocation. Whether a variable is split on commas is now decided by its target field in the configuration schema: only `SAFE_DOMAINS`, `SAFE_SENDERS`, `SECURITY_TEAM_DISTRIBUTION` and `SAFE_SENDER_SECURITY` are lists.
