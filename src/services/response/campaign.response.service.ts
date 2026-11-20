@@ -928,7 +928,7 @@ export class CampaignResponseService {
       }
     }
     const actions = await this.store.listActions(incident.id);
-    const done = [...options.done, ...this.history(actions)];
+    const done = [...options.done, ...this.history(incident, actions)];
     const notes = [...modes.notes];
 
     // Auto parts first (computed now, executed after the email has gone)
@@ -994,11 +994,15 @@ export class CampaignResponseService {
       );
     }
 
+    const idleReason =
+      proposed.length === 0 ? this.idleReason(incident, current, modes) : undefined;
+
     const sent = await this.sendIncidentEmail(incident, {
       proposed,
       done,
       notes,
       changes: options.changes,
+      ...(idleReason ? { idleReason } : {}),
     });
 
     if (auto?.scope.kind === 'send_warning') {
@@ -1018,27 +1022,228 @@ export class CampaignResponseService {
     return `Sending ${parts.join(', ')} now (set to send automatically).`;
   }
 
+  /** " at <time>" for when an action ran (or was approved), or nothing */
+  private actionAt(action: ResponseAction): string {
+    const when = action.executedAt ?? action.approvedAt;
+    const shown = when ? displayTime(when.toISOString(), this.config.timeZone) : undefined;
+    return shown ? ` at ${shown}` : '';
+  }
+
+  /** Who approved an action, or that it was automatic */
+  private actionBy(action: ResponseAction): string {
+    return action.approvedBy && action.approvedBy !== 'auto'
+      ? `approved by ${action.approvedBy}`
+      : 'sent automatically';
+  }
+
+  /**
+   * Why there is nobody to warn, from the incident's real reach: the same
+   * scope computation a proposal uses, plus who among the recipients
+   * reported it. Undefined when someone could be warned after all.
+   */
+  private nobodyToWarn(incident: CampaignIncident, actions: ResponseAction[]): string | undefined {
+    const reach = incident.reach;
+    if (reach.status === 'not_enabled') {
+      return 'blast radius is not enabled, so Phishy does not know who received it';
+    }
+    const scope = this.warningScope(incident, actions, true, false);
+    if (scope.recipients.length > 0) {
+      return undefined;
+    }
+    const reporters = new Set(
+      (incident.trigger === 'fanout_scan' && incident.reportCount === 0
+        ? []
+        : this.reportersOf(incident)
+      ).map(address => address.trim().toLowerCase())
+    );
+    const listed = new Map<string, (typeof reach.recipients)[number]>();
+    for (const recipient of reach.recipients) {
+      listed.set(recipient.address.trim().toLowerCase(), recipient);
+    }
+    let reporterCopies = 0;
+    let reporterNoCopy = 0;
+    for (const [address, recipient] of listed) {
+      if (reporters.has(address)) {
+        if (recipient.mailbox === 'not_delivered' || recipient.mailbox === 'not_found') {
+          reporterNoCopy += 1;
+        } else {
+          reporterCopies += 1;
+        }
+      }
+    }
+    const s = scope.skipped;
+    const notDelivered = s.notDelivered + reporterNoCopy;
+    const known = listed.size + s.unlisted;
+    if (known === 0) {
+      return 'the blast-radius lookup has not found anyone who received it';
+    }
+    const others = notDelivered + s.unsafeAddress + s.alreadyContacted + s.overCap + s.unlisted;
+    if (reporterCopies > 0 && others === 0) {
+      return reporterCopies === 1
+        ? 'the only mailbox that has it belongs to the person who reported it'
+        : 'the only mailboxes that have it belong to people who reported it';
+    }
+    if (reporterCopies === 0 && notDelivered === known) {
+      return 'no copy was delivered to a mailbox (blocked, quarantined or not found)';
+    }
+    const clause = (count: number, one: string, many: string): string =>
+      count ? `${count} ${count === 1 ? one : many}` : '';
+    const clauses = [
+      clause(reporterCopies, 'reported it themselves', 'reported it themselves'),
+      clause(
+        notDelivered,
+        'did not get a copy in their mailbox',
+        'did not get a copy in their mailbox'
+      ),
+      clause(s.unsafeAddress, 'is not on a safe domain', 'are not on a safe domain'),
+      clause(
+        s.alreadyContacted,
+        'was already emailed for this campaign',
+        'were already emailed for this campaign'
+      ),
+      clause(
+        s.overCap,
+        `is over the per-campaign cap of ${this.config.maxWarningsPerCampaign}`,
+        `are over the per-campaign cap of ${this.config.maxWarningsPerCampaign}`
+      ),
+      clause(s.unlisted, 'has no known address', 'have no known address'),
+    ].filter(Boolean);
+    return `of the ${known} recipient(s) Phishy knows about, ${clauses.join(', ')}`;
+  }
+
+  /** Who a warning reached, in words: "3 people", "the distribution list", both, or nothing */
+  private warnedWho(people: number, distribution: boolean): string | undefined {
+    const who = people > 0 ? `${people} ${people === 1 ? 'person' : 'people'}` : '';
+    if (who && distribution) {
+      return `${who} and the distribution list`;
+    }
+    return who || (distribution ? 'the distribution list' : undefined);
+  }
+
+  /**
+   * Why a warning that ran reached nobody, from its result and scope: its
+   * failures, or that it named nobody (the reason from the current reach),
+   * or that the people it named could no longer be emailed when it ran.
+   */
+  private whyNobodyWarned(
+    incident: CampaignIncident,
+    actions: ResponseAction[],
+    action: ResponseAction
+  ): string {
+    const r = action.result ?? { executor: '', dryRun: false, summary: [] };
+    const named = action.scope.kind === 'send_warning' ? action.scope.recipients.length : 0;
+    const problems = [
+      r.failed ? `${r.failed} email(s) failed` : '',
+      r.notSentForTime ? `${r.notSentForTime} were not sent before time ran out` : '',
+    ].filter(Boolean);
+    if (problems.length) {
+      return problems.join(' and ');
+    }
+    if (named === 0) {
+      return this.nobodyToWarn(incident, actions) ?? 'the approved warning named nobody to email';
+    }
+    return `none of the ${named} recipient(s) it named could still be emailed when it ran (already contacted, no longer on a safe domain, or over the cap)`;
+  }
+
+  /** "The warning approved by x at t" or "The automatic warning at t" */
+  private warningName(action: ResponseAction): string {
+    return action.approvedBy && action.approvedBy !== 'auto'
+      ? `The warning approved by ${action.approvedBy}${this.actionAt(action)}`
+      : `The automatic warning${this.actionAt(action)}`;
+  }
+
+  /**
+   * Why nothing is waiting for approval, in one plain sentence, from the
+   * actions' real state: the latest warning that was approved or sent (and
+   * what it reached), or why no warning can be proposed.
+   */
+  private idleReason(
+    incident: CampaignIncident,
+    actions: ResponseAction[],
+    modes: { targeted: 'off' | 'approve' | 'auto'; distribution: 'off' | 'approve' | 'auto' }
+  ): string {
+    const latest = [...actions]
+      .reverse()
+      .find(
+        a =>
+          a.type === 'send_warning' &&
+          (a.status === 'approved' || a.status === 'completed' || a.status === 'failed')
+      );
+    if (latest) {
+      const auto = !latest.approvedBy || latest.approvedBy === 'auto';
+      const at = this.actionAt(latest);
+      if (latest.status === 'approved') {
+        const scope = latest.scope.kind === 'send_warning' ? latest.scope : undefined;
+        const who = this.warnedWho(scope?.recipients.length ?? 0, scope?.distribution ?? false);
+        const to = who ? ` to ${who}` : '';
+        return auto
+          ? `The warning is set to send automatically and is being sent now${to}.`
+          : `The warning was already approved by ${latest.approvedBy}${at} and is being sent now${to}.`;
+      }
+      if (latest.status === 'failed') {
+        return `${this.warningName(latest)} could not be sent (see the logs), and there is no new warning to propose.`;
+      }
+      const r = latest.result;
+      const who = this.warnedWho(r?.warned?.length ?? 0, r?.distributionSent ?? false);
+      if (who) {
+        return auto
+          ? `The warning was already sent automatically${at} to ${who}.`
+          : `The warning was already approved by ${latest.approvedBy}${at} and sent to ${who}.`;
+      }
+      return auto
+        ? `The automatic warning${at} had nobody to warn: ${this.whyNobodyWarned(incident, actions, latest)}.`
+        : `The warning was already approved by ${latest.approvedBy}${at}, but there was nobody to warn: ${this.whyNobodyWarned(incident, actions, latest)}.`;
+    }
+    if (modes.targeted === 'off' && modes.distribution === 'off') {
+      const targetedOff =
+        this.config.audience === 'distribution' || this.config.employeeWarning === 'off';
+      const listOff =
+        this.config.audience === 'recipients' || this.config.distributionWarning === 'off';
+      if (targetedOff && listOff) {
+        return 'No warning can be proposed: warnings are turned off in the configuration.';
+      }
+      const reasons = [
+        targetedOff
+          ? 'targeted warnings are turned off'
+          : 'blast radius is not enabled, so Phishy does not know who received it',
+        listOff
+          ? 'the distribution-list warning is turned off'
+          : 'no distribution list is configured',
+      ];
+      return `No warning can be proposed: ${reasons.join(', and ')}.`;
+    }
+    const why = this.nobodyToWarn(incident, actions);
+    return why
+      ? `No warning can be proposed: there is nobody to warn (0 recipients), because ${why}.`
+      : 'No warning is proposed right now.';
+  }
+
   /** What earlier actions did, one line each */
-  private history(actions: ResponseAction[]): string[] {
+  private history(incident: CampaignIncident, actions: ResponseAction[]): string[] {
     const lines: string[] = [];
     for (const action of actions) {
       if (!action.result) {
         continue;
       }
-      const by =
-        action.approvedBy && action.approvedBy !== 'auto'
-          ? `approved by ${action.approvedBy}`
-          : 'sent automatically';
-      const at = action.executedAt
-        ? ` at ${displayTime(action.executedAt.toISOString(), this.config.timeZone) ?? ''}`
-        : '';
+      const by = this.actionBy(action);
+      const at = this.actionAt(action);
       if (action.type === 'send_warning') {
+        // A stored `thanked` list (an earlier version's thank-you note) is
+        // still read for who was contacted, but not described here
         const r = action.result;
-        // `thanked` only exists on results stored by an earlier version
-        const thanked = r.thanked?.length ? ` and thanked ${r.thanked.length} reporter(s)` : '';
-        lines.push(
-          `Warned ${r.warned?.length ?? 0} recipient(s)${thanked}${r.distributionSent ? ', and warned the distribution list' : ''} (${by}${at}).${r.failed ? ` ${r.failed} email(s) failed.` : ''}`
-        );
+        const people = r.warned?.length ?? 0;
+        const failed = r.failed ? ` ${r.failed} email(s) failed.` : '';
+        if (people > 0) {
+          lines.push(
+            `Warned ${people} recipient(s)${r.distributionSent ? ' and the distribution list' : ''} (${by}${at}).${failed}`
+          );
+        } else if (r.distributionSent) {
+          lines.push(`Warned the distribution list (${by}${at}).${failed}`);
+        } else {
+          lines.push(
+            `${this.warningName(action)} reached nobody: ${this.whyNobodyWarned(incident, actions, action)}.`
+          );
+        }
       } else if (!action.result.dryRun) {
         const r = action.result;
         const messages = (r.removed ?? []).reduce((n, m) => n + m.messages, 0);
@@ -1057,7 +1262,13 @@ export class CampaignResponseService {
 
   private async sendIncidentEmail(
     incident: CampaignIncident,
-    content: { proposed: ResponseAction[]; done: string[]; notes: string[]; changes?: string[] }
+    content: {
+      proposed: ResponseAction[];
+      done: string[];
+      notes: string[];
+      changes?: string[];
+      idleReason?: string;
+    }
   ): Promise<boolean> {
     const team = this.deps.securityTeam;
     if (team.length === 0) {
@@ -1072,6 +1283,7 @@ export class CampaignResponseService {
       done: content.done,
       notes: content.notes,
       ...(content.changes ? { changes: content.changes } : {}),
+      ...(content.idleReason ? { idleReason: content.idleReason } : {}),
       commandsEnabled: this.deps.commandsEnabled,
       timeZone: this.config.timeZone,
     });

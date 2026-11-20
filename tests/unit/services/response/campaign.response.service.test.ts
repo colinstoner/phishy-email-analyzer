@@ -21,6 +21,7 @@ import type { RemovalExecutor } from '../../../../src/services/response/executor
 import type {
   ActionResult,
   RemovedMailbox,
+  WarningScope as WarningScopeType,
 } from '../../../../src/services/response/response.types';
 import { FakeResponseStore } from './fake.store';
 
@@ -876,6 +877,204 @@ describe('incident updates', () => {
     same.match = { ...same.match, shouldAlert: false };
     expect(await service.handleCampaignReport(same)).toBe('unchanged');
     expect(sent).toHaveLength(1);
+  });
+});
+
+describe('the incident email says why nothing is waiting', () => {
+  // Recipients without message IDs: no removal is proposed, so the warning
+  // alone decides whether anything waits
+  const noIds = (r: BlastRadiusRecipient): BlastRadiusRecipient => ({
+    ...r,
+    mailboxId: undefined,
+    messageIds: undefined,
+  });
+  const reporterCopy = (address: string): BlastRadiusRecipient => ({
+    address,
+    mailbox: 'found',
+    folder: 'inbox',
+  });
+  const onlyReporters = (): BlastRadiusReport =>
+    blast([
+      reporterCopy('reporter1@example.com'),
+      reporterCopy('reporter2@example.com'),
+      reporterCopy('reporter3@example.com'),
+    ]);
+  const laterReport = (blastRadius?: BlastRadiusReport): CampaignReportInput => {
+    const later = reportInput(blastRadius ? { blastRadius } : {});
+    later.match = { ...later.match, detectionCount: 4, shouldAlert: false };
+    return later;
+  };
+  const WHEN = 'Tue, 17 Nov 2026, 10:00 UTC';
+
+  it('actions waiting: says to reply to this email', async () => {
+    const { service, sent } = setup();
+    await service.handleCampaignReport(reportInput());
+    expect(sent[0].text).toContain('2 actions are waiting for your approval.');
+    expect(sent[0].text).toContain(
+      'To approve, reply to this email with the line shown under "Proposed actions".'
+    );
+  });
+
+  it('approved and sent: says who approved it, when, and how many people it reached', async () => {
+    const { service, sent, store, advance } = setup();
+    await service.handleCampaignReport(
+      reportInput({ blastRadius: blast([1, 2, 3].map(n => noIds(recipient(n)))) })
+    );
+    const warning = proposed(store, 'send_warning')!;
+    await service.handleApprovals(approve('send_warning', warning.reference), 'soc@example.com');
+    advance(31 * 60_000);
+    await service.handleCampaignReport(laterReport(blast([1, 2, 3].map(n => noIds(recipient(n))))));
+    const update = sent[sent.length - 1];
+    expect(update.to).toBe('security@example.com');
+    expect(update.text).toContain('Nothing is waiting for your approval.');
+    expect(update.text).toContain(
+      `The warning was already approved by soc@example.com at ${WHEN} and sent to 3 people.`
+    );
+    expect(update.text).toContain(
+      `Warned 3 recipient(s) (approved by soc@example.com at ${WHEN}).`
+    );
+    expect(update.text).toContain('None. There is nothing to approve in this email.');
+    expect(update.text).not.toContain('cancels the proposed actions');
+  });
+
+  it('approved with nobody to warn: says why, and does not headline a legacy thank-you list', async () => {
+    const { service, sent, store, advance } = setup();
+    await service.handleCampaignReport(reportInput({ blastRadius: onlyReporters() }));
+    const incidentId = store.incidents[0].id;
+    // A warning approved under an earlier version: it named nobody to warn
+    // and thanked the reporters (a note that no longer exists)
+    store.actions.push({
+      id: 'legacy',
+      incidentId,
+      reference: 'PHY-LLLL-LLLL-LLLL-LLL2',
+      type: 'send_warning',
+      status: 'completed',
+      authorization: 'approve',
+      scope: {
+        kind: 'send_warning',
+        recipients: [],
+        distribution: false,
+        skipped: {
+          notDelivered: 0,
+          unsafeAddress: 0,
+          alreadyContacted: 0,
+          overCap: 0,
+          unlisted: 0,
+        },
+        reporters: REPORTERS,
+      } as unknown as WarningScopeType,
+      scopeHash: 'legacy',
+      proposedAt: new Date('2026-11-17T09:50:00.000Z'),
+      expiresAt: new Date('2026-11-17T14:00:00.000Z'),
+      approvedBy: 'soc@example.com',
+      approvedAt: new Date('2026-11-17T10:00:00.000Z'),
+      executedAt: new Date('2026-11-17T10:00:00.000Z'),
+      result: {
+        executor: 'ses_warning',
+        dryRun: false,
+        summary: [],
+        warned: [],
+        thanked: REPORTERS,
+      },
+    });
+    advance(31 * 60_000);
+    await service.handleCampaignReport(laterReport(onlyReporters()));
+    const update = sent[sent.length - 1];
+    expect(update.text).toContain('Nothing is waiting for your approval.');
+    expect(update.text).toContain(
+      `The warning was already approved by soc@example.com at ${WHEN}, but there was nobody to warn: the only mailboxes that have it belong to people who reported it.`
+    );
+    expect(update.text).toContain(
+      `The warning approved by soc@example.com at ${WHEN} reached nobody: the only mailboxes that have it belong to people who reported it.`
+    );
+    expect(update.text).not.toMatch(/thanked|Warned 0/);
+  });
+
+  it('nothing to propose: nobody who has not reported it has the email', async () => {
+    const { service, sent, store } = setup();
+    await service.handleCampaignReport(reportInput({ blastRadius: onlyReporters() }));
+    expect(store.actions).toEqual([]);
+    expect(sent[0].text).toContain('Nothing is waiting for your approval.');
+    expect(sent[0].text).toContain(
+      'No warning can be proposed: there is nobody to warn (0 recipients), because the only mailboxes that have it belong to people who reported it.'
+    );
+  });
+
+  it('nothing to propose: counts the copies that were not delivered and the other reasons', async () => {
+    const { service, sent } = setup();
+    await service.handleCampaignReport(
+      reportInput({
+        blastRadius: blast([
+          reporterCopy('reporter1@example.com'),
+          { address: 'failed@example.com', mailbox: 'not_delivered' },
+          noIds(recipient(4, { address: 'outsider@partner.test' })),
+        ]),
+      })
+    );
+    expect(sent[0].text).toContain(
+      'No warning can be proposed: there is nobody to warn (0 recipients), because of the 3 recipient(s) Phishy knows about, 1 reported it themselves, 1 did not get a copy in their mailbox, 1 is not on a safe domain.'
+    );
+
+    const blocked = setup();
+    await blocked.service.handleCampaignReport(
+      reportInput({
+        blastRadius: blast([{ address: 'failed@example.com', mailbox: 'not_delivered' }]),
+      })
+    );
+    expect(blocked.sent[0].text).toContain(
+      'because no copy was delivered to a mailbox (blocked, quarantined or not found).'
+    );
+  });
+
+  it('sent automatically: says it is going out now, then that it went', async () => {
+    const { service, sent, advance } = setup({ employeeWarning: 'auto' });
+    const reach = (): BlastRadiusReport => blast([1, 2, 3].map(n => noIds(recipient(n))));
+    await service.handleCampaignReport(reportInput({ blastRadius: reach() }));
+    expect(sent[0].text).toContain(
+      'The warning is set to send automatically and is being sent now to 3 people.'
+    );
+    advance(31 * 60_000);
+    await service.handleCampaignReport(laterReport(reach()));
+    const update = sent[sent.length - 1];
+    expect(update.text).toContain(
+      `The warning was already sent automatically at ${WHEN} to 3 people.`
+    );
+  });
+
+  it('the distribution list: names it as what the warning reached', async () => {
+    const { service, sent, advance } = setup(
+      { audience: 'distribution' },
+      { distributionList: LIST }
+    );
+    const reach = (): BlastRadiusReport => blast([noIds(recipient(1))]);
+    await service.handleCampaignReport(reportInput({ blastRadius: reach() }));
+    advance(31 * 60_000);
+    await service.handleCampaignReport(laterReport(reach()));
+    const update = sent[sent.length - 1];
+    expect(update.text).toContain(
+      `The warning was already sent automatically at ${WHEN} to the distribution list.`
+    );
+    expect(update.text).toContain(`Warned the distribution list (sent automatically at ${WHEN}).`);
+  });
+
+  it('warnings turned off: says so', async () => {
+    const { service, sent } = setup({ audience: 'recipients', employeeWarning: 'off' });
+    await service.handleCampaignReport(
+      reportInput({ blastRadius: blast([1, 2].map(n => noIds(recipient(n)))) })
+    );
+    expect(sent[0].text).toContain(
+      'No warning can be proposed: warnings are turned off in the configuration.'
+    );
+  });
+
+  it('approvals off: says approvals cannot be received, and why nothing is proposed', async () => {
+    const { service, sent } = setup({}, { commandsEnabled: false });
+    await service.handleCampaignReport(reportInput({ blastRadius: onlyReporters() }));
+    expect(sent[0].text).toContain('For information: approvals are off.');
+    expect(sent[0].text).toContain(
+      'Phishy cannot receive approvals: the email command channel is off (PHISHY_EMAIL_COMMANDS_ENABLED).'
+    );
+    expect(sent[0].text).toContain('No warning can be proposed: there is nobody to warn');
   });
 });
 
