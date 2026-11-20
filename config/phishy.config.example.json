@@ -105,5 +105,17 @@
   "reportButton": {
     "enabled": false
   },
+  "attachments": {
+    "analysis": {
+      "enabled": false,
+      "timeBudgetMs": 10000,
+      "maxAttachmentBytes": 26214400,
+      "maxUncompressedBytes": 67108864,
+      "maxArchiveEntries": 200,
+      "maxDepth": 3,
+      "maxTextPerAttachment": 8000,
+      "maxTextTotal": 24000
+    }
+  },
   "logLevel": "info"
 }

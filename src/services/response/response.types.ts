@@ -185,7 +185,8 @@ export interface IncidentSummary {
   riskScore: number;
   riskLevel: string;
   confidence?: string;
-  confidenceBasis?: 'model' | 'security_team' | 'threat_intel' | 'unassessed';
+  confidenceBasis?:
+    'model' | 'security_team' | 'threat_intel' | 'attachment_inspection' | 'unassessed';
   /** The main reasons (model indicators and intelligence reasons), at most 5 */
   reasons: string[];
   /** The model's one-paragraph summary of the lure */

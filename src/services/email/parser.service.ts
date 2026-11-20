@@ -28,6 +28,11 @@ import { S3Service } from '../storage/s3.service';
 import { buildLinkFacts, canonicalizeText, findAnchorMismatches } from '../../utils/canonicalize';
 import { claimedSenderDomain } from '../../utils/addressing';
 import { detectUserReport } from './user.report';
+import {
+  AttachmentAnalysisSettings,
+  AttachmentAnalyzer,
+  AttachmentWithContent,
+} from '../attachments';
 
 const logger = createLogger('email-parser');
 
@@ -62,7 +67,9 @@ const ExternalEmailEventSchema = z.object({
 
 /**
  * Reduce a parsed attachment to safe metadata: name, type, size, and SHA-256.
- * Content is never carried forward, executed, or shown to the model.
+ * Content is never carried forward or executed. With attachment analysis on,
+ * the bytes are inspected statically (services/attachments) before they are
+ * dropped, and only the inspection's facts and bounded text are kept.
  */
 function toAttachmentMeta(attachment: Attachment): EmailAttachment {
   return {
@@ -99,6 +106,12 @@ export interface EmailParserOptions {
    * default: without it a button report is parsed like any other forward.
    */
   detectUserReports?: boolean;
+  /**
+   * Static attachment analysis (services/attachments). Off unless settings
+   * with `enabled: true` are given: without it attachments are reduced to
+   * name, type, size and hash exactly as before.
+   */
+  attachmentAnalysis?: AttachmentAnalysisSettings;
 }
 
 export class EmailParserService {
@@ -106,6 +119,7 @@ export class EmailParserService {
   private safeDomains: string[];
   private defaultBucket: string;
   private detectUserReports: boolean;
+  private attachmentAnalyzer?: AttachmentAnalyzer;
 
   constructor(
     s3Service: S3Service,
@@ -117,6 +131,9 @@ export class EmailParserService {
     this.safeDomains = safeDomains.map(d => d.toLowerCase());
     this.defaultBucket = defaultBucket;
     this.detectUserReports = options.detectUserReports ?? false;
+    if (options.attachmentAnalysis?.enabled) {
+      this.attachmentAnalyzer = new AttachmentAnalyzer(options.attachmentAnalysis);
+    }
   }
 
   /**
@@ -409,6 +426,8 @@ export class EmailParserService {
       result.html = typeof parsed.html === 'string' ? parsed.html : null;
     }
 
+    // Attachment bytes kept only until the optional static analysis below has run
+    const toAnalyze: AttachmentWithContent[] = [];
     for (const attachment of parsed.attachments.slice(0, MAX_ATTACHMENTS)) {
       // Forward-as-attachment: parse the embedded original email
       if (attachment.contentType === 'message/rfc822') {
@@ -418,11 +437,17 @@ export class EmailParserService {
           if (!result.html && embedded.html) {
             result.html = embedded.html;
           }
-          result.attachments.push(...embedded.attachments);
+          result.attachments.push(...embedded.attachments.map(a => a.attachment));
+          toAnalyze.push(...embedded.attachments);
           continue;
         }
       }
-      result.attachments.push(toAttachmentMeta(attachment));
+      const meta = toAttachmentMeta(attachment);
+      result.attachments.push(meta);
+      toAnalyze.push({ attachment: meta, content: attachment.content });
+    }
+    if (this.attachmentAnalyzer) {
+      await this.attachmentAnalyzer.analyze(toAnalyze);
     }
 
     if (parsed.attachments.length > MAX_ATTACHMENTS) {
@@ -448,7 +473,7 @@ export class EmailParserService {
   private async parseEmbeddedMessage(attachment: Attachment): Promise<{
     forwardBlock: string;
     html: string | null;
-    attachments: EmailAttachment[];
+    attachments: AttachmentWithContent[];
   } | null> {
     try {
       const inner = await simpleParser(attachment.content);
@@ -479,7 +504,7 @@ export class EmailParserService {
 
       const innerAttachments = inner.attachments
         .slice(0, MAX_ATTACHMENTS)
-        .map(a => toAttachmentMeta(a));
+        .map(a => ({ attachment: toAttachmentMeta(a), content: a.content }));
 
       logger.info('Parsed message/rfc822 attachment (forward-as-attachment)', {
         innerSubject: contentFacts(inner.subject),

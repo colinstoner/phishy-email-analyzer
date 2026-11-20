@@ -29,7 +29,12 @@
  */
 
 /** Names of the nonce-fenced blocks the prompt builder emits */
-export const FENCE_NAMES = ['claimed-fields', 'original-headers', 'email-content'] as const;
+export const FENCE_NAMES = [
+  'claimed-fields',
+  'original-headers',
+  'attachment-content',
+  'email-content',
+] as const;
 
 export interface PromptFact {
   /** Single-line, marker-free, bounded text, safe to place outside a fence */

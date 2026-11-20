@@ -217,6 +217,25 @@ With the flag off (the default), a button report that reaches Phishy is treated 
 |----------|---------|-------------|
 | `PHISHY_REPORT_BUTTON_ENABLED` | `false` | Handle Outlook Report-button submissions silently |
 
+### Attachment Analysis (Optional)
+
+With this on, Phishy inspects attachment bytes itself, in the Lambda, before analysis: it identifies each file's real type, reports what the format can do (forms posting passwords, macros, remote templates, PDF actions and links, executables inside archives, and so on) as facts, and gives the model the text it extracted, fenced as hostile data. Nothing is executed, rendered or fetched, and no network access or new permission is needed. Two findings — an HTML attachment with a password form that posts to a web host, and an executable disguised as a document — raise risk on their own; nothing an inspection finds ever lowers it. Details and the formats covered: [ARCHITECTURE.md](ARCHITECTURE.md#attachment-analysis-optional).
+
+Off by default; with it off attachments are reduced to name, type, size and hash exactly as before. Extracted text adds to the prompt (at the defaults at most about 24,000 characters, roughly 6,000 input tokens, for an email with text-bearing attachments). The step's time comes out of the Lambda's 180 s; its default 10 s budget is small next to the model call.
+
+| Variable | Config key | Default | Description |
+|----------|------------|---------|-------------|
+| `PHISHY_ATTACHMENT_ANALYSIS_ENABLED` | `attachments.analysis.enabled` | `false` | Turn static attachment analysis on |
+| `PHISHY_ATTACHMENT_ANALYSIS_TIME_BUDGET_MS` | `attachments.analysis.timeBudgetMs` | `10000` | Wall-clock budget for all attachments of one email (500–60000); each attachment gets a fair share, at least 500 ms |
+| `PHISHY_ATTACHMENT_ANALYSIS_MAX_BYTES` | `attachments.analysis.maxAttachmentBytes` | `26214400` (25 MiB) | Larger attachments are identified but not inspected |
+| `PHISHY_ATTACHMENT_ANALYSIS_MAX_UNCOMPRESSED_BYTES` | `attachments.analysis.maxUncompressedBytes` | `67108864` (64 MiB) | Decompression budget for one email (archive entries, Office parts, PDF streams); the zip-bomb limit together with a 16 MiB per-entry bound |
+| `PHISHY_ATTACHMENT_ANALYSIS_MAX_ARCHIVE_ENTRIES` | `attachments.analysis.maxArchiveEntries` | `200` | Entries listed and examined per archive |
+| `PHISHY_ATTACHMENT_ANALYSIS_MAX_DEPTH` | `attachments.analysis.maxDepth` | `3` | How deep archives and attached emails are followed (0–5) |
+| `PHISHY_ATTACHMENT_ANALYSIS_MAX_TEXT_PER_ATTACHMENT` | `attachments.analysis.maxTextPerAttachment` | `8000` | Characters of extracted text shown to the model per file (head and tail kept) |
+| `PHISHY_ATTACHMENT_ANALYSIS_MAX_TEXT_TOTAL` | `attachments.analysis.maxTextTotal` | `24000` | Characters of extracted text for all attachments of one email, shared equally |
+
+Every limit that stops an inspection is disclosed to the model, and the step logs counts and status words only (`Attachment analysis complete`).
+
 ### Microsoft Graph (Optional)
 
 Phishy can authenticate to Microsoft Graph on your own Microsoft 365 tenant. `PHISHY_GRAPH_ENABLED` is a **foundation**: on its own it does not change how emails are analyzed. Each feature that uses Graph has its own flag — today the [original-message lookup](#original-message-lookup), the [sender-relationship check](#sender-relationship-check-optional) and [blast radius](#blast-radius-optional) (checking who else received a malicious email) — so that features share one safe, already-reviewed way to reach the tenant. Leave it off unless you are enabling one of them. See [ARCHITECTURE.md](ARCHITECTURE.md#microsoft-graph-optional-foundation) for the trust rules.

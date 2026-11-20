@@ -93,6 +93,16 @@ const ENV_MAPPINGS: Record<string, string> = {
   PHISHY_AGENTIC_ENABLED: 'agentic.enabled',
   PHISHY_AGENTIC_MAX_TOOL_ROUNDS: 'agentic.maxToolRounds',
 
+  // Static attachment analysis
+  PHISHY_ATTACHMENT_ANALYSIS_ENABLED: 'attachments.analysis.enabled',
+  PHISHY_ATTACHMENT_ANALYSIS_TIME_BUDGET_MS: 'attachments.analysis.timeBudgetMs',
+  PHISHY_ATTACHMENT_ANALYSIS_MAX_BYTES: 'attachments.analysis.maxAttachmentBytes',
+  PHISHY_ATTACHMENT_ANALYSIS_MAX_UNCOMPRESSED_BYTES: 'attachments.analysis.maxUncompressedBytes',
+  PHISHY_ATTACHMENT_ANALYSIS_MAX_ARCHIVE_ENTRIES: 'attachments.analysis.maxArchiveEntries',
+  PHISHY_ATTACHMENT_ANALYSIS_MAX_DEPTH: 'attachments.analysis.maxDepth',
+  PHISHY_ATTACHMENT_ANALYSIS_MAX_TEXT_PER_ATTACHMENT: 'attachments.analysis.maxTextPerAttachment',
+  PHISHY_ATTACHMENT_ANALYSIS_MAX_TEXT_TOTAL: 'attachments.analysis.maxTextTotal',
+
   // Microsoft Graph (optional; certificate is a Secrets Manager ARN or inline PEM)
   PHISHY_GRAPH_ENABLED: 'graph.enabled',
   PHISHY_GRAPH_MODE: 'graph.mode',

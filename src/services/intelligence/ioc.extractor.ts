@@ -13,6 +13,7 @@ import { ExtractedEmailData, AnalysisResult, AINominatedIOC } from '../../types'
 import { ThreatIndicatorRecord } from './database.service';
 import { createLogger } from '../../utils/logger';
 import { extractUrls, extractDomain } from '../../utils/validation';
+import { attachmentLinkFacts } from '../attachments';
 import { unwrapKnownWrappers } from '../../utils/canonicalize';
 
 const logger = createLogger('ioc-extractor');
@@ -83,6 +84,7 @@ export interface IOCSourceContext {
 const DOMAIN_CONTEXT_ROLES: Record<string, 'sender' | 'payload' | 'infrastructure'> = {
   sender_domain: 'sender',
   final_url_domain: 'payload',
+  attachment_url_domain: 'payload',
   redirect_intermediary: 'infrastructure',
 };
 
@@ -132,10 +134,28 @@ export function extractIOCs(
 
   // Resolve every URL's redirect chain once; URL and domain extraction share it
   const urlChains = opts.extractUrls || opts.extractDomains ? resolveUrlChains(allContent) : [];
+  // URLs Phishy found inside attachments (static analysis, when on), kept
+  // apart so their indicators record where they came from. The same storage
+  // rules apply: they are stored only from a model-malicious verdict.
+  const attachmentChains =
+    opts.extractUrls || opts.extractDomains
+      ? attachmentLinkFacts(emailData.attachments ?? []).map(link => ({
+          chain: unwrapRedirectChain(link.canonical),
+        }))
+      : [];
 
   if (opts.extractUrls) {
     indicators.push(
-      ...extractUrlIOCs(urlChains, baseConfidence, severity, now, baseMetadata, exclusions)
+      ...extractUrlIOCs(urlChains, baseConfidence, severity, now, baseMetadata, exclusions),
+      ...extractUrlIOCs(
+        attachmentChains,
+        baseConfidence,
+        severity,
+        now,
+        { ...baseMetadata, foundIn: 'attachment' },
+        exclusions,
+        'attachment'
+      )
     );
   }
 
@@ -148,7 +168,8 @@ export function extractIOCs(
         severity,
         now,
         baseMetadata,
-        exclusions
+        exclusions,
+        attachmentChains
       )
     );
   }
@@ -295,9 +316,14 @@ function extractUrlIOCs(
   severity: ThreatIndicatorRecord['severity'],
   now: Date,
   baseMetadata: Record<string, unknown>,
-  exclusions: Exclusions
+  exclusions: Exclusions,
+  origin: 'content' | 'attachment' = 'content'
 ): ThreatIndicatorRecord[] {
   const indicators: ThreatIndicatorRecord[] = [];
+  const contexts =
+    origin === 'attachment'
+      ? { url: 'url_in_attachment', final: 'final_url_in_attachment' }
+      : { url: 'url_in_content', final: 'final_url' };
 
   for (const { chain } of urlChains) {
     const original = chain[0];
@@ -321,7 +347,7 @@ function extractUrlIOCs(
         isActive: true,
         metadata: {
           ...baseMetadata,
-          extractionContext: 'url_in_content',
+          extractionContext: contexts.url,
           // A link that unwraps elsewhere is the hop (tracker, redirector),
           // not the destination
           role: chain.length > 1 ? 'infrastructure' : 'payload',
@@ -344,7 +370,7 @@ function extractUrlIOCs(
         isActive: true,
         metadata: {
           ...baseMetadata,
-          extractionContext: 'final_url',
+          extractionContext: contexts.final,
           role: 'payload',
           roleSource: 'extraction',
           unwrappedFrom: original,
@@ -369,7 +395,8 @@ function extractDomainIOCs(
   severity: ThreatIndicatorRecord['severity'],
   now: Date,
   baseMetadata: Record<string, unknown>,
-  exclusions: Exclusions
+  exclusions: Exclusions,
+  attachmentChains: UrlChain[] = []
 ): ThreatIndicatorRecord[] {
   // domain -> {context, severity, confidence}; first writer wins except that
   // higher-value contexts (sender, final URL) overwrite intermediaries
@@ -416,6 +443,19 @@ function extractDomainIOCs(
     }
   }
 
+  // Destinations of links inside attachments: payload, recorded as such
+  for (const { chain } of attachmentChains) {
+    assign(hostnameOf(chain[chain.length - 1]), 'attachment_url_domain', severity, baseConfidence);
+    for (const intermediate of chain.slice(0, -1)) {
+      assign(
+        hostnameOf(intermediate),
+        'redirect_intermediary',
+        'low',
+        Math.max(baseConfidence - 0.2, 0.3)
+      );
+    }
+  }
+
   const indicators: ThreatIndicatorRecord[] = [];
   for (const [domain, role] of domainRoles) {
     let confidence = role.confidence;
@@ -436,6 +476,7 @@ function extractDomainIOCs(
       metadata: {
         ...baseMetadata,
         extractionContext: role.context,
+        ...(role.context === 'attachment_url_domain' ? { foundIn: 'attachment' } : {}),
         role: DOMAIN_CONTEXT_ROLES[role.context] ?? 'infrastructure',
         roleSource: 'extraction',
       },

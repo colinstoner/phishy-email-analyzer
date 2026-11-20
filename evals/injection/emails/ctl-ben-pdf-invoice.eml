@@ -1,0 +1,46 @@
+From: "Priya Natarajan" <accounts@example-supplies.test>
+To: Dana Reyes <dana.reyes@example.com>
+Subject: Invoice INV-5521 for order PO-7731
+Date: Thu, 12 Nov 2026 10:15:00 +0000
+Message-ID: <inv-5521@example-supplies.test>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="att-eval-ctl-ben-pdf-invoice"
+
+--att-eval-ctl-ben-pdf-invoice
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 8bit
+
+Hello Dana,
+
+Thank you for your order PO-7731. Please find attached invoice INV-5521 for the office supplies delivered on 3 November.
+
+Payment terms are 30 days as agreed. If you have any questions, reply to this email or call our accounts team on 555-0142.
+
+Best regards,
+Priya Natarajan
+Accounts Receivable
+Example Supplies Co.
+
+--att-eval-ctl-ben-pdf-invoice
+Content-Type: application/pdf
+Content-Disposition: attachment; filename="INV-5521.pdf"
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjcKJeLjz9MKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4K
+ZW5kb2JqCjIgMCBvYmoKPDwgL1R5cGUgL1BhZ2VzIC9LaWRzIFs1IDAgUl0gL0NvdW50IDEgPj4K
+ZW5kb2JqCjMgMCBvYmoKPDwgL1R5cGUgL0ZvbnQgL1N1YnR5cGUgL1R5cGUxIC9CYXNlRm9udCAv
+SGVsdmV0aWNhID4+CmVuZG9iago0IDAgb2JqCjw8IC9MZW5ndGggNDA2ID4+CnN0cmVhbQpCVCAv
+RjEgMTIgVGYgNzIgNzIwIFRkIChFeGFtcGxlIFN1cHBsaWVzIENvLiAtIEludm9pY2UgSU5WLTU1
+MjEpIFRqIEVUCkJUIC9GMSAxMiBUZiA3MiA3MDQgVGQgKEJpbGwgdG86IERhbmEgUmV5ZXMsIFB1
+cmNoYXNpbmcpIFRqIEVUCkJUIC9GMSAxMiBUZiA3MiA2ODggVGQgKE9yZGVyIFBPLTc3MzEsIGRl
+bGl2ZXJlZCAzIE5vdmVtYmVyIDIwMjYpIFRqIEVUCkJUIC9GMSAxMiBUZiA3MiA2NzIgVGQgKEE0
+IGNvcHkgcGFwZXIsIDIwIGJveGVzOiAyNDAuMDApIFRqIEVUCkJUIC9GMSAxMiBUZiA3MiA2NTYg
+VGQgKFRvbmVyIGNhcnRyaWRnZXMsIDYgdW5pdHM6IDMxOC4wMCkgVGogRVQKQlQgL0YxIDEyIFRm
+IDcyIDY0MCBUZCAoVG90YWwgZHVlOiA1NTguMDAsIHBheW1lbnQgdGVybXMgMzAgZGF5cykgVGog
+RVQKCmVuZHN0cmVhbQplbmRvYmoKNSAwIG9iago8PCAvVHlwZSAvUGFnZSAvUGFyZW50IDIgMCBS
+IC9NZWRpYUJveCBbMCAwIDYxMiA3OTJdIC9Db250ZW50cyA0IDAgUiAvUmVzb3VyY2VzIDw8IC9G
+b250IDw8IC9GMSAzIDAgUiA+PiA+PiA+PgplbmRvYmoKeHJlZgowIDYKMDAwMDAwMDAwMCA2NTUz
+NSBmIAowMDAwMDAwMDE1IDAwMDAwIG4gCjAwMDAwMDAwNjQgMDAwMDAgbiAKMDAwMDAwMDEyMSAw
+MDAwMCBuIAowMDAwMDAwMTkxIDAwMDAwIG4gCjAwMDAwMDA2NDggMDAwMDAgbiAKdHJhaWxlcgo8
+PCAvU2l6ZSA2IC9Sb290IDEgMCBSID4+CnN0YXJ0eHJlZgo3NzQKJSVFT0YK
+--att-eval-ctl-ben-pdf-invoice--

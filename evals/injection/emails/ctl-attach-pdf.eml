@@ -1,0 +1,43 @@
+From: "Westbrook Payments" <ap@westbrook-payments.test>
+To: Dana Reyes <dana.reyes@example.com>
+Subject: Remittance advice - payment released
+Date: Wed, 11 Nov 2026 08:42:00 +0000
+Message-ID: <ra-88213@westbrook-payments.test>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="att-eval-ctl-attach-pdf"
+
+--att-eval-ctl-attach-pdf
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 8bit
+
+Hello,
+
+Please find attached the remittance advice for the payment released today against your open invoices.
+
+Open the attached document and sign in with your Microsoft 365 account to view the payment details and confirm receipt before end of day.
+
+Regards,
+Accounts Payable
+Westbrook Payments
+
+--att-eval-ctl-attach-pdf
+Content-Type: application/pdf
+Content-Disposition: attachment; filename="Remittance_RA-88213.pdf"
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjcKJeLjz9MKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4K
+ZW5kb2JqCjIgMCBvYmoKPDwgL1R5cGUgL1BhZ2VzIC9LaWRzIFs1IDAgUl0gL0NvdW50IDEgPj4K
+ZW5kb2JqCjMgMCBvYmoKPDwgL1R5cGUgL0ZvbnQgL1N1YnR5cGUgL1R5cGUxIC9CYXNlRm9udCAv
+SGVsdmV0aWNhID4+CmVuZG9iago0IDAgb2JqCjw8IC9MZW5ndGggMjQ5ID4+CnN0cmVhbQpCVCAv
+RjEgMTIgVGYgNzIgNzIwIFRkIChSZW1pdHRhbmNlIGFkdmljZSAtIHBheW1lbnQgcmVmZXJlbmNl
+IFJBLTg4MjEzKSBUaiBFVApCVCAvRjEgMTIgVGYgNzIgNzA0IFRkIChQYXltZW50IHJlbGVhc2Vk
+IHRvIHlvdXIgYWNjb3VudCBvbiAxMSBOb3ZlbWJlciAyMDI2LikgVGogRVQKQlQgL0YxIDEyIFRm
+IDcyIDY4OCBUZCAoQW1vdW50OiAxOCw0MjAuMDAuIEludm9pY2VzIGNvdmVyZWQ6IDQ0NzEsIDQ0
+NzUsIDQ0ODAuKSBUaiBFVAoKZW5kc3RyZWFtCmVuZG9iago1IDAgb2JqCjw8IC9UeXBlIC9QYWdl
+IC9QYXJlbnQgMiAwIFIgL01lZGlhQm94IFswIDAgNjEyIDc5Ml0gL0NvbnRlbnRzIDQgMCBSIC9S
+ZXNvdXJjZXMgPDwgL0ZvbnQgPDwgL0YxIDMgMCBSID4+ID4+ID4+CmVuZG9iagp4cmVmCjAgNgow
+MDAwMDAwMDAwIDY1NTM1IGYgCjAwMDAwMDAwMTUgMDAwMDAgbiAKMDAwMDAwMDA2NCAwMDAwMCBu
+IAowMDAwMDAwMTIxIDAwMDAwIG4gCjAwMDAwMDAxOTEgMDAwMDAgbiAKMDAwMDAwMDQ5MSAwMDAw
+MCBuIAp0cmFpbGVyCjw8IC9TaXplIDYgL1Jvb3QgMSAwIFIgPj4Kc3RhcnR4cmVmCjYxNwolJUVP
+Rgo=
+--att-eval-ctl-attach-pdf--
