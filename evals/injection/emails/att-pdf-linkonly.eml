@@ -1,0 +1,46 @@
+From: "Westbrook Payments" <ap@westbrook-payments.test>
+To: Dana Reyes <dana.reyes@example.com>
+Subject: Remittance advice - payment released
+Date: Wed, 11 Nov 2026 08:42:00 +0000
+Message-ID: <ra-88213-link@westbrook-payments.test>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="att-eval-att-pdf-linkonly"
+
+--att-eval-att-pdf-linkonly
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 8bit
+
+Hello,
+
+Please find attached the remittance advice for the payment released today against your open invoices.
+
+Open the attached document and sign in with your Microsoft 365 account to view the payment details and confirm receipt before end of day.
+
+Regards,
+Accounts Payable
+Westbrook Payments
+
+--att-eval-att-pdf-linkonly
+Content-Type: application/pdf
+Content-Disposition: attachment; filename="Remittance_RA-88213.pdf"
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjcKJeLjz9MKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4K
+ZW5kb2JqCjIgMCBvYmoKPDwgL1R5cGUgL1BhZ2VzIC9LaWRzIFs3IDAgUl0gL0NvdW50IDEgPj4K
+ZW5kb2JqCjMgMCBvYmoKPDwgL1R5cGUgL0ZvbnQgL1N1YnR5cGUgL1R5cGUxIC9CYXNlRm9udCAv
+SGVsdmV0aWNhID4+CmVuZG9iago0IDAgb2JqCjw8IC9UeXBlIC9YT2JqZWN0IC9TdWJ0eXBlIC9J
+bWFnZSAvV2lkdGggMSAvSGVpZ2h0IDEgL0NvbG9yU3BhY2UgL0RldmljZUdyYXkgL0JpdHNQZXJD
+b21wb25lbnQgOCAvTGVuZ3RoIDEgPj4Kc3RyZWFtCgAKZW5kc3RyZWFtCmVuZG9iago1IDAgb2Jq
+Cjw8IC9UeXBlIC9Bbm5vdCAvU3VidHlwZSAvTGluayAvUmVjdCBbNzIgNjAwIDU0MCA3MDBdIC9B
+IDw8IC9TIC9VUkkgL1VSSSAoaHR0cHM6Ly9kb2NzLXJldmlldy53ZXN0YnJvb2stcGF5LnRlc3Qv
+dmlldz9yZWY9UkEtODgyMTMpID4+ID4+CmVuZG9iago2IDAgb2JqCjw8IC9MZW5ndGggNzkgPj4K
+c3RyZWFtCkJUIC9GMSAxMiBUZiA3MiA3MjAgVGQgKFZpZXcgcmVtaXR0YW5jZSkgVGogRVQKcSAx
+MDAgMCAwIDEwMCA3MiA3MiBjbSAvSW0wIERvIFEKZW5kc3RyZWFtCmVuZG9iago3IDAgb2JqCjw8
+IC9UeXBlIC9QYWdlIC9QYXJlbnQgMiAwIFIgL01lZGlhQm94IFswIDAgNjEyIDc5Ml0gL0NvbnRl
+bnRzIDYgMCBSIC9SZXNvdXJjZXMgPDwgL0ZvbnQgPDwgL0YxIDMgMCBSID4+IC9YT2JqZWN0IDw8
+IC9JbTAgNCAwIFIgPj4gPj4gL0Fubm90cyBbNSAwIFJdID4+CmVuZG9iagp4cmVmCjAgOAowMDAw
+MDAwMDAwIDY1NTM1IGYgCjAwMDAwMDAwMTUgMDAwMDAgbiAKMDAwMDAwMDA2NCAwMDAwMCBuIAow
+MDAwMDAwMTIxIDAwMDAwIG4gCjAwMDAwMDAxOTEgMDAwMDAgbiAKMDAwMDAwMDMzNSAwMDAwMCBu
+IAowMDAwMDAwNDg4IDAwMDAwIG4gCjAwMDAwMDA2MTcgMDAwMDAgbiAKdHJhaWxlcgo8PCAvU2l6
+ZSA4IC9Sb290IDEgMCBSID4+CnN0YXJ0eHJlZgo3ODUKJSVFT0YK
+--att-eval-att-pdf-linkonly--

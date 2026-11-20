@@ -18,6 +18,7 @@ import { FENCE_NAMES } from '../../utils/prompt-fact';
 import { EnterpriseProfile, validateProfile } from '../../models/profile.model';
 import type { S3Service } from '../../services/storage/s3.service';
 import { ExtractedEmailData } from '../../types';
+import { DEFAULT_ATTACHMENT_ANALYSIS_SETTINGS } from '../../services/attachments/types';
 import { CaseSet, EvalCase } from './cases';
 import { buildForward, buildSesRecord } from './forward';
 
@@ -38,13 +39,19 @@ export interface PreparedCase {
   problems: string[];
 }
 
-/** The real parser, with S3 unreachable: eval forwards always arrive inline */
+/**
+ * The real parser, with S3 unreachable (eval forwards always arrive inline)
+ * and static attachment analysis on at its default limits: attachment text
+ * is an injection surface the eval measures.
+ */
 export function createEvalParser(reporterAddress: string): EmailParserService {
   const s3Stub = {
     getObject: () => Promise.reject(new Error('S3 is not used by the injection eval')),
   } as unknown as S3Service;
   const domain = reporterAddress.split('@')[1] ?? 'example.com';
-  return new EmailParserService(s3Stub, [domain], 'injection-eval');
+  return new EmailParserService(s3Stub, [domain], 'injection-eval', {
+    attachmentAnalysis: { ...DEFAULT_ATTACHMENT_ANALYSIS_SETTINGS, enabled: true },
+  });
 }
 
 /** Load the invented organization profile that ships with the case set */
@@ -68,7 +75,7 @@ function collapseWhitespace(text: string): string {
 
 /**
  * Split a prompt at its real nonce fences (`claimed-fields`, `email-content`
- * and, when present, `original-headers`). Returns undefined when the
+ * and, when present, `original-headers` and `attachment-content`). Returns undefined when the
  * `email-content` fence is not there exactly once, or another fence is
  * duplicated, unclosed or overlapping — which would mean an email forged or
  * broke one. `inside` is the content of every fence, `outside` everything

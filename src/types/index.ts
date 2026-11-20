@@ -2,6 +2,8 @@
  * Core type definitions for Phishy Email Analyzer
  */
 
+import type { AttachmentInspection } from '../services/attachments/types';
+
 /**
  * Email message structure as received from various sources
  */
@@ -65,6 +67,12 @@ export interface EmailAttachment {
   /** SHA-256 of the attachment body — metadata for analysis; content is never executed or forwarded */
   sha256?: string;
   content?: string | Buffer;
+  /**
+   * Phishy's static inspection of the bytes (optional feature,
+   * `attachments.analysis.enabled`). Set by the parser on SES-delivered
+   * mail only; the external payload schema carries no attachments.
+   */
+  analysis?: AttachmentInspection;
 }
 
 /**

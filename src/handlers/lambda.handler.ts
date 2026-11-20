@@ -51,6 +51,7 @@ import { extractIOCs, IOCSourceContext } from '../services/intelligence/ioc.extr
 import { ThreatIndicatorRecord, FeedbackRecord } from '../services/intelligence/database.service';
 import type { BlastRadiusReport } from '../services/graph/blast-radius.service';
 import { GraphGateway, createGraphGateway } from '../services/graph/graph.gateway';
+import { attachmentRiskSignals } from '../services/attachments/risk';
 
 const logger = createLogger('lambda-handler');
 
@@ -190,7 +191,10 @@ async function initializeServices(): Promise<{
     s3Service,
     config.email.safeDomains,
     config.storage.s3Bucket,
-    { detectUserReports: !!config.reportButton?.enabled }
+    {
+      detectUserReports: !!config.reportButton?.enabled,
+      attachmentAnalysis: config.attachments?.analysis,
+    }
   );
 
   // Create AI provider(s)
@@ -594,6 +598,8 @@ async function processEmailEvent(
   const riskDecision = fuseRisk(analysis, {
     ...fusionSignals,
     senderHistory: emailData.senderHistory,
+    // Decisive static-inspection findings; empty unless attachment analysis is on
+    attachmentSignals: attachmentRiskSignals(emailData.attachments),
     // A security-team ruling on this campaign rides on the cache hit
     humanVerdict: securityVerdict,
   });

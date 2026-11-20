@@ -10,6 +10,7 @@ import type {
   BlastRadiusReport,
 } from '../services/graph/blast-radius.service';
 import { formatSenderHistoryLines } from '../utils/sender-history.format';
+import { summarizeInspectionForReport } from '../services/attachments/report';
 
 /** Maximum length for email body display */
 const MAX_BODY_LENGTH = 10000;
@@ -61,7 +62,8 @@ export interface ReportOptions {
     /** Confidence label for the outcome (the model's own certainty when it decided) */
     confidence?: string;
     /** What decided the outcome; drives the confidence line's wording */
-    confidenceBasis?: 'model' | 'security_team' | 'threat_intel' | 'unassessed';
+    confidenceBasis?:
+      'model' | 'security_team' | 'threat_intel' | 'attachment_inspection' | 'unassessed';
   };
   /**
    * Who reads this particular email, when it is not the usual combined one
@@ -100,6 +102,8 @@ function confidenceText(risk: NonNullable<ReportOptions['risk']>): string | unde
       return "Decided by your security team's review";
     case 'threat_intel':
       return 'Based on a known threat from earlier reports';
+    case 'attachment_inspection':
+      return "Based on Phishy's inspection of the attachment";
     case 'model':
       return risk.confidence && risk.confidence !== 'Unknown' && risk.confidence !== 'N/A'
         ? normalizeConfidence(risk.confidence)
@@ -1067,6 +1071,8 @@ function buildOriginalEmailTextSection(
     for (const attachment of emailData.attachments) {
       const size = formatFileSize(attachment.size);
       lines.push(`  - ${attachment.filename} (${attachment.contentType}, ${size})`);
+      const inspected = summarizeInspectionForReport(attachment.analysis);
+      if (inspected) lines.push(`    ${inspected}`);
     }
   }
   lines.push('');
@@ -1162,7 +1168,11 @@ function formatAttachmentsForDisplay(attachments: EmailAttachment[]): string {
   let html = '<ul>';
   for (const attachment of attachments) {
     const size = formatFileSize(attachment.size);
-    html += `<li>${escapeHtml(attachment.filename)} <span style="color: #6c757d;">(${escapeHtml(attachment.contentType)}, ${size})</span></li>`;
+    const inspected = summarizeInspectionForReport(attachment.analysis);
+    const inspectedHtml = inspected
+      ? `<br><span style="color: #6c757d; font-size: 0.9em;">${escapeHtml(inspected)}</span>`
+      : '';
+    html += `<li>${escapeHtml(attachment.filename)} <span style="color: #6c757d;">(${escapeHtml(attachment.contentType)}, ${size})</span>${inspectedHtml}</li>`;
   }
   html += '</ul>';
 

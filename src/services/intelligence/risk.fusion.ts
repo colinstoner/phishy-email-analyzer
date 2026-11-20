@@ -19,6 +19,7 @@ import {
 import { ThreatIndicatorRecord, CampaignRecord, FeedbackRecord } from './database.service';
 import { partitionMatches } from './indicator.policy';
 import { normalizeConfidence } from '../ai/provider.interface';
+import type { AttachmentRiskSignal } from '../attachments/risk';
 
 export type RiskLevel = 'critical' | 'high' | 'medium' | 'low' | 'safe';
 
@@ -42,6 +43,13 @@ export interface FusionSignals {
    * and are never read in a way that lowers a score or clears a verdict.
    */
   senderHistory?: SenderHistoryFacts;
+  /**
+   * Decisive findings of Phishy's static attachment inspection (see
+   * services/attachments/risk.ts). One-directional: each adds a reason and
+   * raises the floor; an inspected, inert attachment produces no signal and
+   * so can never lower anything.
+   */
+  attachmentSignals?: AttachmentRiskSignal[];
   /** Clock for indicator expiry (tests) */
   now?: Date;
 }
@@ -51,6 +59,22 @@ export interface FusionSignals {
  * contact suddenly mailing many people it never wrote to): 'medium'.
  */
 export const SENDER_FANOUT_RISK_FLOOR = 35;
+
+/**
+ * Risk floor for a decisive attachment finding (a password form that posts
+ * to a web host; an executable disguised as a document): 'high', above the
+ * phishing threshold, so a suspicious verdict at the floor is flagged.
+ */
+export const ATTACHMENT_RISK_FLOOR = 60;
+
+const ATTACHMENT_REASONS: Record<AttachmentRiskSignal, string> = {
+  credential_form:
+    'An attachment is a web page with a password field that sends what is typed into it to a web server. ' +
+    'Opened from an email, such a page exists to collect your password.',
+  disguised_executable:
+    'An attachment is a program or script whose name is made to look like a document or picture. ' +
+    'Opening it would run it.',
+};
 
 /**
  * Highest score weak indicator matches can lift an email to: 'medium', below
@@ -96,9 +120,12 @@ const BENIGN_VERDICTS: readonly ThreatVerdict[] = ['legitimate', 'graymail', 'sp
  * - `security_team`: a security-team ruling decided the outcome
  * - `threat_intel`: a strong indicator match or an active campaign changed
  *   the outcome (verdict or phishing flag) the model reached
+ * - `attachment_inspection`: a decisive finding of Phishy's own attachment
+ *   inspection changed the outcome the model reached
  * - `unassessed`: the model never produced a verdict
  */
-export type ConfidenceBasis = 'model' | 'security_team' | 'threat_intel' | 'unassessed';
+export type ConfidenceBasis =
+  'model' | 'security_team' | 'threat_intel' | 'attachment_inspection' | 'unassessed';
 
 export interface RiskDecision {
   verdict: ThreatVerdict;
@@ -304,6 +331,31 @@ export function fuseRisk(result: AnalysisResult, signals: FusionSignals = {}): R
     }
   }
 
+  // 6b. Attachment inspection. Only findings with no innocent explanation
+  //     are signals, and they only raise: a reason, a floor, and a benign
+  //     label becomes 'suspicious' so the banner cannot contradict the
+  //     reason. Like sender history it runs after the allowlist cap. There
+  //     is no signal for an inert attachment, so a clean inspection cannot
+  //     lower a score or clear a verdict.
+  let attachmentRaised = false;
+  let verdictChangedByAttachment = false;
+  const attachmentSignals = [...new Set(signals.attachmentSignals ?? [])];
+  if (attachmentSignals.length > 0) {
+    for (const signal of attachmentSignals) reasons.push(ATTACHMENT_REASONS[signal]);
+    if (score < ATTACHMENT_RISK_FLOOR) {
+      score = ATTACHMENT_RISK_FLOOR;
+      attachmentRaised = true;
+    }
+    if (isBenign(verdict)) {
+      reasons.push(
+        `On its content alone this looked like ${BENIGN_LABEL[verdict] ?? verdict}, but because of the ` +
+          'attachment above Phishy is treating it as suspicious.'
+      );
+      verdict = 'suspicious';
+      verdictChangedByAttachment = true;
+    }
+  }
+
   // 7. A failed analysis stays 'undetermined' unless hard intel above escalated
   //    it. Always disclose that the email could not be assessed so the report
   //    can't read as a clean bill of health.
@@ -344,6 +396,17 @@ export function fuseRisk(result: AnalysisResult, signals: FusionSignals = {}): R
   const modelFlagged = flagAsPhishing(baseVerdict, clampToBand(baseVerdict, initialScore));
   const intelDecided =
     intelRaised && (verdictChangedByIntel || unassessedEscalated || (isPhishing && !modelFlagged));
+  const attachmentDecided =
+    !intelDecided &&
+    (verdictChangedByAttachment ||
+      (attachmentRaised && (unassessedEscalated || (isPhishing && !modelFlagged))));
+  if (attachmentDecided) {
+    return decision(verdict, finalScore, reasons, {
+      isPhishing,
+      confidence: 'High',
+      confidenceBasis: 'attachment_inspection',
+    });
+  }
   if (intelDecided) {
     return decision(verdict, finalScore, reasons, {
       isPhishing,

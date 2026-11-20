@@ -9,6 +9,7 @@
 import { createHash } from 'crypto';
 import { readFile } from 'fs/promises';
 import { join } from 'path';
+import { simpleParser } from 'mailparser';
 import { z } from 'zod';
 
 export const ATTACK_CATEGORIES = [
@@ -24,6 +25,7 @@ export const ATTACK_CATEGORIES = [
   'output_manipulation',
   'multilingual',
   'tool_steering',
+  'attachment_payload',
 ] as const;
 export type AttackCategory = (typeof ATTACK_CATEGORIES)[number];
 
@@ -185,6 +187,25 @@ export function lintEmailInertness(raw: string): string[] {
   return [...problems];
 }
 
+/**
+ * Inertness check for the decoded attachments of one email. Stored zip
+ * entries and uncompressed PDF objects keep their text readable in the
+ * bytes, which is how the attachment cases are built.
+ */
+async function lintAttachments(raw: string): Promise<string[]> {
+  const parsed = await simpleParser(raw);
+  return parsed.attachments.flatMap(a =>
+    lintEmailInertness(a.content.toString('latin1').replace(XML_NAMESPACE_URIS, ''))
+  );
+}
+
+/**
+ * XML namespace and relationship-type identifiers in Office files: fixed
+ * names written by the format, never fetched, so not links to lint.
+ */
+const XML_NAMESPACE_URIS =
+  /http:\/\/(?:schemas\.openxmlformats\.org|www\.w3\.org|schemas\.microsoft\.com)\/[^\s"'<>]*/g;
+
 function crossCheck(cases: EvalCase[]): string[] {
   const problems: string[] = [];
   const byId = new Map<string, EvalCase>();
@@ -278,6 +299,10 @@ export async function loadCaseSet(directory: string): Promise<CaseSet> {
     hash.update(c.id).update(raw);
     for (const problem of lintEmailInertness(raw)) {
       problems.push(`${c.id}: ${problem}`);
+    }
+    // Attachments are base64 in the raw file: lint their decoded bytes too
+    for (const problem of await lintAttachments(raw)) {
+      problems.push(`${c.id}: attachment ${problem}`);
     }
     for (const marker of c.criteria.markers) {
       for (const problem of lintEmailInertness(marker.value)) {

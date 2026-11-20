@@ -130,6 +130,44 @@ const ReportButtonConfigSchema = z.object({
 });
 
 /**
+ * Static attachment analysis: Phishy reads attachment bytes itself, in
+ * process, never executing, rendering or fetching anything, and gives the
+ * model computed facts plus bounded, fenced extracted text. Off by default;
+ * with it off attachments are reduced to name, type, size and hash as before.
+ */
+const AttachmentAnalysisConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  /** Wall-clock budget for every attachment of one email together */
+  timeBudgetMs: z.number().int().min(500).max(60000).default(10000),
+  /** Attachments larger than this are not inspected (identified only) */
+  maxAttachmentBytes: z
+    .number()
+    .int()
+    .min(1024)
+    .max(50 * 1024 * 1024)
+    .default(25 * 1024 * 1024),
+  /** Decompression budget for one email: archive entries, OOXML parts, PDF streams */
+  maxUncompressedBytes: z
+    .number()
+    .int()
+    .min(64 * 1024)
+    .max(512 * 1024 * 1024)
+    .default(64 * 1024 * 1024),
+  /** Archive entries listed and examined per archive */
+  maxArchiveEntries: z.number().int().min(1).max(5000).default(200),
+  /** How deep archives and attached emails are followed */
+  maxDepth: z.number().int().min(0).max(5).default(3),
+  /** Characters of extracted text shown to the model per attachment (head and tail kept) */
+  maxTextPerAttachment: z.number().int().min(0).max(50000).default(8000),
+  /** Characters of extracted text shown for all attachments of one email */
+  maxTextTotal: z.number().int().min(0).max(150000).default(24000),
+});
+
+const AttachmentsConfigSchema = z.object({
+  analysis: AttachmentAnalysisConfigSchema.optional(),
+});
+
+/**
  * Agentic analysis configuration schema
  * Runs analysis as a bounded tool-use loop: Claude may consult Phishy's own
  * threat intelligence (known indicators, campaign history, URL inspection,
@@ -356,6 +394,7 @@ export const PhishyConfigSchema = z.object({
   commands: CommandsConfigSchema.optional(),
   reportButton: ReportButtonConfigSchema.optional(),
   agentic: AgenticConfigSchema.optional(),
+  attachments: AttachmentsConfigSchema.optional(),
   graph: GraphConfigSchema.optional(),
   logLevel: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   version: z.string().optional(),
@@ -376,6 +415,7 @@ export type CampaignAlertConfig = z.infer<typeof CampaignAlertConfigSchema>;
 export type CampaignCacheConfig = z.infer<typeof CampaignCacheConfigSchema>;
 export type CommandsConfig = z.infer<typeof CommandsConfigSchema>;
 export type AgenticConfig = z.infer<typeof AgenticConfigSchema>;
+export type AttachmentAnalysisConfig = z.infer<typeof AttachmentAnalysisConfigSchema>;
 export type GraphConfig = z.infer<typeof GraphConfigSchema>;
 export type GraphBrokerConfig = z.infer<typeof GraphBrokerConfigSchema>;
 export type GraphCredentialConfig = z.infer<typeof GraphCredentialConfigSchema>;
