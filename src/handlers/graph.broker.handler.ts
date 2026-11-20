@@ -4,13 +4,13 @@
  *
  * The main function usually runs in a VPC with no internet route. This
  * function runs outside it, holds the read certificate, and does one thing:
- * run one of three typed, read-only lookups on request and return a typed
+ * run one of four typed, read-only operations on request and return a typed
  * result. It never receives, fetches or parses a raw email, and it has no
  * email, AI, database or notification configuration.
  *
  * Rules this file keeps:
  * - **A closed allow-list.** The request is validated against
- *   `GraphBrokerRequestSchema` before anything else. Three operations; no
+ *   `GraphBrokerRequestSchema` before anything else. Four operations; no
  *   path, URL, filter or passthrough. Everything else is refused.
  * - **Direct invocation only.** The handler takes the request object itself.
  *   An HTTP event (API Gateway, function URL, load balancer) or an
@@ -54,6 +54,7 @@ import {
   fetchOriginalMessage,
 } from '../services/graph/original.fetch';
 import { SenderHistoryService, createSenderHistoryService } from '../services/graph/sender.history';
+import { FanoutScanService, createFanoutScanService } from '../services/graph/fanout.scan';
 import { addAngleBrackets } from '../services/graph/trace.operations';
 import { createLogger } from '../utils/logger';
 
@@ -64,6 +65,7 @@ interface BrokerServices {
   originalFetchClient?: GraphClient;
   blastRadius?: BlastRadiusService;
   senderHistory?: SenderHistoryService;
+  fanoutScan?: FanoutScanService;
 }
 
 /** Built once per instance; a failed load is retried on the next invocation */
@@ -99,6 +101,9 @@ async function initialize(): Promise<BrokerServices> {
       graph,
       email: { safeDomains: [], safeSenders: [], deleteAfterProcessing: false },
     });
+    // The scheduled fan-out scan: its own client, its own request allowance
+    // (separate from sender history's, so a scan never starves a report)
+    services.fanoutScan = createFanoutScanService(graph);
   }
 
   logger.info('Graph broker initialized', {
@@ -106,6 +111,7 @@ async function initialize(): Promise<BrokerServices> {
     originalFetch: !!services.originalFetchClient,
     blastRadius: !!services.blastRadius,
     senderHistory: !!services.senderHistory,
+    fanoutScan: !!services.fanoutScan,
   });
   cachedServices = services;
   return services;
@@ -210,6 +216,36 @@ async function senderHistoryLookup(
   };
 }
 
+async function fanoutScan(
+  services: BrokerServices,
+  params: GraphBrokerParams<'fanout_scan'>
+): Promise<{ response: GraphBrokerResponse; summary: Record<string, unknown> }> {
+  if (!services.fanoutScan) {
+    return { response: refuse('feature_disabled'), summary: {} };
+  }
+  const result = await services.fanoutScan.scan({
+    receivedFrom: new Date(params.receivedFrom),
+    receivedTo: new Date(params.receivedTo),
+    internalDomains: params.internalDomains.map(domain => domain.toLowerCase()),
+    maxPages: params.maxPages,
+    maxCandidates: params.maxCandidates,
+    maxRequests: params.maxRequests,
+    budgetMs: params.budgetMs,
+  });
+  return {
+    response: { ok: true, result },
+    summary: {
+      outcome: result.outcome,
+      rowsScanned: result.rowsScanned,
+      pages: result.pages,
+      candidates: result.candidates,
+      flagged: result.flagged.length,
+      requestsUsed: result.requestsUsed,
+      incomplete: result.incomplete,
+    },
+  };
+}
+
 /**
  * Lambda entry point. `event` is whatever the caller sent: it is validated,
  * never assumed. Always resolves with a `GraphBrokerResponse`.
@@ -253,7 +289,9 @@ export async function handler(
                   request.data.params,
                   context?.getRemainingTimeInMillis?.()
                 )
-              : await senderHistoryLookup(services, request.data.params);
+              : request.data.operation === 'sender_history_lookup'
+                ? await senderHistoryLookup(services, request.data.params)
+                : await fanoutScan(services, request.data.params);
         response = ran.response;
         summary = ran.summary;
       }

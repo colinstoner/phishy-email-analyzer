@@ -100,6 +100,16 @@ const ENV_MAPPINGS: Record<string, string> = {
   PHISHY_GRAPH_SENDER_HISTORY_FANOUT_MIN_RECIPIENTS: 'graph.senderHistory.fanoutMinRecipients',
   PHISHY_GRAPH_SENDER_HISTORY_FANOUT_MULTIPLIER: 'graph.senderHistory.fanoutMultiplier',
 
+  // Graph: scheduled fan-out scan (message trace, no model)
+  PHISHY_GRAPH_FANOUT_SCAN_ENABLED: 'graph.fanoutScan.enabled',
+  PHISHY_GRAPH_FANOUT_SCAN_OVERLAP_MINUTES: 'graph.fanoutScan.overlapMinutes',
+  PHISHY_GRAPH_FANOUT_SCAN_MAX_WINDOW_MINUTES: 'graph.fanoutScan.maxWindowMinutes',
+  PHISHY_GRAPH_FANOUT_SCAN_MAX_PAGES: 'graph.fanoutScan.maxPages',
+  PHISHY_GRAPH_FANOUT_SCAN_MAX_CANDIDATES: 'graph.fanoutScan.maxCandidates',
+  PHISHY_GRAPH_FANOUT_SCAN_REQUEST_ALLOWANCE: 'graph.fanoutScan.requestAllowancePer5Min',
+  PHISHY_GRAPH_FANOUT_SCAN_BUDGET_MS: 'graph.fanoutScan.budgetMs',
+  PHISHY_GRAPH_FANOUT_SCAN_DEDUPE_HOURS: 'graph.fanoutScan.dedupeHours',
+
   // Profile
   PHISHY_PROFILE: 'profile',
 

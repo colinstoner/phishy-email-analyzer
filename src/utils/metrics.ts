@@ -482,3 +482,72 @@ export function emitGraphBrokerCallMetric(
 
   process.stdout.write(`${JSON.stringify(emf)}\n`);
 }
+
+/**
+ * How one scheduled fan-out scan ended (`services/hunting/fanout.job.ts`).
+ * `ok`: the window was read (possibly incomplete; see `FanoutScanIncomplete`).
+ * The rest say why no window was read: another scan held the lock, no
+ * intelligence database or its migration, the trace allowance was spent,
+ * Graph refused or timed out, or the scan failed.
+ */
+export type FanoutScanMetricOutcome =
+  | 'ok'
+  | 'skipped_running'
+  | 'no_database'
+  | 'migration_missing'
+  | 'rate_limited'
+  | 'forbidden'
+  | 'timeout'
+  | 'error';
+
+export interface FanoutScanMetric {
+  outcome: FanoutScanMetricOutcome;
+  durationMs: number;
+  rowsScanned: number;
+  candidates: number;
+  flagged: number;
+  alertsSent: number;
+  incomplete: boolean;
+  traceRequests: number;
+}
+
+/** Emit one scheduled fan-out scan */
+export function emitFanoutScanMetric(metric: FanoutScanMetric): void {
+  if (process.env.PHISHY_DISABLE_METRICS === 'true') {
+    return;
+  }
+
+  const emf = {
+    _aws: {
+      Timestamp: Date.now(),
+      CloudWatchMetrics: [
+        {
+          Namespace: NAMESPACE,
+          Dimensions: [['Outcome']],
+          Metrics: [
+            { Name: 'FanoutScans', Unit: 'Count' },
+            { Name: 'FanoutScanDurationMs', Unit: 'Milliseconds' },
+            { Name: 'FanoutScanRowsScanned', Unit: 'Count' },
+            { Name: 'FanoutScanCandidates', Unit: 'Count' },
+            { Name: 'FanoutScanFlags', Unit: 'Count' },
+            { Name: 'FanoutScanAlertsSent', Unit: 'Count' },
+            { Name: 'FanoutScanIncomplete', Unit: 'Count' },
+            { Name: 'FanoutScanTraceRequests', Unit: 'Count' },
+          ],
+        },
+      ],
+    },
+    Outcome: metric.outcome,
+    FanoutScans: 1,
+    FanoutScanDurationMs: metric.durationMs,
+    FanoutScanRowsScanned: metric.rowsScanned,
+    FanoutScanCandidates: metric.candidates,
+    FanoutScanFlags: metric.flagged,
+    FanoutScanAlertsSent: metric.alertsSent,
+    FanoutScanIncomplete: metric.incomplete ? 1 : 0,
+    FanoutScanTraceRequests: metric.traceRequests,
+  };
+
+  // Raw EMF on stdout, bypassing the logger so `_aws` stays at the JSON root
+  process.stdout.write(`${JSON.stringify(emf)}\n`);
+}

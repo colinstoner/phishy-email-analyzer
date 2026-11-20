@@ -302,7 +302,7 @@ Sizing:
 
 | Metric | Dimensions | Meaning |
 |--------|-----------|---------|
-| `GraphBrokerCalls` | `Operation` = `original_message_lookup` / `sender_history_lookup` / `blast_radius_lookup`; `Outcome` = `ok` / `refused` / `timeout` / `throttled` / `invoke_error` / `function_error` / `oversized` / `malformed` / `invalid_request` | One per invocation of the broker. Anything but `ok` is worth an alarm: `invoke_error` usually means a missing `lambda:InvokeFunction` permission or no route to the Lambda API; `refused` means the broker's own configuration is wrong or a feature flag is off there (the main function's log line `Graph broker call did not produce a result` carries the broker's reason word) |
+| `GraphBrokerCalls` | `Operation` = `original_message_lookup` / `sender_history_lookup` / `blast_radius_lookup` / `fanout_scan`; `Outcome` = `ok` / `refused` / `timeout` / `throttled` / `invoke_error` / `function_error` / `oversized` / `malformed` / `invalid_request` | One per invocation of the broker. Anything but `ok` is worth an alarm: `invoke_error` usually means a missing `lambda:InvokeFunction` permission or no route to the Lambda API; `refused` means the broker's own configuration is wrong or a feature flag is off there (the main function's log line `Graph broker call did not produce a result` carries the broker's reason word) |
 | `GraphBrokerCallDurationMs` | same | Round-trip time of the invocation |
 
 The features' own metrics (`OriginalFetchCount`, `SenderHistoryLookups`, `BlastRadius*`) are emitted by the main function in both modes, so existing dashboards and alarms keep working. Cached answers (`cache_hit`, `BlastRadiusCacheHits`) now come from the broker's instances, which are shared by every main-function instance.
@@ -426,6 +426,35 @@ File configuration uses `graph.senderHistory.*` with the same names (`enabled`, 
 The sending IPs are never given to the model and never logged at info level.
 
 **Metrics** (namespace `Phishy`, dimension `Outcome` = `ok`, `cache_hit`, `skipped`, `timeout`, `forbidden`, `cooldown`, `rate_limited`, `error`): `SenderHistoryLookups`, `SenderHistoryDurationMs`, `SenderHistoryAnomalousFanout`, `SenderHistoryTruncated`, `SenderHistoryForbiddenRetries`, `SenderHistoryFilterMismatches`.
+
+#### Scheduled fan-out scan (optional)
+
+The sender-relationship rule above, run proactively: every few minutes, without waiting for anyone to report, Phishy reads the last few minutes of your tenant's inbound mail flow from message trace and emails the **security team** when an established external contact suddenly sends one subject to many internal people. A real takeover wave typically reaches dozens of mailboxes within a minute or two, minutes before the first employee report; the scan exists to close that gap. Code-driven and read-only; **no AI model is involved**. How it works and what it cannot see: [ARCHITECTURE.md](ARCHITECTURE.md#scheduled-fan-out-scan).
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PHISHY_GRAPH_FANOUT_SCAN_ENABLED` | `false` | Enable the scan. Only effective with `PHISHY_GRAPH_ENABLED=true`. Set it on the main function and, in broker mode, on the broker too (the broker refuses the operation otherwise) |
+| `PHISHY_GRAPH_FANOUT_SCAN_OVERLAP_MINUTES` | `10` | Each window starts this long before the previous scan's window ended (1-30), so mail flow that message trace records late is still seen |
+| `PHISHY_GRAPH_FANOUT_SCAN_MAX_WINDOW_MINUTES` | `60` | Widest window one scan reads (5-120). After a longer gap (the schedule was off, scans failed) the oldest part is skipped, logged, and the scan counted as incomplete |
+| `PHISHY_GRAPH_FANOUT_SCAN_MAX_PAGES` | `4` | Message trace pages (up to 5000 rows each) one scan reads (1-10). More rows than that makes the scan incomplete, never silently truncated |
+| `PHISHY_GRAPH_FANOUT_SCAN_MAX_CANDIDATES` | `3` | Sender-and-subject groups (most recipients first) whose history one scan checks (1-10) |
+| `PHISHY_GRAPH_FANOUT_SCAN_REQUEST_ALLOWANCE` | `20` | Message trace requests all scans together may spend in any 5 minutes (5-40), tracked in the database across Lambda instances |
+| `PHISHY_GRAPH_FANOUT_SCAN_BUDGET_MS` | `60000` | Hard limit on one scan's Graph work (10000-120000) |
+| `PHISHY_GRAPH_FANOUT_SCAN_DEDUPE_HOURS` | `24` | A wave (one sender, one subject) quiet for this long is over; the same sender and subject later is a new wave and alerts again (1-168) |
+
+File configuration uses `graph.fanoutScan.*` (`enabled`, `overlapMinutes`, `maxWindowMinutes`, `maxPages`, `maxCandidates`, `requestAllowancePer5Min`, `budgetMs`, `dedupeHours`). The rule's thresholds and history period are the sender-relationship check's (`PHISHY_GRAPH_SENDER_HISTORY_LOOKBACK_DAYS`, `_BURST_WINDOW_HOURS`, `_FANOUT_MIN_RECIPIENTS`, `_FANOUT_MULTIPLIER`, or their defaults); in broker mode the broker's values are the ones applied. The scan does not need the on-report check to be enabled.
+
+**Requirements.**
+
+- `ExchangeMessageTrace.Read.All` on the read app registration, as for the sender-relationship check.
+- **The intelligence database, with `migrations/005_fanout_scan.sql` applied manually.** The scan keeps its lock, its window, its request log and the alerted waves there ([DATABASE.md](DATABASE.md)). Without the database it does not run: each scheduled invocation logs what to configure and emits `Outcome=no_database`; without the migration, `Outcome=migration_missing` and a log line naming the file.
+- `SECURITY_TEAM_DISTRIBUTION`: the only recipients of the alert. With it empty the scan does not run.
+- `SAFE_DOMAINS` decide what "internal" means: a recipient on one of them (or a subdomain) is internal, a sender on none of them is external. In broker mode they are sent to the broker in the scan request.
+- A schedule that invokes the **main** function every 5 minutes (or so) with exactly this payload: `{"phishyScheduledTask": "graph_fanout_scan", "version": 1}`. The SAM template can create it ([AWS.md](../AWS.md)). Any other payload carrying `phishyScheduledTask` is refused; an EventBridge rule without this constant input does nothing.
+
+**Request budget.** Message trace allows 100 requests per 5 minutes per tenant, shared by everything that reads it. A scan costs one request per page of the window (one at most tenants' volumes: a 15-minute window is a few hundred rows) plus, for each candidate it checks, the sender-relationship lookup's requests (6 at a 30-day lookback; each 403 retry is one more), plus about 2 for a blast-radius lookup when an alert is sent and that feature is on. All scans together spend at most `PHISHY_GRAPH_FANOUT_SCAN_REQUEST_ALLOWANCE` (20) per 5 minutes: the allowance is tracked in the database, so it holds whichever Lambda instance runs a scan, and only one scan runs at a time. It is separate from the on-report sender-relationship check's own allowance (60 per broker instance per 5 minutes), so a scan never takes requests from a report, and 20 + 60 stays under the tenant's 100 with one broker instance. Each broker instance also caps scans at 40 requests per 5 minutes whatever the caller asks.
+
+**Metrics** (namespace `Phishy`, dimension `Outcome` = `ok`, `skipped_running`, `no_database`, `migration_missing`, `rate_limited`, `forbidden`, `timeout`, `error`): `FanoutScans`, `FanoutScanDurationMs`, `FanoutScanRowsScanned`, `FanoutScanCandidates`, `FanoutScanFlags`, `FanoutScanAlertsSent`, `FanoutScanIncomplete`, `FanoutScanTraceRequests`. Alarm on `FanoutScans` with any outcome other than `ok` and `skipped_running` persisting, and on `FanoutScanIncomplete`.
 
 ### AWS Secrets Manager Integration
 

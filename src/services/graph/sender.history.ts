@@ -163,6 +163,12 @@ export interface SenderHistorySettings {
   /** The organization's own domains: an address on one is not external */
   safeDomains: string[];
   safeSenders: string[];
+  /**
+   * Trace requests this service may spend in any 5 minutes (default
+   * `REQUEST_ALLOWANCE_PER_5_MIN`). The fan-out scan gives its own instance a
+   * smaller, separate allowance so it never spends the on-report check's.
+   */
+  requestAllowancePer5Min?: number;
 }
 
 /**
@@ -260,6 +266,12 @@ export interface SenderHistoryInput {
   lookbackDays: number;
   fanoutMinRecipients: number;
   fanoutMultiplier: number;
+  /**
+   * Judge fan-out on this one subject group (a `subjectGroupKey`) instead of
+   * the widest one in the burst. The fan-out scan sets it: it has already
+   * picked the subject, and the rule must be applied to that subject.
+   */
+  focusSubjectKey?: string;
 }
 
 interface PeriodTally {
@@ -440,7 +452,11 @@ export function computeSenderHistoryFacts(input: SenderHistoryInput): SenderHist
   }
 
   const subjectGroup = largestSubjectGroup(
-    inbound.burst.recipientsBySubject,
+    input.focusSubjectKey === undefined
+      ? inbound.burst.recipientsBySubject
+      : new Map(
+          [...inbound.burst.recipientsBySubject].filter(([key]) => key === input.focusSubjectKey)
+        ),
     inbound.history.recipients
   );
 
@@ -574,6 +590,11 @@ export interface SenderLookupInput {
   claimedDate: unknown;
   /** A tighter deadline than the configured one, when the caller has less time */
   budgetMs?: number;
+  /**
+   * Judge fan-out on this subject (hostile text, used only as a grouping
+   * key) rather than on the widest subject in the burst
+   */
+  focusSubject?: string;
 }
 
 /** One lookup's facts, if any, and the metric line that describes it (not yet emitted) */
@@ -655,7 +676,11 @@ export class SenderHistoryService {
     if (!address || !this.isExternal(address)) {
       return finish('skipped');
     }
-    const key = createHash('sha256').update(address).digest('hex');
+    const focusSubjectKey =
+      input.focusSubject === undefined ? undefined : subjectGroupKey(input.focusSubject);
+    const key = createHash('sha256')
+      .update(focusSubjectKey === undefined ? address : `${address}\n${focusSubjectKey}`)
+      .digest('hex');
 
     const cached = this.cache.get(key);
     if (cached && cached.expiresAt > startedAt) {
@@ -677,7 +702,7 @@ export class SenderHistoryService {
 
     if (!this.reserveRequests(windows.length * QUERY_TYPES, startedAt)) {
       logger.warn('Sender history skipped: this instance has used its message trace allowance', {
-        allowancePer5Min: REQUEST_ALLOWANCE_PER_5_MIN,
+        allowancePer5Min: this.allowance,
       });
       return finish('rate_limited');
     }
@@ -711,6 +736,7 @@ export class SenderHistoryService {
         lookbackDays: Math.round(lookbackMs / DAY_MS),
         fanoutMinRecipients: this.settings.fanoutMinRecipients,
         fanoutMultiplier: this.settings.fanoutMultiplier,
+        focusSubjectKey,
       });
       this.remember(key, facts, startedAt);
 
@@ -734,6 +760,15 @@ export class SenderHistoryService {
     }
   }
 
+  /** Trace requests this service has counted in the last 5 minutes */
+  requestsUsed(at: number = this.now()): number {
+    return this.requestLog.filter(time => time > at - REQUEST_ALLOWANCE_WINDOW_MS).length;
+  }
+
+  private get allowance(): number {
+    return this.settings.requestAllowancePer5Min ?? REQUEST_ALLOWANCE_PER_5_MIN;
+  }
+
   private isExternal(address: string): boolean {
     return isExternalSender(address, this.settings.safeDomains, this.settings.safeSenders);
   }
@@ -741,7 +776,7 @@ export class SenderHistoryService {
   /** Count the lookup against this instance's allowance, or refuse it */
   private reserveRequests(count: number, at: number): boolean {
     this.requestLog = this.requestLog.filter(time => time > at - REQUEST_ALLOWANCE_WINDOW_MS);
-    if (this.requestLog.length + count > REQUEST_ALLOWANCE_PER_5_MIN) {
+    if (this.requestLog.length + count > this.allowance) {
       return false;
     }
     this.noteRequests(count, at);

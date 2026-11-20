@@ -1230,3 +1230,53 @@ describe('createSenderHistoryService', () => {
     ).toBeInstanceOf(SenderHistoryService);
   });
 });
+
+describe('fan-out judged on one chosen subject (the fan-out scan)', () => {
+  const history = (): MessageTrace[] => [
+    inboundRow(NOW - 20 * DAY, 'person0@example.com'),
+    inboundRow(NOW - 12 * DAY, 'person0@example.com'),
+    inboundRow(NOW - 6 * DAY, 'person1@example.com'),
+  ];
+
+  it('measures only the focused subject group, however wide another subject is', () => {
+    const team = Array.from({ length: 40 }, (_, i) =>
+      inboundRow(NOW - HOUR, `person${i}@example.com`, { subject: 'Quarterly newsletter' })
+    );
+    const input = {
+      ...BASE,
+      inbound: rows([...history(), ...team, ...blast(16)]),
+      outbound: rows([reply()]),
+    };
+    expect(computeSenderHistoryFacts(input).burst.sameSubject.recipients.count).toBe(40);
+    const focused = computeSenderHistoryFacts({ ...input, focusSubjectKey: 'rfq 1001' });
+    expect(focused.burst.sameSubject.recipients.count).toBe(16);
+    expect(focused.classification).toBe('established_with_anomalous_fanout');
+    const absent = computeSenderHistoryFacts({ ...input, focusSubjectKey: 'no such subject' });
+    expect(absent.burst.sameSubject.recipients.count).toBe(0);
+    expect(absent.classification).toBe('established');
+  });
+
+  it('caches a focused lookup apart from an unfocused one, and honours a smaller allowance', async () => {
+    const graph = fakeGraph([() => collection([])]);
+    const service = new SenderHistoryService(
+      graph.client,
+      { ...SETTINGS, requestAllowancePer5Min: 12 },
+      { now: () => NOW }
+    );
+    await service.lookupSender(() => ({ claimedFrom: SENDER, claimedDate: undefined }));
+    await service.lookupSender(() => ({
+      claimedFrom: SENDER,
+      claimedDate: undefined,
+      focusSubject: 'RFQ 1001',
+    }));
+    expect(graph.requests).toHaveLength(12);
+    expect(service.requestsUsed()).toBe(12);
+    const third = await service.lookupSender(() => ({
+      claimedFrom: SENDER,
+      claimedDate: undefined,
+      focusSubject: 'Another subject',
+    }));
+    expect(third.metric.outcome).toBe('rate_limited');
+    expect(graph.requests).toHaveLength(12);
+  });
+});
