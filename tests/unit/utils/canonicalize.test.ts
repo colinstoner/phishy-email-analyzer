@@ -42,6 +42,98 @@ describe('canonicalizeText', () => {
     expect(result.flags.join(' ')).toContain('compatibility characters');
   });
 
+  describe('when the compatibility flag is raised', () => {
+    const COMPAT = 'compatibility_normalized';
+    /** The canonical form as computed before the flag rule changed */
+    const previousCanonical = (raw: string): string =>
+      raw
+        .normalize('NFKC')
+        .replace(/[\u200B-\u200F\u2060\uFEFF\u00AD]/g, '')
+        .replace(/[\u202A-\u202E\u2066-\u2069]/g, '');
+
+    it.each([
+      ['a no-break space', 'Dear\u00A0customer, thank\u00A0you'],
+      ['a narrow no-break space', 'Total:\u202F42\u202FEUR'],
+      ['other space separators', 'one\u2002two\u2009three\u3000four'],
+      ['an ellipsis', 'More to come\u2026'],
+      ['a ligature', 'Please \uFB01nd the \uFB02yer attached'],
+      ['trademark-style symbols', 'ExampleSoft\u2122 and Service\u2120, call \u2121'],
+      ['fractions, superscripts and ordinals', '\u00BD off, 10\u00B2 m, x\u2082, 1\u00AA'],
+      ['fullwidth CJK punctuation', '\u8BF7\u67E5\u6536\uFF0C\u8C22\u8C22\uFF01'],
+      ['a decomposed accent', 'Cafe\u0301 menu'],
+    ])('does not flag %s, and the canonical text is unchanged', (_label, raw) => {
+      const result = canonicalizeTextDetailed(raw);
+      expect(result.canonical).not.toBe(raw);
+      expect(result.canonical).toBe(previousCanonical(raw));
+      expect(result.findings).not.toContain(COMPAT);
+      expect(result.flags.join(' ')).not.toContain('compatibility characters');
+    });
+
+    it.each([
+      ['fullwidth letters', 'Sign in to \uFF50\uFF41\uFF59\uFF50\uFF41\uFF4C now'],
+      [
+        'mathematical bold letters',
+        'Your \u{1D41A}\u{1D41C}\u{1D41C}\u{1D428}\u{1D42E}\u{1D427}\u{1D42D} is locked',
+      ],
+      ['circled letters', 'Verify \u24D0\u24D2\u24D2\u24DE\u24E4\u24DD\u24E3'],
+      ['squared letters', 'Open \u{1F130}\u{1F131}'],
+      ['a one-dot-leader dot in a domain', 'Go to example\u2024test/login'],
+      ['the Kelvin sign', '\u212Aeep your account'],
+      [
+        'benign typography mixed with a disguise',
+        'Dear\u00A0user\u2026 log in at \uFF50aypal\u2122',
+      ],
+    ])('flags %s, and the canonical text is unchanged', (_label, raw) => {
+      const result = canonicalizeTextDetailed(raw);
+      expect(result.canonical).toBe(previousCanonical(raw));
+      expect(result.findings).toContain(COMPAT);
+      expect(result.flags.join(' ')).toContain('compatibility characters');
+    });
+
+    it('stays one linear pass on padded input', () => {
+      const padded = `${'\u00A0\u2026\uFB01'.repeat(200_000)}\uFF50`;
+      const started = Date.now();
+      expect(canonicalizeTextDetailed(padded).findings).toContain(COMPAT);
+      expect(canonicalizeTextDetailed(padded.slice(0, -1)).findings).not.toContain(COMPAT);
+      expect(Date.now() - started).toBeLessThan(5000);
+    });
+  });
+
+  describe('which invisible characters count', () => {
+    const count = (raw: string): string | undefined =>
+      canonicalizeText(raw).flags.find(f => f.includes('invisible character'));
+
+    it('does not count a leading byte-order mark or a ZWJ inside an emoji sequence', () => {
+      for (const raw of [
+        '\uFEFFHello team',
+        'Our dev team \u{1F469}\u200D\u{1F4BB} says hi',
+        'Pride \u{1F3F3}\uFE0F\u200D\u{1F308} month',
+        'Family \u{1F468}\u{1F3FD}\u200D\u{1F469}\u200D\u{1F467}',
+      ]) {
+        const result = canonicalizeTextDetailed(raw);
+        expect(result.findings).not.toContain('invisible_characters');
+        // Still removed from the canonical text, as before
+        expect(result.canonical).not.toMatch(/[\u200D\uFEFF]/);
+      }
+    });
+
+    it('still counts zero-width characters that split words or URLs', () => {
+      expect(count('ver\u200Bify your acc\u200Dount')).toBe(
+        '2 invisible characters removed (zero-width characters are used to break up keywords and evade filters)'
+      );
+      expect(count('https://pay\u200Bpal.example/login')).toMatch(/^1 invisible character /);
+      // A soft hyphen splits a word exactly as an attacker would: it counts
+      expect(count('pass\u00ADword')).toMatch(/^1 invisible character /);
+      // A BOM after the start, and a ZWJ with an emoji on one side only, count
+      expect(count('Hi\uFEFFthere')).toMatch(/^1 invisible character /);
+      expect(count('\u{1F600}\u200Dlogin')).toMatch(/^1 invisible character /);
+      // Only the suspicious ones are counted when routine ones are present too
+      expect(count('\uFEFF\u{1F469}\u200D\u{1F4BB} ver\u200Bify')).toMatch(
+        /^1 invisible character /
+      );
+    });
+  });
+
   it('decodes numeric HTML entities that hide content', () => {
     const result = canonicalizeText('Visit &#104;&#116;&#116;&#112;&#115;://evil.test');
     expect(result.canonical).toContain('https://evil.test');

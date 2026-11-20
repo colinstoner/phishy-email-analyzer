@@ -1,7 +1,8 @@
 /**
  * Injection-eval runner. Sends prepared cases through the same pieces the
  * Lambda uses — the provider class (which builds the prompt itself), the
- * agentic analyzer and tool executor, risk fusion with no intelligence
+ * agentic analyzer and tool executor, risk fusion with the email's own
+ * signals (attachment findings, sender history) but no intelligence-database
  * signals, and the report templates — and records what came back.
  *
  * It makes billed model calls. Nothing here runs unless a caller hands it a
@@ -13,7 +14,8 @@ import { EffortLevel } from '../../services/ai/model.capabilities';
 import { ModelRefusalError, TruncatedResponseError } from '../../services/ai/model.response';
 import { AgenticAnalyzer } from '../../services/ai/agentic/agentic.analyzer';
 import { AgenticToolExecutor, ToolExecutionResult } from '../../services/ai/agentic/tool.executor';
-import { fuseRisk, RiskDecision } from '../../services/intelligence/risk.fusion';
+import { FusionSignals, fuseRisk, RiskDecision } from '../../services/intelligence/risk.fusion';
+import { attachmentRiskSignals } from '../../services/attachments/risk';
 import { ScoringMode } from '../../services/ai/scoring.mode';
 import { buildEmailHtml, buildPlainTextReport } from '../../templates/report.html';
 import { AnalysisResult, ExtractedEmailData } from '../../types';
@@ -149,6 +151,15 @@ function describeError(error: unknown): string {
   return `${name}: ${message}`.replace(/\s+/g, ' ').slice(0, 200);
 }
 
+function fusedView(decision: RiskDecision): NonNullable<RunOutcome['fused']> {
+  return {
+    verdict: decision.verdict,
+    riskScore: decision.riskScore,
+    riskLevel: decision.riskLevel,
+    isPhishing: decision.isPhishing,
+  };
+}
+
 /** Render the report exactly as the handler does: fused verdict first */
 function renderReports(
   analysis: AnalysisResult,
@@ -236,15 +247,30 @@ async function executeRun(
     outcome.modelRiskScore = analysis.assessment?.riskScore;
   }
 
-  // No intelligence database: fusion sees the model's result and nothing else
+  // The signals production derives from the email itself: attachment
+  // inspection findings and (rarely present here) sender history. No
+  // intelligence database: no indicators, campaigns or rulings.
   const scoringMode = options.scoringMode ?? 'model';
-  const decision = fuseRisk(analysis, {}, { scoringMode });
-  outcome.fused = {
-    verdict: decision.verdict,
-    riskScore: decision.riskScore,
-    riskLevel: decision.riskLevel,
-    isPhishing: decision.isPhishing,
+  const attachmentSignals = attachmentRiskSignals(emailData.attachments);
+  const emailSignals: FusionSignals = {
+    ...(emailData.senderHistory ? { senderHistory: emailData.senderHistory } : {}),
   };
+  const decision = fuseRisk(analysis, { ...emailSignals, attachmentSignals }, { scoringMode });
+  outcome.fused = fusedView(decision);
+  if (attachmentSignals.length > 0) {
+    // Attack success is judged on the fused outcome, which the attachment
+    // floor can hold even when the model was fooled. Keep what fusion would
+    // have shown without the floor, so the scorer can count that separately.
+    const withoutFloor = fuseRisk(analysis, emailSignals, { scoringMode });
+    outcome.attachmentFloor = {
+      signals: attachmentSignals,
+      changedOutcome:
+        withoutFloor.verdict !== decision.verdict ||
+        withoutFloor.riskScore !== decision.riskScore ||
+        withoutFloor.isPhishing !== decision.isPhishing,
+      withoutFloor: fusedView(withoutFloor),
+    };
+  }
   if (scoringMode === 'checklist') {
     // Closed values and numbers only: the answers are enums Phishy validated
     outcome.scoring = {
@@ -273,7 +299,12 @@ async function executeRun(
     recommendations: analysis.analysisFailed ? [] : analysis.recommendations.map(String),
     indicators: analysis.analysisFailed ? [] : analysis.indicators.map(String),
     report: renderReports(analysis, emailData, decision),
-    reportBaseline: renderReports(placeholder, emailData, fuseRisk(placeholder)),
+    // Same fusion signals, so the baseline also carries the code-written reasons
+    reportBaseline: renderReports(
+      placeholder,
+      emailData,
+      fuseRisk(placeholder, { ...emailSignals, attachmentSignals })
+    ),
   });
 
   // A completed agentic run reports the whole loop's usage. After an

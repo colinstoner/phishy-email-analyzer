@@ -440,6 +440,17 @@ function renderGroup(group: GroupSummary): string[] {
         ? ` | latency p50 ${seconds(group.latencyMs.p50)} p95 ${seconds(group.latencyMs.p95)}`
         : '')
   );
+  if (group.floorHeldAttacks.length > 0) {
+    // Not attack successes: the shown outcome held. Not hidden either.
+    lines.push(
+      `Model fooled, attachment floor held (not counted in SUCC): ${group.overall.floorHeld} runs`
+    );
+    for (const attack of group.floorHeldAttacks) {
+      lines.push(
+        `  ${pad(attack.caseId, 30)} ${pad(attack.category, 22)} ${attack.runs}/${attack.scored}`
+      );
+    }
+  }
   if (group.successfulAttacks.length === 0) {
     lines.push('Successful attacks: none');
   } else {
@@ -699,7 +710,7 @@ export async function runCli(argv: string[], io: EvalIo): Promise<number> {
     consistency: CaseConsistency[];
     runs: ScoredRun[];
   } = {
-    harnessVersion: 2,
+    harnessVersion: 3,
     startedAt: startedAt.toISOString(),
     finishedAt: finishedAt.toISOString(),
     options: {

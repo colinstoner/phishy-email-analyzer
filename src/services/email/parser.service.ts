@@ -29,6 +29,7 @@ import {
   buildLinkFacts,
   canonicalizeTextDetailed,
   findAnchorMismatchDetails,
+  TextObfuscationKind,
 } from '../../utils/canonicalize';
 import { claimedSenderDomain } from '../../utils/addressing';
 import { detectUserReport } from './user.report';
@@ -641,17 +642,32 @@ export class EmailParserService {
 
     const { canonical, flags, findings } = canonicalizeTextDetailed(emailData.text);
     emailData.canonicalText = canonical;
+    this.applyAnchorChecks(emailData, flags, findings);
+
+    return emailData;
+  }
+
+  /**
+   * Run the anchor checks against the claimed sender's domain as it stands
+   * now, and set `contentFlags` / `contentFindings` to the given text
+   * findings plus the anchor findings. Anchor flags always come last in
+   * `contentFlags`, one per entry of `contentFindings.anchors`, so a later
+   * call can replace them without touching the text flags.
+   */
+  private applyAnchorChecks(
+    emailData: ExtractedEmailData,
+    textFlags: string[],
+    textFindings: TextObfuscationKind[]
+  ): void {
     const anchors = findAnchorMismatchDetails(emailData.html, {
       senderDomain: claimedSenderDomain(emailData),
     });
-    emailData.contentFlags = [...flags, ...anchors.map(a => a.flag)];
+    emailData.contentFlags = [...textFlags, ...anchors.map(a => a.flag)];
     // The same findings as fixed codes, for code-computed checklist answers
     emailData.contentFindings = {
-      text: findings,
+      text: textFindings,
       ...(emailData.html ? { anchors: anchors.map(a => a.kind) } : {}),
     };
-
-    return emailData;
   }
 
   /**
@@ -684,6 +700,7 @@ export class EmailParserService {
       return;
     }
 
+    const senderDomainBefore = claimedSenderDomain(emailData);
     const receivedAt = original.receivedAt ? Date.parse(original.receivedAt) : NaN;
     emailData.retrievedOriginal = {
       location: original.location === 'recoverable_items' ? 'recoverable_items' : 'mailbox',
@@ -691,6 +708,20 @@ export class EmailParserService {
       headers,
       headersTruncated: original.headersTruncated,
     };
+
+    // The claimed sender is now read from the retrieved original (see
+    // claimedSenderDomain), and the prompt and the checklist use that one.
+    // When it differs, redo the anchor checks against it so the
+    // "downloads from a domain other than the claimed sender's" flag agrees
+    // with the rest of the facts. The text flags stay as they were.
+    if (emailData.contentFlags && claimedSenderDomain(emailData) !== senderDomainBefore) {
+      const anchorCount = emailData.contentFindings?.anchors?.length ?? 0;
+      this.applyAnchorChecks(
+        emailData,
+        emailData.contentFlags.slice(0, emailData.contentFlags.length - anchorCount),
+        emailData.contentFindings?.text ?? []
+      );
+    }
   }
 
   /**

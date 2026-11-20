@@ -951,6 +951,73 @@ describe('EmailParserService', () => {
       );
     });
 
+    describe('anchor checks after the original-message lookup', () => {
+      const NOT_SENDER =
+        "Link text looks like a file name (.pdf); the link downloads a file from vendor-b.example, which is not the claimed sender's domain";
+      const NOT_SENDER_A =
+        "Link text looks like a file name (.pdf); the link downloads a file from vendor-a.example, which is not the claimed sender's domain";
+
+      function forwardedFromA(downloadHost: string): EmailMessage {
+        return makeMessage({
+          // A zero-width space: a text flag that must survive unchanged
+          text:
+            '---------- Forwarded message ---------\nFrom: Billing <billing@vendor-a.example>\n' +
+            'Subject: Invoice\nTo: forwarder@example.com\n\nInvoice at\u200B the link',
+          html: `<p><a href="https://${downloadHost}/docs/Invoice-77.pdf">Invoice-77.pdf</a></p>`,
+        });
+      }
+
+      const retrievedFromB = {
+        location: 'mailbox' as const,
+        receivedAt: '2026-11-16T16:00:07.000Z',
+        headers: [{ name: 'From', value: 'Billing <billing@vendor-b.example>' }],
+        headersTruncated: false,
+      };
+
+      it('drops the flag when the retrieved From is the download domain', () => {
+        const parser = makeParser();
+        const data = parser.extractEmailData(forwardedFromA('files.vendor-b.example'));
+        expect(data.contentFlags).toContain(NOT_SENDER);
+        const textFlags = data.contentFlags?.filter(f => !f.startsWith('Link text'));
+        expect(textFlags?.length).toBeGreaterThan(0);
+        expect(data.contentFindings?.anchors).toEqual(['file_name_text']);
+
+        parser.attachRetrievedOriginal(data, retrievedFromB);
+
+        expect(data.contentFlags).not.toContain(NOT_SENDER);
+        expect(data.contentFlags).toEqual(textFlags);
+        expect(data.contentFindings?.anchors).toEqual([]);
+        expect(buildPhishingAnalysisPrompt(data, {})).not.toContain('not the claimed sender');
+      });
+
+      it('gains the flag when the retrieved From differs from the download domain', () => {
+        const parser = makeParser();
+        const data = parser.extractEmailData(forwardedFromA('files.vendor-a.example'));
+        expect(data.contentFlags?.some(f => f.startsWith('Link text'))).toBe(false);
+        const before = [...(data.contentFlags ?? [])];
+
+        parser.attachRetrievedOriginal(data, retrievedFromB);
+
+        expect(data.contentFlags).toEqual([...before, NOT_SENDER_A]);
+        expect(data.contentFindings?.anchors).toEqual(['file_name_text']);
+        // Applied twice (same sender): still one flag
+        parser.attachRetrievedOriginal(data, retrievedFromB);
+        expect(data.contentFlags?.filter(f => f === NOT_SENDER_A)).toHaveLength(1);
+        expect(new Set(data.contentFlags).size).toBe(data.contentFlags?.length);
+      });
+
+      it('leaves the flags alone when the sender domain is unchanged', () => {
+        const parser = makeParser();
+        const data = parser.extractEmailData(forwardedFromA('files.vendor-b.example'));
+        const before = [...(data.contentFlags ?? [])];
+        parser.attachRetrievedOriginal(data, {
+          ...retrievedFromB,
+          headers: [{ name: 'From', value: 'Accounts <accounts@vendor-a.example>' }],
+        });
+        expect(data.contentFlags).toEqual(before);
+      });
+    });
+
     it('should extract links from text when no HTML is present', () => {
       const parser = makeParser();
       const msg = makeMessage({ text: 'Go to https://login.example-verify.test/account now' });

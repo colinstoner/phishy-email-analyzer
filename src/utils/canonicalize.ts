@@ -63,7 +63,9 @@ export function canonicalizeTextDetailed(
   }
 
   let canonical = raw.normalize('NFKC');
-  if (canonical !== raw) {
+  // Normalization always applies; the flag only when a changed character is
+  // a plausible disguise, not ordinary typography (no-break spaces, ™, ﬁ)
+  if (canonical !== raw && hasDisguisingCompatibilityCharacter(raw)) {
     flags.push(
       'Unicode compatibility characters were normalized (possible homoglyph or styling obfuscation)'
     );
@@ -72,11 +74,15 @@ export function canonicalizeTextDetailed(
 
   const invisibles = canonical.match(INVISIBLE_CHARS);
   if (invisibles) {
+    // Every invisible is removed; only those not in a routine position count
+    const counted = countSuspiciousInvisibles(canonical);
     canonical = canonical.replace(INVISIBLE_CHARS, '');
-    flags.push(
-      `${invisibles.length} invisible character${invisibles.length === 1 ? '' : 's'} removed (zero-width characters are used to break up keywords and evade filters)`
-    );
-    findings.push('invisible_characters');
+    if (counted > 0) {
+      flags.push(
+        `${counted} invisible character${counted === 1 ? '' : 's'} removed (zero-width characters are used to break up keywords and evade filters)`
+      );
+      findings.push('invisible_characters');
+    }
   }
 
   const bidi = canonical.match(BIDI_CONTROLS);
@@ -95,6 +101,139 @@ export function canonicalizeTextDetailed(
   }
 
   return { canonical, flags, findings };
+}
+
+/**
+ * Compatibility characters NFKC changes that are always a plausible
+ * disguise: mathematical alphanumeric symbols (styled "bold" or "script"
+ * letters, Greek included) and enclosed or circled alphanumerics.
+ */
+const DISGUISE_RANGES: ReadonlyArray<readonly [number, number]> = [
+  [0x1d400, 0x1d7ff],
+  [0x2460, 0x24ff],
+  [0x1f100, 0x1f1ff],
+];
+
+/**
+ * Ordinary typography whose NFKC form contains an ASCII letter or digit,
+ * which mail is full of: Latin ligatures (ﬁ, ﬂ), ™ ℠ ℡, the information
+ * sign (U+2139), №, ℃ ℉, the ordinal indicators ª º, superscripts and
+ * subscripts, and vulgar fractions.
+ */
+const TYPOGRAPHY_ALLOWED: ReadonlyArray<readonly [number, number]> = [
+  [0xfb00, 0xfb06],
+  [0x2120, 0x2122],
+  [0x2139, 0x2139],
+  [0x2116, 0x2116],
+  [0x2103, 0x2103],
+  [0x2109, 0x2109],
+  [0x00aa, 0x00aa],
+  [0x00ba, 0x00ba],
+  [0x00b2, 0x00b3],
+  [0x00b9, 0x00b9],
+  [0x2070, 0x209f],
+  [0x00bc, 0x00be],
+  [0x2150, 0x215f],
+  [0x2189, 0x2189],
+];
+
+function inRanges(cp: number, ranges: ReadonlyArray<readonly [number, number]>): boolean {
+  return ranges.some(([from, to]) => cp >= from && cp <= to);
+}
+
+/**
+ * Whether NFKC rewriting `char` (one code point it changes) is a plausible
+ * disguise. A disguise range always is; otherwise a character whose
+ * normalized form holds an ASCII letter or digit, or is a bare `.`, `/` or
+ * `@` (a fullwidth or "one dot leader" dot inside a domain), unless it is
+ * allowed typography. Spaces, the ellipsis and the like normalize to none of
+ * these, so they never are.
+ */
+function isDisguise(cp: number, normalized: string): boolean {
+  if (inRanges(cp, DISGUISE_RANGES)) return true;
+  if (inRanges(cp, TYPOGRAPHY_ALLOWED)) return false;
+  return (
+    /[A-Za-z0-9]/.test(normalized) || normalized === '.' || normalized === '/' || normalized === '@'
+  );
+}
+
+/**
+ * One forward pass over the raw text: true at the first code point that NFKC
+ * changes and that is a plausible disguise. ASCII is skipped without
+ * normalizing, and each distinct code point is normalized once, so padded
+ * input costs one pass. Characters NFKC only recomposes (a letter plus a
+ * combining accent) are not changed one by one and never count.
+ */
+function hasDisguisingCompatibilityCharacter(raw: string): boolean {
+  const verdicts = new Map<number, boolean>();
+  for (const char of raw) {
+    const cp = char.codePointAt(0) as number;
+    if (cp < 0x80) continue;
+    let disguise = verdicts.get(cp);
+    if (disguise === undefined) {
+      const normalized = char.normalize('NFKC');
+      disguise = normalized !== char && isDisguise(cp, normalized);
+      verdicts.set(cp, disguise);
+    }
+    if (disguise) return true;
+  }
+  return false;
+}
+
+const ZWJ = 0x200d;
+const BOM = 0xfeff;
+const EXTENDED_PICTOGRAPHIC = /^\p{Extended_Pictographic}$/u;
+/** Code points that may sit between an emoji and its ZWJ: VS16 and skin tones */
+function isEmojiModifier(cp: number): boolean {
+  return cp === 0xfe0f || (cp >= 0x1f3fb && cp <= 0x1f3ff);
+}
+/** Most modifiers skipped looking back from a ZWJ (keeps each step bounded) */
+const MAX_EMOJI_MODIFIERS = 4;
+
+function codePointBefore(text: string, index: number): { cp: number; at: number } | undefined {
+  if (index <= 0) return undefined;
+  const low = text.charCodeAt(index - 1);
+  if (index >= 2 && low >= 0xdc00 && low <= 0xdfff) {
+    const high = text.charCodeAt(index - 2);
+    if (high >= 0xd800 && high <= 0xdbff) {
+      return { cp: text.codePointAt(index - 2) as number, at: index - 2 };
+    }
+  }
+  return { cp: low, at: index - 1 };
+}
+
+function isPictographic(cp: number | undefined): boolean {
+  return cp !== undefined && EXTENDED_PICTOGRAPHIC.test(String.fromCodePoint(cp));
+}
+
+/** A ZWJ joining two emoji (woman, ZWJ, laptop), as emoji sequences are written */
+function isEmojiJoiner(text: string, index: number): boolean {
+  let before = codePointBefore(text, index);
+  for (let skipped = 0; before && skipped < MAX_EMOJI_MODIFIERS; skipped++) {
+    if (!isEmojiModifier(before.cp)) break;
+    before = codePointBefore(text, before.at);
+  }
+  return isPictographic(before?.cp) && isPictographic(text.codePointAt(index + 1));
+}
+
+/**
+ * How many invisible characters are not in a routine position. Routine, and
+ * not counted (still removed): a byte-order mark at the very start, and a
+ * zero-width joiner between two emoji. Neither can split a word or a URL.
+ * Everything else counts: zero-width spaces and joiners between letters,
+ * soft hyphens (they split words exactly as an attacker would), a BOM
+ * anywhere but the start.
+ */
+function countSuspiciousInvisibles(text: string): number {
+  let counted = 0;
+  for (const match of text.matchAll(INVISIBLE_CHARS)) {
+    const index = match.index;
+    const cp = text.charCodeAt(index);
+    if (cp === BOM && index === 0) continue;
+    if (cp === ZWJ && isEmojiJoiner(text, index)) continue;
+    counted++;
+  }
+  return counted;
 }
 
 /**
