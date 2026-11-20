@@ -584,8 +584,10 @@ export function emitFanoutScanMetric(metric: FanoutScanMetric): void {
 
 /**
  * What happened in campaign response. Each name is its own metric:
- * - `CampaignWarningsSent` / `CampaignThanksSent`: employee emails sent
+ * - `CampaignWarningsSent`: employee warnings sent
  *   (dimension `Audience`: `recipients` or `distribution`)
+ * - `CampaignRemovalNoticesSent`: removal notices sent (only after a real,
+ *   non-dry-run removal, so never until the write tier exists)
  * - `CampaignWarningsSkipped`: recipients not emailed (dimension `Reason`)
  * - `CampaignWarningSendFailures`: SES refused or failed a send
  * - `CampaignIncidentsOpened` (dimension `Trigger`), `CampaignIncidentUpdates`
@@ -596,7 +598,7 @@ export function emitFanoutScanMetric(metric: FanoutScanMetric): void {
  */
 export type CampaignResponseMetricName =
   | 'CampaignWarningsSent'
-  | 'CampaignThanksSent'
+  | 'CampaignRemovalNoticesSent'
   | 'CampaignWarningsSkipped'
   | 'CampaignWarningSendFailures'
   | 'CampaignIncidentsOpened'

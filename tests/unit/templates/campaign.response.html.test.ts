@@ -8,7 +8,7 @@ import {
   buildDistributionWarning,
   buildEmployeeWarning,
   buildIncidentEmail,
-  buildReporterThanks,
+  buildRemovalNotice,
   incidentSubject,
   summaryRisk,
   WarningContext,
@@ -125,23 +125,43 @@ describe('employee warning', () => {
   });
 });
 
-describe('reporter thank-you note', () => {
-  it('is short: thanks, confirmed, what we did', () => {
-    const email = buildReporterThanks({ ...context, warnedCount: 41 });
-    expect(email.subject).toBe('Thank you: the email you reported was phishing');
-    expect(email.text).toContain('was phishing. Your security team confirmed it.');
+describe('removal notice', () => {
+  const email = buildRemovalNotice(context);
+
+  it('says the security team found it and moved it to Deleted Items, and that nothing is needed', () => {
+    expect(email.subject).toBe('Security notice: a phishing email was removed from your mailbox');
     expect(email.text).toContain(
-      '- Warned the 41 other people who received it, each in a separate email.'
+      'Your security team identified a phishing email in your mailbox and moved it to your Deleted Items folder.'
     );
-    expect(email.text).toContain('- 3 people reported it in all.');
-    expect(email.text).not.toContain('What arrived'.toUpperCase());
-    noLinks(email.html, email.text);
+    expect(email.text).toContain('Nothing. No action is needed.');
+    expect(email.text).toContain('- Do not restore it from Deleted Items or open it there.');
   });
 
-  it('says Phishy confirmed it when nobody approved', () => {
-    const email = buildReporterThanks({ ...context, confirmedBy: 'phishy', warnedCount: 0 });
-    expect(email.text).toContain('Phishy confirmed it.');
-    expect(email.text).not.toContain('Warned the');
+  it('says to contact the security team if they clicked or entered a password', () => {
+    expect(email.text).toContain('IF YOU CLICKED A LINK OR ENTERED YOUR PASSWORD');
+    expect(email.text).toContain('Contact your security team straight away.');
+    expect(email.text).toContain(
+      'Call the service desk on extension 4400 and change your password.'
+    );
+  });
+
+  it('names the email without a link and escapes its text; the Subject line never repeats the lure', () => {
+    expect(email.text).toContain('It had the subject "Invoice <b>2291</b> overdue');
+    expect(email.text).toContain('came from "Accounts Team" <billing@examp1e-billing[.]test>.');
+    noLinks(email.html, email.text);
+    expect(email.html).toContain('&lt;b&gt;2291&lt;/b&gt;');
+    expect(email.html).not.toContain('<b>2291</b>');
+    expect(email.subject).not.toContain('Invoice');
+  });
+
+  it('works without a subject or sender', () => {
+    const bare = buildRemovalNotice({
+      ...context,
+      summary: { ...summary, subject: undefined, senderAddress: undefined, senderName: undefined },
+    });
+    expect(bare.text).not.toContain('It had the subject');
+    expect(bare.text).not.toContain('came from');
+    expect(bare.text).toContain('moved it to your Deleted Items folder.');
   });
 });
 
@@ -214,7 +234,6 @@ describe('incident email', () => {
     scope: {
       kind: 'send_warning',
       recipients: [{ address: 'person1@example.com' }],
-      reporters: ['reporter@example.com'],
       distribution: false,
       skipped: { notDelivered: 1, unsafeAddress: 0, alreadyContacted: 0, overCap: 0, unlisted: 0 },
     },

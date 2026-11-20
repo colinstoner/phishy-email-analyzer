@@ -148,7 +148,7 @@ describe('computeWarningScope', () => {
     distribution: false,
   };
 
-  it('warns delivered recipients on safe domains and thanks the reporters', () => {
+  it('warns delivered recipients on safe domains, never the reporters', () => {
     const scope = computeWarningScope(base);
     expect(scope.recipients.map(r => r.address)).toEqual([
       'alice@example.com',
@@ -157,7 +157,8 @@ describe('computeWarningScope', () => {
     ]);
     expect(scope.recipients[0].receivedAt).toBe('2026-11-17T09:14:00.000Z');
     expect(scope.recipients[1].folder).toBe('junk');
-    expect(scope.reporters).toEqual(['reporter@example.com', 'second.reporter@example.com']);
+    expect(scope.recipients.map(r => r.address)).not.toContain('reporter@example.com');
+    expect(scope).not.toHaveProperty('reporters');
     expect(scope.skipped).toMatchObject({ notDelivered: 2, unsafeAddress: 1, alreadyContacted: 0 });
   });
 
@@ -174,7 +175,6 @@ describe('computeWarningScope', () => {
       reporters: ['reporter@evil.test'],
     });
     expect(scope.recipients.map(r => r.address)).not.toContain('mallory@evil.test');
-    expect(scope.reporters).toEqual([]);
   });
 
   it('skips people already contacted', () => {
@@ -183,21 +183,18 @@ describe('computeWarningScope', () => {
       alreadyContacted: new Set(['alice@example.com', 'reporter@example.com']),
     });
     expect(scope.recipients.map(r => r.address)).toEqual(['bob@example.com', 'shared@example.com']);
-    expect(scope.reporters).toEqual(['second.reporter@example.com']);
-    expect(scope.skipped.alreadyContacted).toBe(2);
+    expect(scope.skipped.alreadyContacted).toBe(1);
   });
 
-  it('caps the emails per campaign, warnings before thank-you notes', () => {
+  it('caps the emails per campaign', () => {
     const scope = computeWarningScope({ ...base, remaining: 2 });
     expect(scope.recipients.map(r => r.address)).toEqual(['alice@example.com', 'bob@example.com']);
-    expect(scope.reporters).toEqual([]);
-    expect(scope.skipped.overCap).toBe(3);
+    expect(scope.skipped.overCap).toBe(1);
   });
 
   it('is only the distribution broadcast when the audience is the list', () => {
     const scope = computeWarningScope({ ...base, targeted: false, distribution: true });
     expect(scope.recipients).toEqual([]);
-    expect(scope.reporters).toEqual([]);
     expect(scope.distribution).toBe(true);
     expect(isEmptyScope(scope)).toBe(false);
     expect(isEmptyScope({ ...scope, distribution: false })).toBe(true);
