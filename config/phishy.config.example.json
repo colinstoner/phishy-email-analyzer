@@ -63,6 +63,9 @@
     "enabled": false,
     "maxToolRounds": 5
   },
+  "scoring": {
+    "mode": "model"
+  },
   "commands": {
     "enabled": false
   },

@@ -20,6 +20,11 @@ import { ThreatIndicatorRecord, CampaignRecord, FeedbackRecord } from './databas
 import { partitionMatches } from './indicator.policy';
 import { normalizeConfidence } from '../ai/provider.interface';
 import type { AttachmentRiskSignal } from '../attachments/risk';
+import { CHECKLIST_VERSION, ScoringMode, parseChecklist } from '../ai/checklist';
+import { scoreChecklist } from './checklist.score';
+import { VERDICT_SCORE_BANDS, clampToBand } from './score.bands';
+
+export { VERDICT_SCORE_BANDS, clampToBand };
 
 export type RiskLevel = 'critical' | 'high' | 'medium' | 'low' | 'safe';
 
@@ -90,27 +95,6 @@ export const WEAK_INDICATOR_RISK_CEILING = 40;
  */
 export const PHISHING_SCORE_THRESHOLD = 55;
 
-/**
- * Score band for each final verdict, applied after fusion so the number
- * shown always agrees with the label. `legitimate` (0-10) and the malicious
- * upper range follow the model's own rubric; `graymail`/`spam` follow its
- * 10-30 but stop at 29 so the level shown stays 'low' rather than 'medium';
- * `suspicious` spans 'medium' and 'high' but never 'critical' (critical is
- * reserved for a malicious verdict); a malicious verdict is never below
- * 'high'. `undetermined` has no band — its score is never shown.
- */
-export const VERDICT_SCORE_BANDS: Readonly<
-  Record<Exclude<ThreatVerdict, 'undetermined'>, { min: number; max: number }>
-> = {
-  legitimate: { min: 0, max: 10 },
-  graymail: { min: 10, max: 29 },
-  spam: { min: 10, max: 29 },
-  suspicious: { min: 30, max: 79 },
-  bec: { min: 55, max: 100 },
-  phishing: { min: 55, max: 100 },
-  malware_delivery: { min: 55, max: 100 },
-};
-
 /** Verdicts that say the email is not an attack */
 const BENIGN_VERDICTS: readonly ThreatVerdict[] = ['legitimate', 'graymail', 'spam'];
 
@@ -142,7 +126,37 @@ export interface RiskDecision {
   confidenceBasis: ConfidenceBasis;
   /** Human-readable explanation of how intelligence moved the score */
   reasons: string[];
+  /**
+   * Checklist scoring mode only (absent in the default model mode): what the
+   * fused score started from. `model` means the checklist was missing,
+   * malformed or from another checklist version, so the model's own score
+   * was used, exactly as in model mode.
+   */
+  scoreBasis?: 'checklist' | 'model';
+  /** Checklist scoring mode only: the model's own riskScore, kept for comparison */
+  modelRiskScore?: number;
+  /** Checklist scoring mode, checklist used: its score in the model verdict's band */
+  checklistScore?: number;
+  /** Checklist scoring mode, checklist used: its score before the verdict band */
+  checklistRawScore?: number;
+  /**
+   * Checklist scoring mode, checklist used: fixed-wording reasons, one per
+   * checklist item that applied, written by code. The report shows these in
+   * place of the model's free-text indicators.
+   */
+  checklistReasons?: string[];
 }
+
+/** How fusion is run, as opposed to what it is told about the email */
+export interface FusionOptions {
+  /** Which score fusion starts from (`scoring.mode`). Default `model`. */
+  scoringMode?: ScoringMode;
+}
+
+type ScoringFields = Pick<
+  RiskDecision,
+  'scoreBasis' | 'modelRiskScore' | 'checklistScore' | 'checklistRawScore' | 'checklistReasons'
+>;
 
 const CONFIDENCE_TO_SCORE: Record<string, number> = {
   'very high': 90,
@@ -200,14 +214,65 @@ function modelConfidence(result: AnalysisResult): ConfidenceLevel {
   return normalizeConfidence(result.confidence);
 }
 
+/**
+ * In checklist mode, the score fusion starts from and the fields that record
+ * it. The checklist is used only with a model verdict, a complete checklist
+ * of the current version and re-validated answers (a cached analysis carries
+ * them from storage); otherwise the model's own score is the start, as in
+ * model mode. Undefined in model mode: nothing changes.
+ */
+function checklistStart(
+  result: AnalysisResult,
+  modelVerdict: ThreatVerdict,
+  mode: ScoringMode | undefined
+): { score?: number; fields: ScoringFields } | undefined {
+  if (mode !== 'checklist') return undefined;
+  const modelRiskScore = result.assessment?.riskScore;
+  const withModelScore = modelRiskScore !== undefined ? { modelRiskScore } : {};
+  const stored = result.checklist;
+  if (
+    result.analysisFailed ||
+    !result.assessment ||
+    stored?.status !== 'ok' ||
+    stored.version !== CHECKLIST_VERSION
+  ) {
+    return { fields: { scoreBasis: 'model', ...withModelScore } };
+  }
+  const answers = parseChecklist(stored.answers);
+  if (answers.status !== 'ok') {
+    return { fields: { scoreBasis: 'model', ...withModelScore } };
+  }
+  const checklist = scoreChecklist(answers.answers, modelVerdict);
+  return {
+    score: checklist.score,
+    fields: {
+      scoreBasis: 'checklist',
+      ...withModelScore,
+      checklistScore: checklist.score,
+      checklistRawScore: checklist.rawScore,
+      checklistReasons: checklist.reasons,
+    },
+  };
+}
+
 const BENIGN_LABEL: Partial<Record<ThreatVerdict, string>> = {
   legitimate: 'a legitimate email',
   graymail: 'legitimate bulk email',
   spam: 'spam',
 };
 
-export function fuseRisk(result: AnalysisResult, signals: FusionSignals = {}): RiskDecision {
-  const { score: initialScore, verdict: baseVerdict } = baseScore(result);
+export function fuseRisk(
+  result: AnalysisResult,
+  signals: FusionSignals = {},
+  options: FusionOptions = {}
+): RiskDecision {
+  const base = baseScore(result);
+  const baseVerdict = base.verdict;
+  // Checklist mode: start from the checklist score instead of the model's.
+  // Everything below (floors, ceilings, caps, rulings, bands) is unchanged.
+  const checklist = checklistStart(result, baseVerdict, options.scoringMode);
+  const initialScore = checklist?.score ?? base.score;
+  const scoring = checklist?.fields;
   let score = initialScore;
   let verdict = baseVerdict;
   const reasons: string[] = [];
@@ -226,6 +291,7 @@ export function fuseRisk(result: AnalysisResult, signals: FusionSignals = {}): R
       isPhishing: true,
       confidence: 'Very High',
       confidenceBasis: 'security_team',
+      scoring,
     });
   }
   if (signals.humanVerdict === 'false_positive') {
@@ -234,6 +300,7 @@ export function fuseRisk(result: AnalysisResult, signals: FusionSignals = {}): R
       isPhishing: false,
       confidence: 'Very High',
       confidenceBasis: 'security_team',
+      scoring,
     });
   }
 
@@ -405,6 +472,7 @@ export function fuseRisk(result: AnalysisResult, signals: FusionSignals = {}): R
       isPhishing,
       confidence: 'High',
       confidenceBasis: 'attachment_inspection',
+      scoring,
     });
   }
   if (intelDecided) {
@@ -412,12 +480,14 @@ export function fuseRisk(result: AnalysisResult, signals: FusionSignals = {}): R
       isPhishing,
       confidence: 'High',
       confidenceBasis: 'threat_intel',
+      scoring,
     });
   }
   return decision(verdict, finalScore, reasons, {
     isPhishing,
     confidence: modelConfidence(result),
     confidenceBasis: result.analysisFailed ? 'unassessed' : 'model',
+    scoring,
   });
 }
 
@@ -427,14 +497,6 @@ function countPhrase(count: number, singular: string, plural: string): string {
 
 function isBenign(verdict: ThreatVerdict): verdict is 'legitimate' | 'graymail' | 'spam' {
   return BENIGN_VERDICTS.includes(verdict);
-}
-
-/** Clamp a score into its verdict's band (undetermined is left as-is) */
-export function clampToBand(verdict: ThreatVerdict, score: number): number {
-  const rounded = Math.min(100, Math.max(0, Math.round(score)));
-  if (verdict === 'undetermined') return rounded;
-  const band = VERDICT_SCORE_BANDS[verdict];
-  return Math.min(band.max, Math.max(band.min, rounded));
 }
 
 /**
@@ -451,7 +513,13 @@ function decision(
   verdict: ThreatVerdict,
   score: number,
   reasons: string[],
-  outcome: { isPhishing: boolean; confidence: ConfidenceLevel; confidenceBasis: ConfidenceBasis }
+  outcome: {
+    isPhishing: boolean;
+    confidence: ConfidenceLevel;
+    confidenceBasis: ConfidenceBasis;
+    /** Checklist mode only; undefined in model mode, so the decision is unchanged */
+    scoring?: ScoringFields;
+  }
 ): RiskDecision {
   const clamped = Math.min(100, Math.max(0, Math.round(score)));
   return {
@@ -462,5 +530,6 @@ function decision(
     confidence: outcome.confidence,
     confidenceBasis: outcome.confidenceBasis,
     reasons,
+    ...outcome.scoring,
   };
 }

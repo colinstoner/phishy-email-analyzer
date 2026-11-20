@@ -131,6 +131,36 @@ export function emitVerdictProseDiscardedMetric(provider: string, model: string)
 }
 
 /**
+ * Emit what became of the scoring checklist for one analysis in checklist
+ * scoring mode (`scoring.mode: checklist`): `ok` (the score shown came from
+ * the checklist), `missing` or `malformed` (the model's own score was used
+ * instead). Dimensioned by Outcome so a rising fallback share is visible.
+ * Never emitted in the default model scoring mode.
+ */
+export function emitChecklistScoringMetric(outcome: 'ok' | 'missing' | 'malformed'): void {
+  if (process.env.PHISHY_DISABLE_METRICS === 'true') {
+    return;
+  }
+
+  const emf = {
+    _aws: {
+      Timestamp: Date.now(),
+      CloudWatchMetrics: [
+        {
+          Namespace: NAMESPACE,
+          Dimensions: [['Outcome'], []],
+          Metrics: [{ Name: 'ChecklistScoring', Unit: 'Count' }],
+        },
+      ],
+    },
+    Outcome: outcome,
+    ChecklistScoring: 1,
+  };
+
+  process.stdout.write(`${JSON.stringify(emf)}\n`);
+}
+
+/**
  * Emit a model refusal:the model's safety classifiers (or the model itself)
  * declined the request with `stop_reason: "refusal"`. Emitted once per refused
  * call, against the model that refused, so a refusal that the fallback model

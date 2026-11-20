@@ -14,6 +14,7 @@ import {
   buildPhishingAnalysisPrompt,
   PROMPT_STRUCTURE_LINES,
 } from '../../services/ai/prompt.builder';
+import { ScoringMode } from '../../services/ai/scoring.mode';
 import { FENCE_NAMES } from '../../utils/prompt-fact';
 import { EnterpriseProfile, validateProfile } from '../../models/profile.model';
 import type { S3Service } from '../../services/storage/s3.service';
@@ -26,6 +27,8 @@ export interface EvalEnvironment {
   parser: EmailParserService;
   profile?: EnterpriseProfile;
   reporter: { name: string; address: string };
+  /** Build prompts as the providers will in this scoring mode. Default `model`. */
+  scoringMode?: ScoringMode;
 }
 
 export interface PreparedCase {
@@ -213,7 +216,8 @@ export async function prepareCase(
   const prompt = buildPhishingAnalysisPrompt(
     emailData,
     env.parser.extractEssentialHeaders(emailData.headers),
-    env.profile
+    env.profile,
+    { scoringMode: env.scoringMode }
   );
   const fence = splitAtFence(prompt);
   if (!fence) {

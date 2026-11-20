@@ -130,6 +130,14 @@ Note: each tool round is an additional model call, so an agentic analysis can co
 | `PHISHY_AGENTIC_ENABLED` | `false` | Run analysis as a bounded tool-use loop |
 | `PHISHY_AGENTIC_MAX_TOOL_ROUNDS` | `5` | Maximum tool rounds before a verdict is required (1–10) |
 
+### Risk-Score Mode (Experimental)
+
+How the 0-100 risk score in the report is produced. With `model` (the default) it starts from the model's own free-form score, exactly as before this setting existed. With `checklist` the model also answers a fixed checklist of concrete questions about the email (asks for credentials? link goes somewhere else? attachment that runs code? bulk mail with an unsubscribe link? ...) and code computes the score from the answers, so the same answers always give the same score and each point can be explained. The model still decides the verdict, the score stays inside that verdict's band, and every existing floor and cap still applies. A missing or malformed checklist falls back to the model's score and is counted in the `ChecklistScoring` metric (`Outcome`: `ok` / `missing` / `malformed`). The weights are a first draft that has not been calibrated on real mail; see [ARCHITECTURE.md](ARCHITECTURE.md#checklist-scoring-experimental) for the items, weights and rule, and run the injection eval with `--scoring checklist --repeats N` to compare modes. The checklist adds roughly 1,100 input tokens and 200-300 output tokens per analysis.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PHISHY_SCORING_MODE` | `model` | `model` or `checklist` (config file: `scoring.mode`) |
+
 ### Campaign Verdict Cache
 
 When a phishing campaign hits many inboxes at once, every recipient may forward the same email. With the cache enabled, the **first** report gets a full AI analysis; reports matching the same campaign within the cache window reuse that verdict — every reporter gets a consistent answer, instantly and at no extra AI cost. Reports served from the cache say so in the summary, and a `CampaignCacheHits` / `EstimatedCostSavedUSD` metric is emitted (see Cost Tracking below).

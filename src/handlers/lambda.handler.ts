@@ -288,6 +288,7 @@ async function initializeServices(): Promise<{
       maxToolRounds: config.agentic.maxToolRounds,
       essentialHeadersExtractor: (headers): Record<string, string> =>
         emailParser.extractEssentialHeaders(headers),
+      scoringMode: config.scoring?.mode,
     });
     logger.info('Agentic analysis enabled', {
       maxToolRounds: config.agentic.maxToolRounds,
@@ -423,6 +424,7 @@ function createAIProvider(
         timeout: config.ai.bedrock.timeout,
         effort: config.ai.effort,
         refusalFallbackModel: config.ai.refusalFallbackModel,
+        scoringMode: config.scoring?.mode,
       },
       extractHeaders,
       profile
@@ -441,6 +443,7 @@ function createAIProvider(
       timeout: config.ai.anthropic.timeout,
       effort: config.ai.effort,
       refusalFallbackModel: config.ai.refusalFallbackModel,
+      scoringMode: config.scoring?.mode,
     },
     extractHeaders,
     profile
@@ -674,14 +677,35 @@ async function processEmailEvent(
   // The model's own verdict, captured before fusion: it — not a score that
   // fusion raised — decides whether this email's indicators are stored.
   const modelVerdict = modelVerdictOf(analysis);
-  const riskDecision = fuseRisk(analysis, {
-    ...fusionSignals,
-    senderHistory: emailData.senderHistory,
-    // Decisive static-inspection findings; empty unless attachment analysis is on
-    attachmentSignals: attachmentRiskSignals(emailData.attachments),
-    // A security-team ruling on this campaign rides on the cache hit
-    humanVerdict: securityVerdict,
-  });
+  const scoringMode = config.scoring?.mode ?? 'model';
+  const riskDecision = fuseRisk(
+    analysis,
+    {
+      ...fusionSignals,
+      senderHistory: emailData.senderHistory,
+      // Decisive static-inspection findings; empty unless attachment analysis is on
+      attachmentSignals: attachmentRiskSignals(emailData.attachments),
+      // A security-team ruling on this campaign rides on the cache hit
+      humanVerdict: securityVerdict,
+    },
+    { scoringMode }
+  );
+  if (scoringMode === 'checklist' && !analysis.analysisFailed) {
+    // Numbers and closed values only. Both scores are also persisted without
+    // a migration: the fused (checklist-based) score in risk_score, the
+    // model's own in analysis_result.assessment, the answers in
+    // analysis_result.checklist.
+    logger.info('Checklist scoring', {
+      scoreBasis: riskDecision.scoreBasis,
+      checklistStatus: analysis.checklist?.status ?? 'absent',
+      fromCampaignCache,
+      verdict: riskDecision.verdict,
+      riskScore: riskDecision.riskScore,
+      modelRiskScore: riskDecision.modelRiskScore,
+      checklistScore: riskDecision.checklistScore,
+      checklistRawScore: riskDecision.checklistRawScore,
+    });
+  }
   if (riskDecision.reasons.length) {
     logger.info('Risk fusion applied', {
       verdict: riskDecision.verdict,
@@ -1293,6 +1317,9 @@ function reportRisk(decision: RiskDecision): NonNullable<ReportOptions['risk']> 
     reasons: decision.reasons,
     confidence: decision.confidence,
     confidenceBasis: decision.confidenceBasis,
+    // Checklist scoring only: code-written reasons shown in place of the
+    // model's free-text indicators
+    ...(decision.checklistReasons ? { checklistReasons: decision.checklistReasons } : {}),
   };
 }
 

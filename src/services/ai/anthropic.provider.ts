@@ -6,6 +6,7 @@
 import axios, { AxiosError } from 'axios';
 import { AIProvider, AnalysisOptions, ProviderHealth } from './provider.interface';
 import { buildPhishingAnalysisPrompt } from './prompt.builder';
+import { ScoringMode, attachChecklist } from './checklist';
 import {
   ConversationMessage,
   ConversationRequest,
@@ -82,6 +83,8 @@ export interface AnthropicConfig {
   effort?: EffortLevel;
   /** Model a refused request is retried on once. Empty string disables the retry. */
   refusalFallbackModel?: string;
+  /** `scoring.mode`: `checklist` asks for the scoring checklist and attaches it. Default `model`. */
+  scoringMode?: ScoringMode;
 }
 
 interface MessagesRequest {
@@ -103,6 +106,7 @@ export class AnthropicProvider implements AIProvider {
   private timeout: number;
   private effort: EffortLevel;
   private refusalFallbackModel: string;
+  private scoringMode: ScoringMode;
   private profile?: EnterpriseProfile;
   private essentialHeadersExtractor: (headers: Record<string, string>) => Record<string, string>;
 
@@ -117,6 +121,7 @@ export class AnthropicProvider implements AIProvider {
     this.timeout = config.timeout ?? DEFAULT_TIMEOUT_MS;
     this.effort = config.effort ?? DEFAULT_EFFORT;
     this.refusalFallbackModel = config.refusalFallbackModel ?? DEFAULT_REFUSAL_FALLBACK_MODEL;
+    this.scoringMode = config.scoringMode ?? 'model';
     this.profile = profile;
     this.essentialHeadersExtractor = essentialHeadersExtractor;
   }
@@ -134,7 +139,9 @@ export class AnthropicProvider implements AIProvider {
     });
 
     const essentialHeaders = this.essentialHeadersExtractor(emailData.headers);
-    const prompt = buildPhishingAnalysisPrompt(emailData, essentialHeaders, this.profile);
+    const prompt = buildPhishingAnalysisPrompt(emailData, essentialHeaders, this.profile, {
+      scoringMode: this.scoringMode,
+    });
 
     const result = await analyzeSingleShot({
       provider: this.name,
@@ -142,6 +149,8 @@ export class AnthropicProvider implements AIProvider {
       refusalFallbackModel: this.refusalFallbackModel,
       invoke: model => this.sendSingleShot(model, prompt, options),
     });
+
+    attachChecklist(result, this.scoringMode);
 
     logger.info('Email analysis completed', {
       analysisFailed: result.analysisFailed ?? false,

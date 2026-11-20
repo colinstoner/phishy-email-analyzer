@@ -14,6 +14,7 @@ import { ModelRefusalError, TruncatedResponseError } from '../../services/ai/mod
 import { AgenticAnalyzer } from '../../services/ai/agentic/agentic.analyzer';
 import { AgenticToolExecutor, ToolExecutionResult } from '../../services/ai/agentic/tool.executor';
 import { fuseRisk, RiskDecision } from '../../services/intelligence/risk.fusion';
+import { ScoringMode } from '../../services/ai/scoring.mode';
 import { buildEmailHtml, buildPlainTextReport } from '../../templates/report.html';
 import { AnalysisResult, ExtractedEmailData } from '../../types';
 import { estimateCostUsd } from '../../utils/pricing';
@@ -35,6 +36,11 @@ const CHARS_PER_TOKEN = 3;
 const OVERHEAD_TOKENS = 400;
 /** Output tokens assumed per call until real usage is available (thinking included) */
 const ASSUMED_OUTPUT_TOKENS: Record<EvalMode, number> = { single: 3000, agentic: 6000 };
+/**
+ * Extra output tokens assumed per call in checklist scoring mode: the
+ * checklist object is 20 short key/value pairs, about 8-10 tokens each.
+ */
+export const CHECKLIST_EXTRA_OUTPUT_TOKENS = 250;
 /** The agentic loop resends the prompt on every round */
 const AGENTIC_INPUT_MULTIPLIER = 3;
 const MAX_TOOL_INPUT_CHARS = 400;
@@ -47,6 +53,12 @@ export interface RunnerOptions {
   repeats: number;
   concurrency: number;
   effort: EffortLevel;
+  /**
+   * `checklist`: the providers (built by `createProvider`) ask for the
+   * scoring checklist, and fusion starts from the checklist score. Record
+   * both scores per run. Default `model`.
+   */
+  scoringMode?: ScoringMode;
   /** Stop dispatching when the next call would take estimated spend past this */
   maxCostUsd: number;
   /** Keep each run's raw model reply in the results */
@@ -99,8 +111,12 @@ export function estimateCallCostUsd(
   model: string,
   prompt: string,
   mode: EvalMode,
-  outputTokens: number = ASSUMED_OUTPUT_TOKENS[mode]
+  outputTokens: number = ASSUMED_OUTPUT_TOKENS[mode],
+  scoringMode: ScoringMode = 'model'
 ): number {
+  if (scoringMode === 'checklist') {
+    outputTokens += CHECKLIST_EXTRA_OUTPUT_TOKENS;
+  }
   return estimateCostUsd(model, estimateInputTokens(prompt, mode), outputTokens);
 }
 
@@ -149,6 +165,7 @@ function renderReports(
       riskScore: decision.riskScore,
       riskLevel: decision.riskLevel,
       reasons: decision.reasons,
+      ...(decision.checklistReasons ? { checklistReasons: decision.checklistReasons } : {}),
     },
   };
   return `${buildPlainTextReport(shown, emailData, options)}\n${buildEmailHtml(shown, emailData, options)}`;
@@ -185,6 +202,7 @@ async function executeRun(
       const executor = new RecordingToolExecutor({ profile: options.profile });
       const analyzer = new AgenticAnalyzer(executor, {
         essentialHeadersExtractor: options.essentialHeadersExtractor,
+        scoringMode: options.scoringMode,
       });
       try {
         analysis = await analyzer.analyze(provider, emailData, options.profile);
@@ -218,13 +236,31 @@ async function executeRun(
   }
 
   // No intelligence database: fusion sees the model's result and nothing else
-  const decision = fuseRisk(analysis);
+  const scoringMode = options.scoringMode ?? 'model';
+  const decision = fuseRisk(analysis, {}, { scoringMode });
   outcome.fused = {
     verdict: decision.verdict,
     riskScore: decision.riskScore,
     riskLevel: decision.riskLevel,
     isPhishing: decision.isPhishing,
   };
+  if (scoringMode === 'checklist') {
+    // Closed values and numbers only: the answers are enums Phishy validated
+    outcome.scoring = {
+      mode: 'checklist',
+      basis: decision.scoreBasis ?? 'model',
+      checklistStatus: analysis.analysisFailed
+        ? 'absent'
+        : (analysis.checklist?.status ?? 'absent'),
+      ...(analysis.checklist?.status === 'ok'
+        ? { answers: { ...analysis.checklist.answers } }
+        : {}),
+      ...(decision.checklistScore !== undefined ? { checklistScore: decision.checklistScore } : {}),
+      ...(decision.checklistRawScore !== undefined
+        ? { checklistRawScore: decision.checklistRawScore }
+        : {}),
+    };
+  }
 
   const placeholder = createFailedAnalysisResult('baseline');
   outcome.markerHits = findMarkerHits(evalCase.criteria.markers, {
@@ -293,7 +329,7 @@ function planRuns(prepared: PreparedCase[], options: RunnerOptions): PlannedRun[
 /** How many model calls a run would make, and a rough cost, without making any */
 export function planSummary(
   prepared: PreparedCase[],
-  options: Pick<RunnerOptions, 'models' | 'modes' | 'repeats'>
+  options: Pick<RunnerOptions, 'models' | 'modes' | 'repeats' | 'scoringMode'>
 ): Array<{
   model: string;
   mode: EvalMode;
@@ -314,8 +350,18 @@ export function planSummary(
         inputTokens:
           billed.reduce((sum, p) => sum + estimateInputTokens(p.prompt, mode), 0) * options.repeats,
         estimatedCostUsd:
-          billed.reduce((sum, p) => sum + estimateCallCostUsd(model, p.prompt, mode), 0) *
-          options.repeats,
+          billed.reduce(
+            (sum, p) =>
+              sum +
+              estimateCallCostUsd(
+                model,
+                p.prompt,
+                mode,
+                ASSUMED_OUTPUT_TOKENS[mode],
+                options.scoringMode
+              ),
+            0
+          ) * options.repeats,
       });
     }
   }
@@ -380,11 +426,13 @@ export async function runEval(
         samples.length >= 3
           ? Math.ceil(samples.reduce((sum, v) => sum + v, 0) / samples.length)
           : ASSUMED_OUTPUT_TOKENS[run.mode];
+      // Measured samples already include the checklist; only the assumption needs the extra
       const estimate = estimateCallCostUsd(
         run.model,
         run.prepared.prompt,
         run.mode,
-        expectedOutput
+        expectedOutput,
+        samples.length >= 3 ? 'model' : options.scoringMode
       );
       if (spent + reserved + estimate > options.maxCostUsd) {
         stoppedForBudget = true;
