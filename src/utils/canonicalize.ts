@@ -12,6 +12,7 @@
 
 import { domainToUnicode } from 'url';
 import { LinkFact } from '../types';
+import { classifyFileShare } from './file-share';
 
 export interface CanonicalText {
   canonical: string;
@@ -24,6 +25,12 @@ const INVISIBLE_CHARS = /[\u200B-\u200F\u2060\uFEFF\u00AD]/g;
 
 /** Bidirectional control characters that can visually reorder text */
 const BIDI_CONTROLS = /[\u202A-\u202E\u2066-\u2069]/g;
+
+/** Most wrapper layers unwrapped from one URL; deeper nesting is disclosed */
+export const MAX_UNWRAP_DEPTH = 4;
+
+/** Longest wrapper target accepted (a target is hostile data) */
+const MAX_WRAPPER_TARGET = 4096;
 
 /**
  * Canonicalize body text: NFKC, strip invisibles and bidi controls, decode
@@ -69,15 +76,39 @@ export function canonicalizeText(raw: string): CanonicalText {
 /**
  * Canonicalize a URL: unwrap known security-gateway and redirect wrappers so
  * the destination is visible, and flag structural obfuscation (punycode).
- * Wrappers are unwrapped only for known wrapper hosts — never guessed.
+ * Wrappers are unwrapped only for known wrapper hosts — never guessed. Each
+ * unwrapped target is canonicalized again (nested wrappers) up to
+ * MAX_UNWRAP_DEPTH layers; nesting beyond that is disclosed, not followed.
  */
 export function canonicalizeUrl(raw: string): { canonical: string; flags: string[] } {
   const flags: string[] = [];
   let current = raw;
 
-  for (let depth = 0; depth < 3; depth++) {
+  for (let depth = 0; ; depth++) {
     const unwrapped = unwrapOnce(current);
     if (!unwrapped) {
+      break;
+    }
+    if (depth >= MAX_UNWRAP_DEPTH) {
+      flags.push(
+        `Wrapped more than ${MAX_UNWRAP_DEPTH} layers deep — the remaining wrapper layers were not unwrapped, so the true destination is still hidden`
+      );
+      break;
+    }
+    if (unwrapped.kind === 'opaque') {
+      flags.push(
+        `Link is wrapped by ${unwrapped.wrapper} — the true destination is held by that service and cannot be recovered from the link${
+          unwrapped.domainHint
+            ? `; the wrapper's own domain parameter names ${unwrapped.domainHint} (not verified)`
+            : ''
+        }`
+      );
+      break;
+    }
+    if (unwrapped.kind === 'undecodable') {
+      flags.push(
+        `Link uses the ${unwrapped.wrapper} wrapper format, but its target could not be decoded as a web address`
+      );
       break;
     }
     flags.push(`Unwrapped ${unwrapped.wrapper} wrapper — true destination was hidden behind it`);
@@ -100,8 +131,20 @@ export function canonicalizeUrl(raw: string): { canonical: string; flags: string
 }
 
 /**
+ * Unwrap every known wrapper layer of a URL and return the destination, or
+ * null when the URL is not a wrapper or its destination cannot be recovered.
+ * Used by IOC extraction so intelligence stores destinations, not wrappers.
+ */
+export function unwrapKnownWrappers(rawUrl: string): string | null {
+  const { canonical } = canonicalizeUrl(rawUrl);
+  return canonical !== rawUrl ? canonical : null;
+}
+
+/**
  * Build link facts for a set of raw URLs: raw form, canonical destination,
- * and per-link flags. Deduplicates by canonical form.
+ * per-link flags, and — when the destination is a file share on a known
+ * hosting platform — what its URL shape reveals about the share's owner.
+ * Deduplicates by canonical form.
  */
 export function buildLinkFacts(rawUrls: string[]): LinkFact[] {
   const byCanonical = new Map<string, LinkFact>();
@@ -110,46 +153,99 @@ export function buildLinkFacts(rawUrls: string[]): LinkFact[] {
     const { canonical, flags } = canonicalizeUrl(raw);
     const existing = byCanonical.get(canonical);
     if (!existing) {
-      byCanonical.set(canonical, { raw, canonical, flags });
+      const fileShare = classifyFileShare(canonical);
+      byCanonical.set(canonical, { raw, canonical, flags, ...(fileShare ? { fileShare } : {}) });
     }
   }
 
   return Array.from(byCanonical.values());
 }
 
+/** Document and archive extensions a lure's link text names as "the file" */
+const DOCUMENT_EXTENSIONS =
+  'pdf|docx?|docm|dotx|xlsx?|xlsm|xlsb|csv|pptx?|pptm|rtf|odt|ods|odp|txt|zip|rar|7z';
+/** A file-name-shaped token at the end of a word boundary in anchor text */
+const FILE_NAME_TEXT = new RegExp(
+  `(?:^|[\\s"'(\\[/])[^\\s"'<>/\\\\]{1,150}\\.(${DOCUMENT_EXTENSIONS})(?=$|[\\s"')\\].,;:!?])`,
+  'i'
+);
+const DIRECT_FILE_PATH = new RegExp(`\\.(?:${DOCUMENT_EXTENSIONS})$`, 'i');
+
+export interface AnchorCheckOptions {
+  /** The claimed sender's domain (hostile text, used only for comparison) */
+  senderDomain?: string;
+}
+
 /**
- * Find anchors whose visible text looks like a URL or domain that differs
- * from the actual href destination — the classic "displayed link is not the
- * real link" trick. Returns one flag per mismatch.
+ * Inspect each anchor for two "the link is not what its text says" tricks
+ * and return one flag per finding:
+ *  - visible text that looks like a URL or domain differing from the
+ *    destination (the classic displayed-link mismatch);
+ *  - visible text that looks like a document file name ("RFQ-2291.pdf") on a
+ *    link that is not a direct download of a file from the claimed sender's
+ *    own domain — a file-share or sign-in page dressed as an attachment.
+ * The destination compared is the canonical one, after gateway unwrapping.
  */
-export function findAnchorMismatches(html: string): string[] {
+export function findAnchorMismatches(html: string, options: AnchorCheckOptions = {}): string[] {
   if (!html) return [];
 
   const flags: string[] = [];
   const anchorPattern = /<a\s[^>]*?href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]{0,500}?)<\/a>/gi;
+  const senderRegistrable = options.senderDomain ? registrableOf(options.senderDomain) : null;
 
   let match: RegExpExecArray | null;
   let count = 0;
   while ((match = anchorPattern.exec(html)) !== null && count < 50) {
     count++;
-    const href = match[1];
-    const anchorText = match[2].replace(/<[^>]*>/g, '').trim();
-
-    const textDomain = extractDomainLike(anchorText);
-    if (!textDomain) continue;
+    const href = canonicalizeUrl(match[1].replace(/&amp;/gi, '&')).canonical;
+    const anchorText = match[2]
+      .replace(/<[^>]*>/g, '')
+      .replace(/&nbsp;/gi, ' ')
+      .trim();
 
     const hrefDomain = registrableDomain(href);
     if (!hrefDomain) continue;
 
-    // Only the two computed domains are quoted, never the anchor text itself:
-    // the flag is rendered under VERIFIED, and anchor text is attacker-chosen
-    // free text (it may span lines and imitate the prompt's structure).
+    // Only computed values (domains, an extension from a fixed list) are
+    // quoted, never the anchor text itself: the flag is rendered under
+    // VERIFIED, and anchor text is attacker-chosen free text (it may span
+    // lines and imitate the prompt's structure).
+    const fileName = FILE_NAME_TEXT.exec(anchorText);
+    if (fileName) {
+      const ext = fileName[1].toLowerCase();
+      const directFile = DIRECT_FILE_PATH.test(safePathname(href));
+      if (!directFile) {
+        flags.push(
+          `Link text looks like a file name (.${ext}) but the link opens a web page on ${hrefDomain}, not a direct download of that file`
+        );
+      } else if (senderRegistrable && hrefDomain !== senderRegistrable) {
+        flags.push(
+          `Link text looks like a file name (.${ext}); the link downloads a file from ${hrefDomain}, which is not the claimed sender's domain`
+        );
+      }
+      // Otherwise a direct download from the sender's own domain, or the
+      // sender's domain is unknown: nothing to say
+    }
+
+    const textDomain = extractDomainLike(anchorText);
+    if (!textDomain) continue;
+    // "RFQ-2291.pdf" is a file name, not a domain (handled above)
+    if (fileName && textDomain.endsWith(`.${fileName[1].toLowerCase()}`)) continue;
+
     if (registrableOf(textDomain) !== hrefDomain) {
       flags.push(`Link text shows the domain ${textDomain} but actually points to ${hrefDomain}`);
     }
   }
 
   return flags;
+}
+
+function safePathname(url: string): string {
+  try {
+    return new URL(url).pathname;
+  } catch {
+    return '';
+  }
 }
 
 /**
@@ -164,7 +260,8 @@ export function registrableDomain(url: string): string | null {
   }
 }
 
-function registrableOf(host: string): string {
+/** Registrable domain (last two labels) of a host name */
+export function registrableOf(host: string): string {
   const labels = host.toLowerCase().split('.').filter(Boolean);
   return labels.slice(-2).join('.');
 }
@@ -175,11 +272,55 @@ function extractDomainLike(text: string): string | null {
   return match ? match[1].toLowerCase() : null;
 }
 
+type UnwrapResult =
+  /** The wrapper's target, decoded: a web URL to canonicalize again */
+  | { kind: 'unwrapped'; url: string; wrapper: string }
+  /** A recognized wrapper whose destination is stored by the service, not in the link */
+  | { kind: 'opaque'; wrapper: string; domainHint?: string }
+  /** A recognized wrapper whose target parameter is missing or not a web URL */
+  | { kind: 'undecodable'; wrapper: string };
+
+/**
+ * The target of a wrapper, accepted only as an absolute http(s) URL of
+ * bounded length and re-serialized by the URL parser, so a target cannot
+ * carry raw whitespace or line breaks. Anything else is not a destination.
+ */
+function decoded(wrapper: string, target: string | null | undefined): UnwrapResult {
+  const trimmed = (target ?? '').trim();
+  if (trimmed.length > 0 && trimmed.length <= MAX_WRAPPER_TARGET && /^https?:\/\//i.test(trimmed)) {
+    try {
+      const parsed = new URL(trimmed);
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+        return { kind: 'unwrapped', url: parsed.href, wrapper };
+      }
+    } catch {
+      // fall through: not a web address
+    }
+  }
+  return { kind: 'undecodable', wrapper };
+}
+
+/** A hostname-shaped hint, or undefined: the value comes from the link and is hostile */
+function hostnameHint(value: string | null): string | undefined {
+  if (!value) return undefined;
+  const v = value.trim().toLowerCase();
+  return v.length <= 253 && /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(v)
+    ? v
+    : undefined;
+}
+
 /**
  * Unwrap one layer of a known URL wrapper. Returns null when the URL is not
- * a recognized wrapper.
+ * a recognized wrapper. Each wrapper is matched on its exact host (and path
+ * where the format has one), so a look-alike host is never unwrapped, and
+ * its target parameter is hostile data, accepted only as a web URL.
+ *
+ * Deliberately not unwrapped: Sophos and Trend Micro time-of-click links.
+ * Their rewritten-link parameters are known only from community posts and
+ * samples, not vendor documentation, so they are left as they are rather
+ * than guessed at.
  */
-function unwrapOnce(rawUrl: string): { url: string; wrapper: string } | null {
+function unwrapOnce(rawUrl: string): UnwrapResult | null {
   let url: URL;
   try {
     url = new URL(rawUrl);
@@ -191,32 +332,73 @@ function unwrapOnce(rawUrl: string): { url: string; wrapper: string } | null {
 
   // Microsoft Defender SafeLinks: https://*.safelinks.protection.outlook.com/?url=...
   if (host.endsWith('.safelinks.protection.outlook.com')) {
-    const target = url.searchParams.get('url');
-    if (target) return { url: target, wrapper: 'Microsoft SafeLinks' };
+    return decoded('Microsoft SafeLinks', url.searchParams.get('url'));
   }
 
   // Proofpoint urldefense v2: https://urldefense.proofpoint.com/v2/url?u=<encoded>
   if (host === 'urldefense.proofpoint.com' || host === 'urldefense.com') {
     const v2 = url.searchParams.get('u');
     if (v2) {
-      const decoded = v2.replace(/-/g, '%').replace(/_/g, '/');
+      const encoded = v2.replace(/-/g, '%').replace(/_/g, '/');
       try {
-        return { url: decodeURIComponent(decoded), wrapper: 'Proofpoint URL Defense' };
+        return decoded('Proofpoint URL Defense', decodeURIComponent(encoded));
       } catch {
-        return { url: decoded, wrapper: 'Proofpoint URL Defense' };
+        return decoded('Proofpoint URL Defense', encoded);
       }
     }
     // v3: https://urldefense.com/v3/__<url>__;<map>!!...
     const v3 = url.pathname.match(/^\/v3\/__(.+?)__;/);
     if (v3) {
-      return { url: v3[1], wrapper: 'Proofpoint URL Defense' };
+      return decoded('Proofpoint URL Defense', v3[1]);
     }
   }
 
   // Google redirect: https://www.google.com/url?q=... (or url=...)
   if ((host === 'www.google.com' || host === 'google.com') && url.pathname === '/url') {
     const target = url.searchParams.get('q') ?? url.searchParams.get('url');
-    if (target) return { url: target, wrapper: 'Google redirect' };
+    if (target) return decoded('Google redirect', target);
+  }
+
+  // Barracuda Email Protection Link Protection. Barracuda Campus,
+  // "Understanding Link Protection" (Email Gateway Defense): rewritten links
+  // take the form https://linkprotect.cudasvc.com/url?a=<original URL,
+  // usually percent-encoded>&c=<token>[&typo=1]; `a` is the original URL.
+  if (host === 'linkprotect.cudasvc.com' && url.pathname === '/url') {
+    return decoded('Barracuda Link Protection', url.searchParams.get('a'));
+  }
+
+  // Symantec / Broadcom Email Security.cloud Click-time URL Protection:
+  // https://clicktime.symantec.com/<token>?u=<original URL, percent-encoded>.
+  // Broadcom KB 163838 ("Whitelist a domain with the Symantec Click-time URL
+  // Protection service") recovers the original by URL-decoding the link.
+  if (host === 'clicktime.symantec.com') {
+    return decoded('Symantec Click-time URL Protection', url.searchParams.get('u'));
+  }
+
+  // Mimecast Targeted Threat Protection URL Protect. The rewritten link is a
+  // token the service resolves (https://protect-<region>.mimecast.com/s/<token>,
+  // and since Mimecast's Nov 2023 domain update url.<region>.<service>.mimecastprotect.com),
+  // so the destination is not in it. With "Display URL Destination Domain"
+  // enabled Mimecast appends ?domain=<destination domain> (Mimecast support,
+  // "Targeted Threat Protection - URL Protect - Verifying a URL").
+  // Recognized and disclosed, never decoded.
+  if (
+    (/^protect(?:-[a-z0-9]+)?\.mimecast\.com$/.test(host) && url.pathname.startsWith('/s/')) ||
+    host.endsWith('.mimecastprotect.com')
+  ) {
+    return {
+      kind: 'opaque',
+      wrapper: 'Mimecast URL Protect',
+      domainHint: hostnameHint(url.searchParams.get('domain')),
+    };
+  }
+
+  // Cisco Secure Email URL rewriting: Cisco's URL Defense guide
+  // (docs.ces.cisco.com) documents that rewritten links start with
+  // https://secure-web.cisco.com/. How the original is encoded after that
+  // prefix is not documented, so the link is recognized, not decoded.
+  if (host === 'secure-web.cisco.com') {
+    return { kind: 'opaque', wrapper: 'Cisco Secure Email URL rewriting' };
   }
 
   return null;

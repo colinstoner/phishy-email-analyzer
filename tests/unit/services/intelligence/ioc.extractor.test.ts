@@ -225,6 +225,18 @@ describe('extractIOCs', () => {
       expect(finalUrl?.metadata?.extractionContext).toBe('final_url');
     });
 
+    it('unwraps a gateway link-protection wrapper to its destination', () => {
+      const target = 'https://quarryexample-my.sharepoint.com/:f:/g/personal/r_quarry_test/Ek';
+      const emailData = createMockEmailData({
+        links: [`https://linkprotect.cudasvc.com/url?a=${encodeURIComponent(target)}&c=E,1,x`],
+      });
+
+      const iocs = extractIOCs(emailData, createMockAnalysis(true, 'Very High'));
+
+      const finalUrl = iocs.find(i => i.indicatorType === 'url' && i.indicatorValue === target);
+      expect(finalUrl?.metadata?.extractionContext).toBe('final_url');
+    });
+
     it('marks redirect intermediaries low severity', () => {
       const emailData = createMockEmailData({
         links: ['https://tracker.example.net/r?url=https%3A%2F%2Fevil-landing.test%2F'],
