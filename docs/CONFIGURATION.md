@@ -164,6 +164,40 @@ Requires the intelligence database and `migrations/002_analysis_feedback.sql`.
 |----------|---------|-------------|
 | `PHISHY_EMAIL_COMMANDS_ENABLED` | `false` | Process security-team replies as commands |
 
+With [campaign response](#campaign-response-optional) on, the channel also accepts **approvals** of proposed actions. Those are never interpreted by the model and never matched loosely: only a line of its own reading `APPROVE WARNING <reference>` or `APPROVE REMOVAL <reference>`, in your own new text (not the quoted history), with the reference printed next to that action in the incident email. Approving twice does nothing twice.
+
+### Campaign Response (Optional)
+
+What Phishy does once a campaign crosses the alert threshold (at least 3 reports from at least 2 people within 4 hours). Off by default; off means the campaign alert behaves exactly as before: one generic warning to `PHISHY_CAMPAIGN_ALERTS_DISTRIBUTION`.
+
+When on, each campaign becomes an **incident**:
+
+- **The security team** gets one incident email: what the attack is, timeline, blast radius, what Phishy has done, and proposed actions, each with the exact reply line that approves it. Later reports and wider reach arrive as replies in the same thread, at most one per `updateIntervalMinutes`.
+- **The people who received it** (found by blast radius) get a plain-language warning, one email each, with your organization's own "if you already clicked" instructions. People who reported it get a short thank-you note instead. Nobody whose copy was not delivered is warned; every address must be on a safe domain; no link from the attack is ever included.
+- **Remove remaining copies** is proposed with a scope of exact message IDs per mailbox. In this version approving it runs a **dry run**: Phishy replies with what it would remove, and no mailbox is changed (the mailbox write tier is not built).
+
+`audience` decides who is warned. The default, `distribution`, keeps today's broadcast. Choose `recipients` (or `both`) to warn the people who actually received it; that needs [blast radius](#blast-radius-optional). `employeeWarning` decides whether the targeted warning waits for an approval (`approve`, the default), goes out at once (`auto`) or never (`off`); `distributionWarning` does the same for the broadcast (default `auto`, as before). An approval is good for `approvalTtlHours` and applies to its own campaign only; a late approval is proposed again under a new reference.
+
+Requires campaign alerts (`PHISHY_CAMPAIGN_ALERTS_ENABLED`), the intelligence database, `migrations/005_campaign_response.sql` (applied manually; without it Phishy logs which migration to apply and behaves as with campaign response off), and the email command channel for approvals. Migration 003 is needed for a `false positive` reply to close an incident.
+
+| Variable | Config key | Default | Description |
+|----------|-----------|---------|-------------|
+| `PHISHY_CAMPAIGN_RESPONSE_ENABLED` | `campaignResponse.enabled` | `false` | Turn campaign response on |
+| `PHISHY_CAMPAIGN_RESPONSE_AUDIENCE` | `campaignResponse.audience` | `distribution` | Who is warned: `distribution`, `recipients` or `both` |
+| `PHISHY_CAMPAIGN_RESPONSE_EMPLOYEE_WARNING` | `campaignResponse.employeeWarning` | `approve` | Targeted warning: `off`, `approve` (after a security-team approval) or `auto` |
+| `PHISHY_CAMPAIGN_RESPONSE_LIST_WARNING` | `campaignResponse.distributionWarning` | `auto` | Distribution-list broadcast: `off`, `approve` or `auto` |
+| `PHISHY_CAMPAIGN_RESPONSE_APPROVAL_TTL_HOURS` | `campaignResponse.approvalTtlHours` | `4` | How long a proposed action can be approved (max 72) |
+| `PHISHY_CAMPAIGN_RESPONSE_MAX_WARNINGS` | `campaignResponse.maxWarningsPerCampaign` | `100` | Most employee emails (warnings and thank-you notes) per campaign (1–1000) |
+| `PHISHY_CAMPAIGN_RESPONSE_MAX_REMOVAL_MAILBOXES` | `campaignResponse.maxRemovalMailboxes` | `500` | Most mailboxes one removal may name |
+| `PHISHY_CAMPAIGN_RESPONSE_MAX_REMOVAL_MESSAGES` | `campaignResponse.maxRemovalMessages` | `1000` | Most messages one removal may name |
+| `PHISHY_CAMPAIGN_RESPONSE_UPDATE_INTERVAL_MINUTES` | `campaignResponse.updateIntervalMinutes` | `30` | Shortest gap between incident updates |
+| `PHISHY_CAMPAIGN_RESPONSE_CLICKED_INSTRUCTIONS` | `campaignResponse.alreadyClickedInstructions` | *(see below)* | Plain text shown under "If you already clicked or entered your password" |
+| `PHISHY_CAMPAIGN_RESPONSE_TIME_ZONE` | `campaignResponse.timeZone` | `UTC` | IANA time zone for the times in the warning (e.g. `Europe/London`) |
+
+Default "already clicked" text: *If you clicked a link in it, opened an attachment, or entered your password, contact your IT or security team straight away and change your password. You will not be in trouble: reporting it quickly is what limits the damage.* Replace it with your organization's own instructions (who to call, how to reach them out of hours).
+
+Sending notes: warnings are sent one per person through SES, so `maxWarningsPerCampaign` emails count against your SES sending rate and quota; in `auto` mode they are sent from the Lambda that crossed the threshold, after the reports, and anything not sent before the function runs short of time is counted and proposed again. The targeted warning reaches at most the 100 recipients a blast-radius lookup lists; a larger campaign's incident email says how many have no known address, and `audience: both` covers them with the broadcast.
+
 ### Outlook Report Button Intake
 
 Microsoft 365 can deliver a copy of every message an employee reports with Outlook's built-in **Report** button to a mailbox of your choice (Defender portal → Settings → Email & collaboration → User reported settings → *Send reported messages to*). If those reports reach Phishy's address, this flag makes Phishy recognize them and handle them **silently** — the employee clicked a button and is not waiting for an answer, so their experience does not change:

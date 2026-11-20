@@ -5,7 +5,7 @@
 
 import { SESClient, SendEmailCommand } from '@aws-sdk/client-ses';
 import { createLogger } from '../../utils/logger';
-import { IntelligenceDatabaseService, CampaignRecord } from './database.service';
+import { IntelligenceDatabaseService, CampaignMatch, CampaignRecord } from './database.service';
 
 const logger = createLogger('campaign-service');
 
@@ -84,6 +84,72 @@ export class CampaignAlertService {
       });
       return false;
     }
+  }
+
+  /**
+   * Count a detection toward its campaign without alerting anyone: campaign
+   * response decides what happens next. Same gates as `processDetection`.
+   * Returns the match and the campaign row, or undefined when the detection
+   * does not count (feature off, risk below high) or tracking failed.
+   */
+  async trackDetection(
+    senderDomain: string,
+    subject: string,
+    recipientEmail: string,
+    riskLevel: 'critical' | 'high' | 'medium' | 'low',
+    indicators: string[]
+  ): Promise<{ match: CampaignMatch; campaign: CampaignRecord } | undefined> {
+    if (!this.config.enabled || (riskLevel !== 'high' && riskLevel !== 'critical')) {
+      return undefined;
+    }
+    try {
+      const match = await this.db.trackCampaignDetection(
+        senderDomain,
+        subject,
+        recipientEmail,
+        riskLevel,
+        indicators
+      );
+      if (!match) {
+        return undefined;
+      }
+      const campaign = await this.db.getCampaignDetails(match.campaignId);
+      return campaign ? { match, campaign } : undefined;
+    } catch (error) {
+      logger.error('Failed to track campaign detection', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return undefined;
+    }
+  }
+
+  /**
+   * The broadcast `processDetection` sends when a campaign crosses the
+   * threshold, for a match already tracked. Used by campaign response when
+   * its tables are missing, so the behaviour is exactly as without it.
+   */
+  async sendLegacyAlert(match: CampaignMatch): Promise<boolean> {
+    if (!match.shouldAlert || !this.config.distributionList) {
+      return false;
+    }
+    try {
+      const campaign = await this.db.getCampaignDetails(match.campaignId);
+      if (!campaign) {
+        return false;
+      }
+      await this.sendCampaignAlert(campaign);
+      await this.db.markCampaignAlerted(match.campaignId);
+      return true;
+    } catch (error) {
+      logger.error('Failed to send campaign alert', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return false;
+    }
+  }
+
+  async markAlerted(campaignId: string): Promise<void> {
+    await this.db.markCampaignAlerted(campaignId);
   }
 
   /**

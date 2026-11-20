@@ -67,8 +67,10 @@ Three principals, three levels of trust:
 | Principal | May | Authenticated by |
 |---|---|---|
 | Any safe-domain employee | report emails for analysis | sender domain ∈ `SAFE_DOMAINS` |
-| Security team | correct verdicts by replying to reports (commands) | membership in `SECURITY_TEAM_DISTRIBUTION` **and** SES SPF or DKIM `PASS` on the reply |
+| Security team | correct verdicts by replying to reports (commands); approve campaign-response actions | membership in `SECURITY_TEAM_DISTRIBUTION` **and** SES SPF or DKIM `PASS` on the reply |
 | The suspicious email | nothing | it is CLAIMED data, everywhere |
+
+**Who Phishy emails** (invariant 4, extended). Phishy sends email to exactly four kinds of address: the reporter (`originalForwarder`, which must be extractable and on a safe domain), the operator-configured security team and distribution list, and, with [campaign response](#campaign-response-optional), the recipients its own blast-radius lookup found and the campaign's reporters. That last source is new and gets the same rule: every address must be a plain address on a configured safe domain, checked when the warning's scope is computed and again immediately before each email is sent (`isSafeRecipient`, `services/response/scope.ts`). An address that fails is counted and skipped, never emailed. No address is ever taken from the suspicious email's content.
 
 The SES verdicts describe the hop that delivered the reply to Phishy — which is exactly the hop that needs authenticating for commands. They are never presented as authenticating the *suspicious* sender (that email's own Authentication-Results header, when preserved by forward-as-attachment, is surfaced as a CLAIMED/forwarded header instead; so are headers retrieved by the original-message lookup).
 
@@ -86,6 +88,7 @@ The SES verdicts describe the hop that delivered the reply to Phishy — which i
 | `EmailCommandService` | `services/commands/email.command.service.ts` | security-team replies → verdict feedback → completed-action replies |
 | `IntelligenceDatabaseService` | `services/intelligence/database.service.ts` | PostgreSQL: analyses, IOCs, campaigns, feedback, usage |
 | `CampaignAlertService` | `services/intelligence/campaign.service.ts` | flood detection → employee alerts |
+| `CampaignResponseService` | `services/response/campaign.response.service.ts` | campaign response (optional): incident email, targeted warning, approved actions, dry-run removal |
 | `SESNotifier` | `services/notification/ses.notifier.ts` | outbound reports and replies |
 
 ## When the model does not produce a verdict
@@ -184,7 +187,7 @@ There is no path, URL, filter, query or "call Graph" operation, and no field is 
 
 **Direction (not built).** Two things this design leaves room for and deliberately does not include:
 
-- *A write tier.* Any write to the tenant (quarantining or removing a message, for example) will be a **separate** broker function with its **own** app registration and certificate, so that the read broker can never obtain a write token (invariant 6), and each write will require security-team approval through the authenticated command channel (invariant 2). It will not be an operation added to this broker.
+- *A write tier.* Any write to the tenant (quarantining or removing a message, for example) will be a **separate** broker function with its **own** app registration and certificate, so that the read broker can never obtain a write token (invariant 6), and each write will require security-team approval through the authenticated command channel (invariant 2). It will not be an operation added to this broker. Campaign response already has the approval flow, action model and audit trail such a tier needs, and a dry-run executor in its place ([below](#the-response-action-model)); the write tier itself is not built.
 - *Model-driven hunting.* A later threat-hunting agent may be allowed to call these same typed read operations. It will never be given raw Graph: no path, filter or query authored by a model. That is why the interface is typed operations today, while the only caller is code. Until then, Graph remains code-driven and is not an agentic tool.
 
 Configuration and what the broker function needs to be deployed with are in [CONFIGURATION.md](CONFIGURATION.md#graph-broker-optional); the SAM template deploys Graph in broker mode (`GraphEnabled=true`), described with its cost in [AWS.md](../AWS.md#optional-microsoft-graph-the-graph-broker-function).
@@ -193,7 +196,8 @@ Configuration and what the broker function needs to be deployed with are in [CON
 
 `blast-radius.service.ts` answers the security team's next question after a malicious verdict: who else received this, and did anyone open or answer it? Off by default (`graph.blastRadius.enabled`, effective only with `graph.enabled`).
 
-- **Where it runs.** In `lambda.handler.ts` (`sendReports`), after the fused verdict, after the analysis has been stored and after the reporter's copy of the report has been sent, only when that verdict is malicious (`riskDecision.isPhishing`), the analysis did not fail, the reporter is not a safelist user and there is a security team to tell. Its result is passed to the report template and nowhere else: not to the model, not to the database, not to the logs (which get counts only).
+- **Where it runs.** In `lambda.handler.ts` (`sendReports`), after the fused verdict, after the analysis has been stored and after the reporter's copy of the report has been sent, only when that verdict is malicious (`riskDecision.isPhishing`), the analysis did not fail, the reporter is not a safelist user and there is a security team to tell. Its result is passed to the report template and nowhere else: not to the model and not to the logs (which get counts only). The one exception is [campaign response](#campaign-response-optional), when it is enabled: the same result (not a second lookup) is folded into the campaign's incident, stored in `campaign_incidents.reach`, and used to address the targeted warning and to scope the dry-run removal.
+- **Identifiers for response actions.** For each mailbox that holds the message, the report also carries the mailbox's directory object ID (a GUID), the Graph IDs of the matching copies (at most 5, shape-checked) and when the first copy arrived. They are never rendered in a report. They exist so a response action can name *exactly* the copies this lookup matched instead of re-searching; the broker's wire format accepts only those shapes (`DIRECTORY_ID_PATTERN`, `GRAPH_ITEM_ID_PATTERN`, `graph.limits.ts`).
 - **Identifying the message.** By the original's Internet Message-ID when the parsed email carries one (`forwardedHeaders['Original-Message-ID']`); otherwise by the claimed sender address, the quoted subject and a time window (24 hours either side of the claimed date, or the last 7 days when the forward has no usable date). All of these are hostile strings and reach Graph only through `odataFilter`.
 - **Route 1: message trace.** Recipients and delivery status without reading a mailbox. Each trace row also names the Message-ID that recipient received, so however the trace was keyed, each recipient's mailbox is then read by `internetMessageId eq` (an exact, cheap lookup; at most 3 distinct IDs per mailbox, disclosed when capped) for the folder, read flag and last verb. Rows with status *expanded* (a distribution list, whose members have their own rows) are left out; *failed* rows are listed as not delivered and their mailboxes are not read.
 - **Route 2: per-mailbox search.** When trace fails (commonly HTTP 403: the tenant lacks Microsoft's message-trace service principal, or it is still propagating) or returns no rows, Phishy lists users, keeps licensed, enabled, non-guest accounts up to the mailbox cap, and searches each: by Message-ID when the key has one, otherwise by sender + window (+ subject). The sender search is a filtered, ordered scan and is much slower per mailbox than a Message-ID lookup; it is used only here, where no Message-ID is known. `/messages` does not cover Recoverable Items, so mailboxes without a match are searched there too, time permitting.
@@ -262,6 +266,65 @@ processEmailEvent
 
 Thresholds and request counts are in [CONFIGURATION.md](CONFIGURATION.md#sender-relationship-check-optional).
 
+## Campaign response (optional)
+
+Off by default (`campaignResponse.enabled`). Detection is the campaign alert's (at least 3 reports, at least 2 reporters, within 4 hours); campaign response decides what happens once a campaign crosses that line. Without it, the campaign alert sends one generic warning to a distribution list and nothing else. With it, the campaign becomes an **incident**:
+
+```
+report N (malicious) ──▶ trackDetection (count only) ──▶ reports sent (+ blast radius, as before)
+                                                              │
+                                                              ▼
+                              CampaignResponseService.handleCampaignReport
+                                 no incident, threshold crossed → open it
+                                 incident exists               → merge reach, maybe update
+                                                              │
+         ┌──────────────────────────────┬─────────────────────┴───────────────┐
+         ▼                              ▼                                     ▼
+  incident email / threaded      auto actions (if set):                proposed actions:
+  update to the security team    warning, distribution list            warning, removal (dry run)
+                                                                        └▶ APPROVE … <ref> via the
+                                                                           command channel
+```
+
+**What the security team gets.** One incident email per campaign (`templates/campaign.response.html.ts`), built for a decision: a one-paragraph summary in plain words, the verdict with the risk score and Confidence line (the report's own helpers), what the attack is (subject, claimed sender, the model's description of the lure, the main reasons), the timeline (first delivery from mailbox records when known, first and latest report, report count), the blast radius (recipients, read, replied, forwarded, still in an inbox, not delivered, coverage, the 25 most significant recipients), what Phishy has done, and **proposed actions**, each with the exact reply line that approves it and a plain statement of what it will do. Later reports and wider reach produce an **update**: a reply in the same thread (`In-Reply-To`/`References` set to the first email's SES Message-ID, sent with `SendRawEmail`; the subject is stable so clients that thread by subject agree), at most one per `updateIntervalMinutes`, and only when something changed. Proposals are replaced only when an update is actually sent, so the team never holds a reference Phishy has silently superseded.
+
+**What employees get.** The *targeted warning* goes to the people blast radius found, one email each (never a shared To/Cc), saying in their own terms what arrived ("an email with the subject … from … arrived in your mailbox on …", adjusted when their copy is in Junk or Deleted Items), what to do, the organization's own "if you already clicked" text (`alreadyClickedInstructions`), and that they need not forward it. People who reported it get a shorter thank-you note instead. Nobody whose copy was never delivered is warned. The *distribution warning* is the broadcast to `campaignAlerts.distributionList`, in the same voice. Every value from the suspicious email is shown through `displayText` (`services/response/display.ts`): one line, control and bidi characters removed, defanged (`hxxps[:]//`, `example[.]test`) so no mail client makes it a link, and HTML-escaped. No campaign-response email contains a link from the attack.
+
+**Who is warned, and how it is authorized.** `audience` picks `distribution` (the default: today's behaviour), `recipients` or `both`. `employeeWarning` (`off` / `approve` / `auto`, default `approve`) governs the targeted warning; `distributionWarning` (default `auto`, as before) governs the broadcast. A wrong warning to dozens of people about a legitimate supplier is costly, so the targeted warning waits for a security-team approval unless the operator chooses `auto`. An incident opened by the fan-out scan (below) is always `approve`, whatever the setting, because no model verdict exists yet. A cap (`maxWarningsPerCampaign`) bounds the employee emails one campaign can send, warnings before thank-you notes; whatever the cap or a missing address left out is stated in the incident email.
+
+### The response-action model
+
+An action (`services/response/response.types.ts`, table `response_actions`) has a **type** (`send_warning`, `remove_messages`), an **incident** (so a campaign), a **scope computed by code** (`services/response/scope.ts`), an **authorization** (`approve` or `auto`), an **approver** (the authenticated security-team member, or `auto`), an **approval window** (`expiresAt`, `approvalTtlHours` after the proposal), a **status** (`proposed` → `approved` → `completed` / `dry_run_completed` / `failed`, or `expired` / `cancelled`), a **scope hash** and a **result**. Every state change appends a row to `response_action_audit`, which the migration makes append-only with a trigger.
+
+- **Warning scope**: the recipients (address, arrival time, folder) and reporters to email, and whether the broadcast is included, with counts of who was left out and why.
+- **Removal scope**: for each mailbox, its directory ID and the *exact Graph message IDs* the blast-radius lookup matched for this campaign, never a search expression; capped at `maxRemovalMailboxes` and `maxRemovalMessages`; purged copies are left out.
+- **Approval re-checks the scope and never widens it.** A warning goes only to people the approved scope named who are still on a safe domain, not already contacted and within the cap. A removal dry run counts only approved message IDs that the incident's latest reach still shows, by state; newer copies are reported, not included.
+- **Expiry and supersession.** An approval that arrives after `expiresAt` does nothing: the action is marked expired, the scope is recomputed and proposed again under a new reference, and the reply gives the new line. An update that recomputes a scope cancels the old proposal (audited as superseded); approving a cancelled reference does nothing.
+- **False positive.** The existing `false positive` reply (matched through the `Analysis ID:` line the incident email carries) also marks the incident a false positive and cancels its proposed actions.
+
+**Executors** (`services/response/executors.ts`). `SesWarningExecutor` sends the warning. `DryRunRemovalExecutor` is the only removal executor: on approval it records what a removal *would* do (unread in the inbox, read in the inbox, in Junk, already in Deleted Items, elsewhere; no longer matched; new since approval) and replies to the approver with that result and the statement that no mailbox was changed because the write tier is not installed. **There is no Graph write call anywhere in Phishy.**
+
+**The write-tier seam (not built).** A real removal will be a separate module implementing `RemovalExecutor` with `changesMailboxes: true`, selected in `createRemovalExecutor`. It will not call Graph from the main function or through the read broker. It will invoke a **second broker function**, deployed separately, holding its **own** Entra app registration and certificate with `Mail.ReadWrite` (application), with one typed operation that takes `{ mailboxId, messageIds[] }` exactly as the approved scope names them, re-reads each message by ID, refuses any whose Internet Message-ID does not match the campaign's, moves each to Deleted Items (or Recoverable Items) rather than hard-deleting, and reports per-message outcomes. The read broker and the main function never hold that credential (invariant 6), and every call requires an approved, unexpired action (invariant 2). The action model, scopes, caps, audit and approval flow above are already what it needs; only the executor is missing.
+
+### Approvals over the command channel
+
+Approvals use the existing channel and its authentication unchanged: the sender must be on the security team **and** the reply must carry SES SPF or DKIM `PASS` (`EmailCommandService.passesAuthentication`); `CampaignResponseService.handleApprovals` checks membership again. Beyond that:
+
+- **Exact form, never a model.** Free-text verdicts may be read by the model when agentic mode is on; approvals of actions never are. Only a line consisting of `APPROVE WARNING <ref>` or `APPROVE REMOVAL <ref>` (case and spacing aside) is an approval (`services/commands/response.commands.ts`). A line that starts like an approval but is not exactly one gets the exact forms back and approves nothing.
+- **From the reply's own new text only.** Lines are taken from `extractFreshText` (quoted history and everything after a reply separator removed), so a quoted approval, or hostile text quoted from the suspicious email, is never read. Phishy's own emails print each command after other text on the same line (`Reply with this line:  APPROVE …`), so even a quote Phishy fails to recognize cannot match.
+- **A specific incident, by an unguessable reference.** Each action has its own `PHY-XXXX-XXXX-XXXX-XXXX` reference (80 random bits, base32), sent only to the security team; the verb must match the action's type.
+- **Idempotent.** Approval is one conditional `UPDATE … WHERE status = 'proposed' AND expires_at > NOW()`: approving twice, or two people approving at once, carries the action out once; the second approver is told who approved it and when.
+
+### Second trigger: the fan-out scan
+
+`CampaignResponseService.openIncidentFromFanoutAlert(input: FanoutIncidentInput)` is for a behaviour-based scan that alerts before anyone has reported a message. It opens an incident with zero reports (`trigger_source = 'fanout_scan'`, verdict `suspicious`, the scan's reasons and reach) under the campaign signature reports of that message will compute (the caller may pass it; otherwise it is computed from the first safe domain and the subject), sends the same incident email, and proposes actions, all in `approve` mode. When reports later arrive they join the same incident. Nothing in campaign response depends on the scan's code.
+
+### Failure and degradation
+
+Campaign response needs campaign alerts (its trigger), the intelligence database and migration 005. If the migration is missing, the first query fails with `42P01`/`42703`, one log line says to apply `migrations/005_campaign_response.sql`, and the campaign alert behaves exactly as it does with campaign response off. Without blast radius, the incident email says so and no targeted warning is proposed. With the command channel off, the incident email says approvals cannot be received. Nothing in campaign response throws into the pipeline; reports are always sent first.
+
+Metrics (EMF): `CampaignIncidentsOpened` (`Trigger`), `CampaignIncidentUpdates`, `CampaignWarningsSent` (`Audience`), `CampaignThanksSent`, `CampaignWarningsSkipped` (`Reason`), `CampaignWarningSendFailures`, `ResponseActionsProposed`, `ResponseActionApprovals`, `ResponseActionApprovalsRejected` (`Reason`), `ResponseActionsExpired`, `ResponseActionsDryRun` (`ActionType` where it applies).
+
 ## Feature flags
 
 Everything optional is off by default and independently enableable:
@@ -270,6 +333,7 @@ Everything optional is off by default and independently enableable:
 |---|---|---|
 | `PHISHY_INTELLIGENCE_ENABLED` | threat-intel DB | PostgreSQL |
 | `PHISHY_CAMPAIGN_ALERTS_ENABLED` | flood alerts | intelligence DB |
+| `PHISHY_CAMPAIGN_RESPONSE_ENABLED` | [campaign response](#campaign-response-optional): incident email, targeted warning, approved actions (dry-run removal) | campaign alerts + intelligence DB + migration 005; the command channel for approvals; blast radius for targeted warnings |
 | `PHISHY_CAMPAIGN_CACHE_ENABLED` | verdict reuse | intelligence DB + migration 003 |
 | `PHISHY_EMAIL_COMMANDS_ENABLED` | security-team replies | intelligence DB + migration 002 |
 | `PHISHY_AGENTIC_ENABLED` | tool-loop analysis + AI command parsing | nothing (tools appear as their backends do) |

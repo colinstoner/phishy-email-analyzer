@@ -51,6 +51,9 @@ import { extractIOCs, IOCSourceContext } from '../services/intelligence/ioc.extr
 import { ThreatIndicatorRecord, FeedbackRecord } from '../services/intelligence/database.service';
 import type { BlastRadiusReport } from '../services/graph/blast-radius.service';
 import { GraphGateway, createGraphGateway } from '../services/graph/graph.gateway';
+import { CampaignResponseService } from '../services/response/campaign.response.service';
+import { ResponseStore } from '../services/response/response.store';
+import type { CampaignMatch, CampaignRecord } from '../services/intelligence/database.service';
 
 const logger = createLogger('lambda-handler');
 
@@ -77,6 +80,8 @@ let cachedServices: {
   sesNotifier: SESNotifier;
   analysisService: AnalysisService;
   campaignService?: CampaignAlertService;
+  /** Incident email, targeted warning and approved actions (campaignResponse.enabled) */
+  campaignResponse?: CampaignResponseService;
   intelligenceDb?: IntelligenceDatabaseService;
   commandService?: EmailCommandService;
   /**
@@ -220,10 +225,15 @@ async function initializeServices(): Promise<{
     intelligenceDb = new IntelligenceDatabaseService(config.intelligence.connectionString);
     await intelligenceDb.initialize();
 
-    if (config.campaignAlerts?.enabled && config.campaignAlerts.distributionList) {
+    // Campaign response can run without a distribution list (audience
+    // `recipients`); without campaign response the list is required, as before
+    if (
+      config.campaignAlerts?.enabled &&
+      (config.campaignAlerts.distributionList || config.campaignResponse?.enabled)
+    ) {
       campaignService = new CampaignAlertService(intelligenceDb, {
         enabled: true,
-        distributionList: config.campaignAlerts.distributionList,
+        distributionList: config.campaignAlerts.distributionList ?? '',
         senderEmail: config.notification.senderEmail,
         senderName: 'Phishy',
         region: config.storage.region,
@@ -269,15 +279,55 @@ async function initializeServices(): Promise<{
     configSet: config.notification.sesConfigSet,
   });
 
+  // Campaign response (off by default): incident email, targeted warning,
+  // approved actions. Needs campaign alerts (the trigger) and the database.
+  let campaignResponse: CampaignResponseService | undefined;
+  if (config.campaignResponse?.enabled) {
+    if (campaignService && intelligenceDb) {
+      const db = intelligenceDb;
+      const alerts = campaignService;
+      campaignResponse = new CampaignResponseService({
+        store: new ResponseStore({
+          query: (text, params): ReturnType<typeof db.runQuery> => db.runQuery(text, params),
+        }),
+        mailer: sesNotifier,
+        config: config.campaignResponse,
+        safeDomains: config.email.safeDomains,
+        securityTeam: config.notification.securityTeamDistribution,
+        distributionList: config.campaignAlerts?.distributionList,
+        commandsEnabled: !!(config.commands?.enabled && intelligenceDb),
+        legacyAlert: (match: CampaignMatch): Promise<boolean> => alerts.sendLegacyAlert(match),
+        markCampaignAlerted: (campaignId: string): Promise<void> => alerts.markAlerted(campaignId),
+      });
+      logger.info('Campaign response enabled', {
+        audience: config.campaignResponse.audience,
+        employeeWarning: config.campaignResponse.employeeWarning,
+        distributionWarning: config.campaignResponse.distributionWarning,
+        commandsEnabled: !!config.commands?.enabled,
+      });
+      if (!config.commands?.enabled) {
+        logger.warn(
+          'Campaign response is on but the command channel is off: approvals cannot be received (PHISHY_EMAIL_COMMANDS_ENABLED)'
+        );
+      }
+    } else {
+      logger.warn(
+        'campaignResponse.enabled has no effect without campaign alerts and the intelligence database'
+      );
+    }
+  }
+
   // Email command channel: security team replies to reports to direct Phishy.
-  // With agentic mode on, free-text commands are interpreted by the model.
+  // With agentic mode on, free-text verdicts are interpreted by the model;
+  // approvals of response actions never are.
   let commandService: EmailCommandService | undefined;
   if (config.commands?.enabled && intelligenceDb) {
     commandService = new EmailCommandService(
       intelligenceDb,
       sesNotifier,
       config.notification.securityTeamDistribution,
-      config.agentic?.enabled ? primaryProvider : undefined
+      config.agentic?.enabled ? primaryProvider : undefined,
+      campaignResponse
     );
     logger.info('Email command service initialized', {
       authorizedSenders: config.notification.securityTeamDistribution.length,
@@ -298,6 +348,7 @@ async function initializeServices(): Promise<{
     analysisService,
     intelligenceDb,
     campaignService,
+    ...(campaignResponse ? { campaignResponse } : {}),
     commandService,
     graph,
   };
@@ -712,8 +763,24 @@ async function processEmailEvent(
     }
   }
 
-  // Track for campaign detection if phishing detected (skip for safelist users)
-  if (riskDecision.isPhishing && services.campaignService && !isSafelistUser) {
+  // Track for campaign detection if phishing detected (skip for safelist users).
+  // With campaign response on, the detection is only counted here; what
+  // happens next is decided after the reports (and blast radius) have gone.
+  let trackedCampaign: { match: CampaignMatch; campaign: CampaignRecord } | undefined;
+  if (
+    riskDecision.isPhishing &&
+    services.campaignService &&
+    services.campaignResponse &&
+    !isSafelistUser
+  ) {
+    trackedCampaign = await services.campaignService.trackDetection(
+      senderDomain,
+      emailData.subject,
+      emailData.originalForwarder ?? emailData.from_email,
+      riskDecision.riskLevel === 'safe' ? 'low' : riskDecision.riskLevel,
+      analysis.indicators
+    );
+  } else if (riskDecision.isPhishing && services.campaignService && !isSafelistUser) {
     // Campaign tracking has no 'safe' tier; floor the fused level at 'low'.
     const riskLevel = riskDecision.riskLevel === 'safe' ? 'low' : riskDecision.riskLevel;
 
@@ -748,23 +815,49 @@ async function processEmailEvent(
     !analysis.analysisFailed &&
     !isSafelistUser &&
     services.graph.blastRadius;
+  // Campaign response reuses this report's lookup (the same result the
+  // security team's copy carries): it is kept here, not re-run.
+  let blastRadiusResult: BlastRadiusReport | undefined;
   const lookupBlastRadius = runBlastRadius
-    ? (reporterAddress?: string): Promise<BlastRadiusReport> =>
-        services.graph.lookupBlastRadius(emailData, {
+    ? async (reporterAddress?: string): Promise<BlastRadiusReport> => {
+        const report = await services.graph.lookupBlastRadius(emailData, {
           remainingMs: getRemainingMs?.(),
           reporterAddress,
-        })
+        });
+        blastRadiusResult = report;
+        return report;
+      }
     : undefined;
+
+  // After the reports have gone: open or update the campaign's incident
+  const respondToCampaign = async (): Promise<void> => {
+    if (!trackedCampaign || !services.campaignResponse) {
+      return;
+    }
+    const outcome = await services.campaignResponse.handleCampaignReport({
+      ...trackedCampaign,
+      risk: reportRisk(riskDecision),
+      analysis,
+      emailData,
+      ...(storedAnalysisId ? { analysisId: storedAnalysisId } : {}),
+      ...(blastRadiusResult ? { blastRadius: blastRadiusResult } : {}),
+      blastRadiusEnabled: services.graph.blastRadius,
+      getRemainingMs,
+    });
+    logger.info('Campaign response', { outcome, campaignId: trackedCampaign.match.campaignId });
+  };
 
   // Report-button submissions never produce a reply to the reporter. The
   // security team is told only when the outcome warrants their attention.
   if (userReport) {
-    return finishSilentUserReport(msg, emailData, analysis, config, services, {
+    const silent = await finishSilentUserReport(msg, emailData, analysis, config, services, {
       storedAnalysisId,
       risk: reportRisk(riskDecision),
       isPhishing: riskDecision.isPhishing,
       lookupBlastRadius,
     });
+    await respondToCampaign();
+    return silent;
   }
 
   // Determine recipient
@@ -780,6 +873,7 @@ async function processEmailEvent(
     const reportOptions: ReportOptions = {
       ...(storedAnalysisId ? { analysisId: storedAnalysisId } : {}),
       risk: reportRisk(riskDecision),
+      ...(services.commandService ? { replyCommands: true } : {}),
     };
 
     // With blast radius, the lookup runs inside sendReports, after the
@@ -809,6 +903,7 @@ async function processEmailEvent(
     }
 
     await cleanupStoredEmail(msg, config, services);
+    await respondToCampaign();
 
     return {
       status: 'processed',
@@ -821,6 +916,7 @@ async function processEmailEvent(
   // text the email's headers supplied, so only its facts are logged above debug
   logger.warn('Cannot send analysis - invalid recipient', { recipient: contentFacts(recipient) });
   logger.debug('Invalid recipient value', { recipient });
+  await respondToCampaign();
   return { status: 'incomplete', reason: 'invalid_recipient' };
 }
 
@@ -995,6 +1091,7 @@ async function finishSilentUserReport(
       silentReport: { reporter: emailData.from_email },
       // Addressed to the security team alone: full sender-relationship detail
       audience: 'security',
+      ...(services.commandService ? { replyCommands: true } : {}),
       ...(blastRadius ? { blastRadius } : {}),
     }
   );
@@ -1059,7 +1156,8 @@ function validateEmail(emailData: ExtractedEmailData, config: PhishyConfig): Pro
   // Skip if already an analysis email
   if (
     emailData.subject?.includes('Phishy Analysis') ||
-    emailData.subject?.includes('Phishing Analysis')
+    emailData.subject?.includes('Phishing Analysis') ||
+    emailData.subject?.includes('[Phishy incident ')
   ) {
     logger.info('Skipping analysis email');
     return { status: 'skipped', reason: 'already_analyzed' };

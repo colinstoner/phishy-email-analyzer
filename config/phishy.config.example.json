@@ -38,6 +38,23 @@
     "type": "postgres",
     "connectionString": "postgresql://user:password@localhost:5432/phishy"
   },
+  "campaignAlerts": {
+    "enabled": false,
+    "distributionList": "all-staff@yourcompany.com"
+  },
+  "campaignResponse": {
+    "enabled": false,
+    "audience": "distribution",
+    "employeeWarning": "approve",
+    "distributionWarning": "auto",
+    "approvalTtlHours": 4,
+    "maxWarningsPerCampaign": 100,
+    "maxRemovalMailboxes": 500,
+    "maxRemovalMessages": 1000,
+    "updateIntervalMinutes": 30,
+    "alreadyClickedInstructions": "If you clicked a link in it, opened an attachment, or entered your password, contact your IT or security team straight away and change your password. You will not be in trouble: reporting it quickly is what limits the damage.",
+    "timeZone": "UTC"
+  },
   "campaignCache": {
     "enabled": false,
     "ttlHours": 24

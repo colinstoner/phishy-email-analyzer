@@ -18,6 +18,8 @@ import { EmailMessage, ExtractedEmailData } from '../../types';
 import { IntelligenceDatabaseService, FeedbackRecord } from '../intelligence/database.service';
 import { SESNotifier } from '../notification/ses.notifier';
 import { AIProvider } from '../ai/provider.interface';
+import { REFERENCE_PATTERN } from '../response/reference';
+import { APPROVAL_HELP, ApprovalCommand, parseApprovalCommands } from './response.commands';
 
 const logger = createLogger('email-commands');
 
@@ -27,7 +29,25 @@ const COMMAND_PARSE_MAX_TOKENS = 2048;
 export interface CommandResult {
   /** True when this email was handled as a command (skip the analysis pipeline) */
   handled: boolean;
-  action?: 'verdict_recorded' | 'help_sent' | 'no_match';
+  action?: 'verdict_recorded' | 'help_sent' | 'no_match' | 'approval_processed';
+}
+
+/**
+ * Campaign response's side of the channel. Approvals reach it only after
+ * this service has authenticated the sender and parsed the approval lines
+ * strictly; the model is never involved.
+ */
+export interface ResponseCommandHandler {
+  handleApprovals(
+    commands: ApprovalCommand[],
+    approver: string
+  ): Promise<{ heading: string; body: string[] }>;
+  /** A verdict was recorded; returns a line for the reply, if it changed an incident */
+  onVerdict(
+    analysisId: string,
+    verdict: FeedbackRecord['verdict'],
+    by: string
+  ): Promise<string | undefined>;
 }
 
 export class EmailCommandService {
@@ -36,7 +56,9 @@ export class EmailCommandService {
     private notifier: SESNotifier,
     private securityTeam: string[],
     /** When provided, free-text replies that keyword parsing misses are interpreted by the model */
-    private aiParser?: AIProvider
+    private aiParser?: AIProvider,
+    /** Campaign response (approvals of response actions), when it is on */
+    private responder?: ResponseCommandHandler
   ) {}
 
   /**
@@ -53,8 +75,9 @@ export class EmailCommandService {
     const isReplyToReport = subject.includes('phishing analysis');
     const mentionsAnalysisId = ANALYSIS_ID_PATTERN.test(msg.text);
     const hasReplyHeaders = !!this.getInReplyTo(msg);
+    const mentionsReference = !!this.responder && REFERENCE_PATTERN.test(msg.text);
 
-    return isReplyToReport || mentionsAnalysisId || hasReplyHeaders;
+    return isReplyToReport || mentionsAnalysisId || hasReplyHeaders || mentionsReference;
   }
 
   /**
@@ -71,6 +94,16 @@ export class EmailCommandService {
         dkim: msg.authVerdicts?.dkim,
       });
       return { handled: false };
+    }
+
+    // Approvals of response actions (campaign response on): exact lines from
+    // the reply's own new text only, never the quoted history and never a
+    // model's reading. With campaign response off the channel is unchanged.
+    if (this.responder) {
+      const approvals = parseApprovalCommands(extractFreshText(msg.text));
+      if (approvals.commands.length > 0 || approvals.malformed) {
+        return this.processApprovals(emailData, approvals.commands, this.responder);
+      }
     }
 
     const analysisId = await this.matchAnalysis(msg);
@@ -117,6 +150,7 @@ export class EmailCommandService {
     const adjusted = await this.db.applyFeedbackToIndicators(analysisId, verdict);
 
     logger.info('Verdict command executed', { sender, analysisId, verdict, adjusted });
+    const incidentLine = await this.responder?.onVerdict(analysisId, verdict, sender);
 
     const verdictLabel = verdict === 'confirmed_phishing' ? 'Confirmed phishing' : 'False positive';
     await this.reply(
@@ -129,12 +163,35 @@ export class EmailCommandService {
         verdict === 'false_positive'
           ? '  - Indicators that fell below the confidence floor were deactivated'
           : '  - Future emails reusing these indicators will be flagged with higher confidence',
+        ...(incidentLine ? [`  - ${incidentLine}`] : []),
         '',
         'Changed your mind? Reply again with the other verdict — the latest answer wins.',
       ].join('\n')
     );
 
     return { handled: true, action: 'verdict_recorded' };
+  }
+
+  /**
+   * Approvals of campaign-response actions. Reached only after the sender
+   * passed membership AND SPF/DKIM. A line that looks like an approval but
+   * is not exactly one gets the exact forms back and approves nothing.
+   */
+  private async processApprovals(
+    emailData: ExtractedEmailData,
+    commands: ApprovalCommand[],
+    responder: ResponseCommandHandler
+  ): Promise<CommandResult> {
+    const sender = emailData.from_email;
+    if (commands.length === 0) {
+      logger.info('Malformed approval from security team — usage sent', { sender });
+      await this.reply(emailData, 'Phishy did not understand that approval', APPROVAL_HELP);
+      return { handled: true, action: 'help_sent' };
+    }
+    const result = await responder.handleApprovals(commands, sender);
+    logger.info('Approval commands processed', { sender, count: commands.length });
+    await this.reply(emailData, result.heading, result.body.join('\n').trim());
+    return { handled: true, action: 'approval_processed' };
   }
 
   /**
