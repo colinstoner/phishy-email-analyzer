@@ -7,7 +7,11 @@
 
 import { createHash } from 'crypto';
 import { buildPhishingAnalysisPrompt } from '../../../../src/services/ai/prompt.builder';
-import { CHECKLIST_INSTRUCTIONS, CHECKLIST_ITEMS } from '../../../../src/services/ai/checklist';
+import {
+  CHECKLIST_INSTRUCTIONS,
+  CODE_ITEMS,
+  MODEL_ITEMS,
+} from '../../../../src/services/ai/checklist';
 import { checkOutsideStructure, splitAtFence } from '../../../../src/eval/injection/prepare';
 import { ExtractedEmailData } from '../../../../src/types';
 import { EnterpriseProfile } from '../../../../src/models/profile.model';
@@ -118,8 +122,24 @@ describe('buildPhishingAnalysisPrompt: scoring mode', () => {
       const withChecklist = stable(build());
       const without = stable(buildPhishingAnalysisPrompt(emailData(), headers(), profile()));
       expect(withChecklist.replace(`${CHECKLIST_INSTRUCTIONS}\n\n`, '')).toBe(without);
-      for (const item of CHECKLIST_ITEMS) {
+      for (const item of MODEL_ITEMS) {
         expect(withChecklist).toContain(`- ${item.id} (`);
+      }
+    });
+
+    it('asks the model nothing Phishy answers itself', () => {
+      const prompt = build();
+      for (const item of CODE_ITEMS) {
+        expect(prompt).not.toContain(item.id);
+      }
+      expect(CHECKLIST_INSTRUCTIONS).not.toContain('unknown');
+    });
+
+    it('allows only closed values from the model', () => {
+      const itemLines = CHECKLIST_INSTRUCTIONS.split('\n').filter(l => l.startsWith('- '));
+      expect(itemLines).toHaveLength(MODEL_ITEMS.length);
+      for (const line of itemLines) {
+        expect(line).toMatch(/^- [a-z_]+ \(yes\|no\|unclear\): /);
       }
     });
 

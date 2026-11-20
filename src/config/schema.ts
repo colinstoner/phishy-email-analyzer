@@ -242,8 +242,8 @@ const AgenticConfigSchema = z.object({
 /**
  * Risk-score mode (experimental). `model` (default): the score shown starts
  * from the model's own free-form riskScore, exactly as before this setting
- * existed. `checklist`: the model also answers a fixed checklist of
- * observable questions and code computes the score from the answers
+ * existed. `checklist`: code computes the score from a fixed checklist,
+ * answered partly by Phishy itself and partly by the model
  * (services/intelligence/checklist.score.ts); the model's own score is kept
  * for comparison. A missing or malformed checklist falls back to `model`.
  */

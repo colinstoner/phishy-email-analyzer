@@ -20,7 +20,7 @@ import { ThreatIndicatorRecord, CampaignRecord, FeedbackRecord } from './databas
 import { partitionMatches } from './indicator.policy';
 import { normalizeConfidence } from '../ai/provider.interface';
 import type { AttachmentRiskSignal } from '../attachments/risk';
-import { CHECKLIST_VERSION, ScoringMode, parseChecklist } from '../ai/checklist';
+import { ScoringMode, parseStoredChecklist } from '../ai/checklist';
 import { scoreChecklist } from './checklist.score';
 import { VERDICT_SCORE_BANDS, clampToBand } from './score.bands';
 
@@ -217,7 +217,7 @@ function modelConfidence(result: AnalysisResult): ConfidenceLevel {
 /**
  * In checklist mode, the score fusion starts from and the fields that record
  * it. The checklist is used only with a model verdict, a complete checklist
- * of the current version and re-validated answers (a cached analysis carries
+ * of the current version and re-validated answers and sources (a cached analysis carries
  * them from storage); otherwise the model's own score is the start, as in
  * model mode. Undefined in model mode: nothing changes.
  */
@@ -229,20 +229,17 @@ function checklistStart(
   if (mode !== 'checklist') return undefined;
   const modelRiskScore = result.assessment?.riskScore;
   const withModelScore = modelRiskScore !== undefined ? { modelRiskScore } : {};
-  const stored = result.checklist;
-  if (
-    result.analysisFailed ||
-    !result.assessment ||
-    stored?.status !== 'ok' ||
-    stored.version !== CHECKLIST_VERSION
-  ) {
+  // Re-validated as stored: the current version, closed values, and each
+  // item's recorded source equal to its definition (a cached analysis
+  // carries its checklist from storage; one from another version falls back)
+  const answers =
+    result.analysisFailed || !result.assessment
+      ? undefined
+      : parseStoredChecklist(result.checklist);
+  if (!answers) {
     return { fields: { scoreBasis: 'model', ...withModelScore } };
   }
-  const answers = parseChecklist(stored.answers);
-  if (answers.status !== 'ok') {
-    return { fields: { scoreBasis: 'model', ...withModelScore } };
-  }
-  const checklist = scoreChecklist(answers.answers, modelVerdict);
+  const checklist = scoreChecklist(answers, modelVerdict);
   return {
     score: checklist.score,
     fields: {

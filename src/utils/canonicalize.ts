@@ -36,13 +36,30 @@ export const MAX_UNWRAP_DEPTH = 4;
 const MAX_WRAPPER_TARGET = 4096;
 
 /**
+ * What canonicalizing body text undid, as fixed codes: the structured twin
+ * of the human-readable flags, for code that must not parse prose (the
+ * checklist's code-computed answers).
+ */
+export type TextObfuscationKind =
+  'compatibility_normalized' | 'invisible_characters' | 'bidi_controls' | 'numeric_entities';
+
+/**
  * Canonicalize body text: NFKC, strip invisibles and bidi controls, decode
  * numeric HTML entities. Returns the canonical form plus divergence flags.
  */
 export function canonicalizeText(raw: string): CanonicalText {
+  const { canonical, flags } = canonicalizeTextDetailed(raw);
+  return { canonical, flags };
+}
+
+/** canonicalizeText plus one fixed code per flag, in the same order */
+export function canonicalizeTextDetailed(
+  raw: string
+): CanonicalText & { findings: TextObfuscationKind[] } {
   const flags: string[] = [];
+  const findings: TextObfuscationKind[] = [];
   if (!raw) {
-    return { canonical: '', flags };
+    return { canonical: '', flags, findings };
   }
 
   let canonical = raw.normalize('NFKC');
@@ -50,6 +67,7 @@ export function canonicalizeText(raw: string): CanonicalText {
     flags.push(
       'Unicode compatibility characters were normalized (possible homoglyph or styling obfuscation)'
     );
+    findings.push('compatibility_normalized');
   }
 
   const invisibles = canonical.match(INVISIBLE_CHARS);
@@ -58,6 +76,7 @@ export function canonicalizeText(raw: string): CanonicalText {
     flags.push(
       `${invisibles.length} invisible character${invisibles.length === 1 ? '' : 's'} removed (zero-width characters are used to break up keywords and evade filters)`
     );
+    findings.push('invisible_characters');
   }
 
   const bidi = canonical.match(BIDI_CONTROLS);
@@ -66,14 +85,16 @@ export function canonicalizeText(raw: string): CanonicalText {
     flags.push(
       'Bidirectional text controls removed (can make text or filenames render in reversed order)'
     );
+    findings.push('bidi_controls');
   }
 
   if (/&#x?[0-9a-f]+;/i.test(canonical)) {
     canonical = decodeNumericEntities(canonical);
     flags.push('Numeric HTML entities decoded (sometimes used to hide URLs or keywords)');
+    findings.push('numeric_entities');
   }
 
-  return { canonical, flags };
+  return { canonical, flags, findings };
 }
 
 /**
@@ -84,7 +105,22 @@ export function canonicalizeText(raw: string): CanonicalText {
  * MAX_UNWRAP_DEPTH layers; nesting beyond that is disclosed, not followed.
  */
 export function canonicalizeUrl(raw: string): { canonical: string; flags: string[] } {
+  const { canonical, flags } = analyzeUrl(raw);
+  return { canonical, flags };
+}
+
+/**
+ * canonicalizeUrl plus whether the true destination is still hidden: an
+ * opaque or undecodable wrapper, or nesting deeper than MAX_UNWRAP_DEPTH.
+ * The same computation as the flags it produces, as a boolean for code.
+ */
+export function analyzeUrl(raw: string): {
+  canonical: string;
+  flags: string[];
+  destinationHidden: boolean;
+} {
   const flags: string[] = [];
+  let destinationHidden = false;
   let current = raw;
 
   for (let depth = 0; ; depth++) {
@@ -93,12 +129,14 @@ export function canonicalizeUrl(raw: string): { canonical: string; flags: string
       break;
     }
     if (depth >= MAX_UNWRAP_DEPTH) {
+      destinationHidden = true;
       flags.push(
         `Wrapped more than ${MAX_UNWRAP_DEPTH} layers deep — the remaining wrapper layers were not unwrapped, so the true destination is still hidden`
       );
       break;
     }
     if (unwrapped.kind === 'opaque') {
+      destinationHidden = true;
       flags.push(
         `Link is wrapped by ${unwrapped.wrapper} — the true destination is held by that service and cannot be recovered from the link${
           unwrapped.domainHint
@@ -109,6 +147,7 @@ export function canonicalizeUrl(raw: string): { canonical: string; flags: string
       break;
     }
     if (unwrapped.kind === 'undecodable') {
+      destinationHidden = true;
       flags.push(
         `Link uses the ${unwrapped.wrapper} wrapper format, but its target could not be decoded as a web address`
       );
@@ -130,7 +169,7 @@ export function canonicalizeUrl(raw: string): { canonical: string; flags: string
     // Not parseable — leave as-is; examine_url reports this separately
   }
 
-  return { canonical: current, flags };
+  return { canonical: current, flags, destinationHidden };
 }
 
 /**
@@ -190,9 +229,25 @@ export interface AnchorCheckOptions {
  * The destination compared is the canonical one, after gateway unwrapping.
  */
 export function findAnchorMismatches(html: string, options: AnchorCheckOptions = {}): string[] {
+  return findAnchorMismatchDetails(html, options).map(finding => finding.flag);
+}
+
+/**
+ * The two anchor tricks findAnchorMismatches reports, as fixed codes:
+ * `displayed_domain` (text shows one domain, the link goes to another) and
+ * `file_name_text` (text names a document, the link is not that file from
+ * the claimed sender's domain).
+ */
+export type AnchorMismatchKind = 'displayed_domain' | 'file_name_text';
+
+/** findAnchorMismatches with each flag's fixed code, in the same order */
+export function findAnchorMismatchDetails(
+  html: string,
+  options: AnchorCheckOptions = {}
+): Array<{ kind: AnchorMismatchKind; flag: string }> {
   if (!html) return [];
 
-  const flags: string[] = [];
+  const flags: Array<{ kind: AnchorMismatchKind; flag: string }> = [];
   const anchorPattern = /<a\s[^>]*?href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]{0,500}?)<\/a>/gi;
   const senderRegistrable = options.senderDomain ? registrableOf(options.senderDomain) : null;
 
@@ -221,13 +276,15 @@ export function findAnchorMismatches(html: string, options: AnchorCheckOptions =
       const ext = fileName[1].toLowerCase();
       const directFile = DIRECT_FILE_PATH.test(safePathname(href));
       if (!directFile) {
-        flags.push(
-          `Link text looks like a file name (.${ext}) but the link opens a web page on ${hrefDomain}, not a direct download of that file`
-        );
+        flags.push({
+          kind: 'file_name_text',
+          flag: `Link text looks like a file name (.${ext}) but the link opens a web page on ${hrefDomain}, not a direct download of that file`,
+        });
       } else if (senderRegistrable && hrefDomain !== senderRegistrable) {
-        flags.push(
-          `Link text looks like a file name (.${ext}); the link downloads a file from ${hrefDomain}, which is not the claimed sender's domain`
-        );
+        flags.push({
+          kind: 'file_name_text',
+          flag: `Link text looks like a file name (.${ext}); the link downloads a file from ${hrefDomain}, which is not the claimed sender's domain`,
+        });
       }
       // Otherwise a direct download from the sender's own domain, or the
       // sender's domain is unknown: nothing to say
@@ -239,7 +296,10 @@ export function findAnchorMismatches(html: string, options: AnchorCheckOptions =
     if (fileName && textDomain.endsWith(`.${fileName[1].toLowerCase()}`)) continue;
 
     if (registrableOf(textDomain) !== hrefDomain) {
-      flags.push(`Link text shows the domain ${textDomain} but actually points to ${hrefDomain}`);
+      flags.push({
+        kind: 'displayed_domain',
+        flag: `Link text shows the domain ${textDomain} but actually points to ${hrefDomain}`,
+      });
     }
   }
 

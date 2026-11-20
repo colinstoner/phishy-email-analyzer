@@ -5,7 +5,20 @@
 
 import { BedrockRuntimeClient, InvokeModelCommand } from '@aws-sdk/client-bedrock-runtime';
 import { mockClient } from 'aws-sdk-client-mock';
-import { CHECKLIST_ITEMS, CHECKLIST_VERSION } from '../../../src/services/ai/checklist';
+import { resolve } from 'path';
+import {
+  CHECKLIST_SOURCES,
+  CHECKLIST_VERSION,
+  CODE_ITEMS,
+  MODEL_ITEMS,
+} from '../../../src/services/ai/checklist';
+import { computeCodeChecklistAnswers } from '../../../src/services/ai/checklist.facts';
+import { loadCaseSet } from '../../../src/eval/injection/cases';
+import {
+  createEvalParser,
+  loadEvalProfile,
+  prepareCase,
+} from '../../../src/eval/injection/prepare';
 import { EXIT_OK, EXIT_USAGE, parseEvalArgs, runCli } from '../../../src/cli/injection-eval.main';
 import {
   estimateCallCostUsd,
@@ -17,15 +30,11 @@ import { estimateCostUsd } from '../../../src/utils/pricing';
 const MODEL = 'global.anthropic.claude-opus-5-5';
 const bedrockMock = mockClient(BedrockRuntimeClient);
 
+const CASES_DIR = resolve(__dirname, '../../../evals/injection');
+
+/** The model's part of the checklist: a credential ask, nothing else */
 const ANSWERS: Record<string, string> = Object.fromEntries(
-  CHECKLIST_ITEMS.map(item => [
-    item.id,
-    item.id === 'asks_for_credentials' || item.id === 'link_destination_mismatch'
-      ? 'yes'
-      : item.id === 'authentication_result'
-        ? 'not_shown'
-        : 'no',
-  ])
+  MODEL_ITEMS.map(item => [item.id, item.id === 'asks_for_credentials' ? 'yes' : 'no'])
 );
 
 /**
@@ -132,6 +141,15 @@ describe('runCli in checklist mode', () => {
     expect(bedrockMock.commandCalls(InvokeModelCommand)).toHaveLength(0);
   });
 
+  it('lists the code-computed items per case in the checklist dry run', async () => {
+    const t = io();
+    await runCli(['--dry-run', '--model', 'x', '--scoring', 'checklist'], t.io);
+    const text = t.out.join('\n');
+    expect(text).toContain('CODE-COMPUTED CHECKLIST ITEMS');
+    expect(text).toMatch(/att-html-credform\s+applies: risky_attachment/);
+    expect(text).toMatch(/hid-zero-width\s+applies: content_obfuscated/);
+  });
+
   it('rejects an unknown scoring mode with usage', async () => {
     const t = io();
     expect(await runCli(['--dry-run', '--scoring', 'other'], t.io)).toBe(EXIT_USAGE);
@@ -186,34 +204,46 @@ describe('runCli in checklist mode', () => {
     const control = document.runs.filter(r => r.caseId === 'ctl-cred-m365');
     expect(control.map(r => r.modelRiskScore)).toEqual([90, 45]);
     expect(control.map(r => r.fused?.verdict)).toEqual(['phishing', 'suspicious']);
-    // The same answers give the same shown score, whatever the model scored
-    expect(control.map(r => r.fused?.riskScore)).toEqual([55, 55]);
-    expect(control[0].scoring).toEqual({
+    // The same answers give the same shown score, whatever the model scored.
+    // The control is a credential lure whose link text shows another domain:
+    // Phishy's link_text_mismatch (25) confirms evidence, so the credential
+    // ask (35) counts in full: 5 + 25 + 35 = 65.
+    expect(control.map(r => r.fused?.riskScore)).toEqual([65, 65]);
+    expect(control[0].scoring).toMatchObject({
       mode: 'checklist',
       basis: 'checklist',
       checklistStatus: 'ok',
-      answers: ANSWERS,
-      checklistScore: 55,
-      checklistRawScore: 55,
+      answers: { ...ANSWERS, link_text_mismatch: 'yes' },
+      sources: CHECKLIST_SOURCES,
+      checklistScore: 65,
+      checklistRawScore: 65,
     });
+    // Every item is recorded with its answer and its source
+    expect(Object.keys(control[0].scoring?.answers as object).sort()).toEqual(
+      Object.keys(CHECKLIST_SOURCES).sort()
+    );
 
     expect(document.consistency).toContainEqual(
       expect.objectContaining({
         caseId: 'ctl-cred-m365',
         runs: 2,
-        shownScore: { min: 55, max: 55, spread: 0 },
+        shownScore: { min: 65, max: 65, spread: 0 },
         modelScore: { min: 45, max: 90, spread: 45 },
         verdicts: { phishing: 1, suspicious: 1 },
         modalVerdict: 'phishing',
         verdictChanges: 1,
-        checklistItemsVaried: [],
+        modelItemsVaried: [],
+        codeItemsVaried: [],
         checklistFallbacks: 0,
       })
     );
 
     const table = t.out.join('\n');
     expect(table).toContain(`CONSISTENCY  MODEL ${MODEL}   MODE single`);
-    expect(table).toMatch(/ctl-cred-m365\s+2\s+55-55 \(0\)\s+45-90 \(45\)\s+55-55 \(0\)\s+1\/2/);
+    expect(table).toMatch(/ctl-cred-m365\s+2\s+65-65 \(0\)\s+45-90 \(45\)\s+65-65 \(0\)\s+1\/2/);
+    expect(table).toContain('CHECKLIST ITEMS THAT VARIED ACROSS REPEATS');
+    expect(table).toMatch(/ctl-cred-m365\s+model: -   code: -/);
+    expect(table).not.toContain('WARNING: a code-computed checklist item varied');
     // Ids, numbers and labels only: no model text on the console
     expect(table).not.toContain('Model free-text indicator');
   });
@@ -269,7 +299,8 @@ describe('computeConsistency', () => {
           mode: 'checklist',
           basis: 'checklist',
           checklistStatus: 'ok',
-          answers: { a: 'yes', b: 'no' },
+          answers: { a: 'yes', b: 'no', c: 'no' },
+          sources: { a: 'model', b: 'model', c: 'code' },
           checklistRawScore: 20,
         },
       }),
@@ -281,7 +312,8 @@ describe('computeConsistency', () => {
           mode: 'checklist',
           basis: 'checklist',
           checklistStatus: 'ok',
-          answers: { a: 'unclear', b: 'no' },
+          answers: { a: 'unclear', b: 'no', c: 'yes' },
+          sources: { a: 'model', b: 'model', c: 'code' },
           checklistRawScore: 13,
         },
       }),
@@ -307,7 +339,8 @@ describe('computeConsistency', () => {
       verdicts: { suspicious: 1, legitimate: 3 },
       modalVerdict: 'legitimate',
       verdictChanges: 1,
-      checklistItemsVaried: ['a'],
+      modelItemsVaried: ['a'],
+      codeItemsVaried: ['c'],
       checklistFallbacks: 1,
     });
     expect(entries[1]).toMatchObject({
@@ -326,5 +359,62 @@ describe('computeConsistency', () => {
       modalVerdict: null,
       verdictChanges: 0,
     });
+  });
+});
+
+describe('code-computed checklist answers on the eval cases', () => {
+  it('are identical across repeated prepares of the same case', async () => {
+    const caseSet = await loadCaseSet(CASES_DIR);
+    const env = {
+      parser: createEvalParser(caseSet.reporter.address),
+      profile: await loadEvalProfile(CASES_DIR),
+      reporter: caseSet.reporter,
+      scoringMode: 'checklist' as const,
+    };
+    const ids = [
+      'ctl-rfq-compromised-vendor',
+      'att-html-credform',
+      'hid-zero-width',
+      'ben-pdf-invoice',
+    ];
+    for (const evalCase of caseSet.cases.filter(c => ids.includes(c.id))) {
+      const raw = caseSet.emails.get(evalCase.id) ?? '';
+      const first = await prepareCase(evalCase, raw, env);
+      const second = await prepareCase(evalCase, raw, env);
+      // The prompts differ (fresh nonce each build); the code answers must not
+      expect(first.prompt).not.toBe(second.prompt);
+      const a = computeCodeChecklistAnswers(first.emailData);
+      expect(computeCodeChecklistAnswers(second.emailData)).toEqual(a);
+      expect(Object.keys(a).sort()).toEqual(CODE_ITEMS.map(i => i.id).sort());
+    }
+  });
+
+  it('flag what the compromised-supplier control shows, and nothing on the genuine invoice', async () => {
+    const caseSet = await loadCaseSet(CASES_DIR);
+    const env = {
+      parser: createEvalParser(caseSet.reporter.address),
+      reporter: caseSet.reporter,
+      scoringMode: 'checklist' as const,
+    };
+    const answersFor = async (id: string): Promise<Record<string, string>> => {
+      const evalCase = caseSet.cases.find(c => c.id === id);
+      if (!evalCase) throw new Error(`no case ${id}`);
+      const prepared = await prepareCase(evalCase, caseSet.emails.get(id) ?? '', env);
+      return computeCodeChecklistAnswers(prepared.emailData) as Record<string, string>;
+    };
+    expect(await answersFor('ctl-rfq-compromised-vendor')).toMatchObject({
+      file_share_unrelated_to_sender: 'yes',
+      bcc_to_self: 'yes',
+    });
+    const invoice = await answersFor('ben-pdf-invoice');
+    for (const id of [
+      'link_text_mismatch',
+      'file_share_unrelated_to_sender',
+      'risky_attachment',
+      'reply_to_diverts',
+      'content_obfuscated',
+    ]) {
+      expect(invoice[id]).not.toBe('yes');
+    }
   });
 });

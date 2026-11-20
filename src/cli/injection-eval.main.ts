@@ -48,6 +48,7 @@ import {
 } from '../eval/injection/scorer';
 import { SCORING_MODES, ScoringMode } from '../services/ai/scoring.mode';
 import { CHECKLIST_VERSION } from '../services/ai/checklist';
+import { computeCodeChecklistAnswers } from '../services/ai/checklist.facts';
 
 export const USAGE = `Usage: npm run eval:injection -- [options]
 
@@ -345,6 +346,20 @@ export function renderDryRun(
       `Removed by the pipeline before the model (never billed): ${removed.map(p => p.evalCase.id).join(', ')}`
     );
   }
+  if (scoringMode === 'checklist') {
+    // Phishy answers these itself, so they are known before any call. Item
+    // ids and fixed answer words only.
+    lines.push('', 'CODE-COMPUTED CHECKLIST ITEMS (answered by Phishy, identical on every run)');
+    for (const p of prepared) {
+      const answers = computeCodeChecklistAnswers(p.emailData) as Record<string, string>;
+      const ids = (answer: string): string[] =>
+        Object.keys(answers).filter(id => answers[id] === answer);
+      const raised = [...ids('yes'), ...ids('fail')];
+      lines.push(
+        `${pad(p.evalCase.id, 32)}applies: ${raised.length > 0 ? raised.join(', ') : '-'}   unknown: ${ids('unknown').length}`
+      );
+    }
+  }
   lines.push('', 'A live run would make:');
   for (const row of plan) {
     lines.push(
@@ -483,8 +498,23 @@ export function renderConsistency(entries: CaseConsistency[]): string {
         }`
       );
     }
+    if (checklist) {
+      // Item ids are fixed checklist identifiers, never model text
+      const list = (ids: string[]): string => (ids.length > 0 ? ids.join(', ') : '-');
+      lines.push('', 'CHECKLIST ITEMS THAT VARIED ACROSS REPEATS');
+      for (const e of group) {
+        lines.push(
+          `${pad(e.caseId, 32)}model: ${list(e.modelItemsVaried)}   code: ${list(e.codeItemsVaried)}`
+        );
+      }
+    }
   }
   lines.push('', 'CHANGED: runs whose verdict differs from the most common verdict for that case.');
+  if (entries.some(e => e.codeItemsVaried.length > 0)) {
+    lines.push(
+      'WARNING: a code-computed checklist item varied across repeats. Code answers are computed from the same email facts every run and must not vary.'
+    );
+  }
   return lines.join('\n');
 }
 

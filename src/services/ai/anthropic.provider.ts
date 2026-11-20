@@ -150,7 +150,7 @@ export class AnthropicProvider implements AIProvider {
       invoke: model => this.sendSingleShot(model, prompt, options),
     });
 
-    attachChecklist(result, this.scoringMode);
+    attachChecklist(result, this.scoringMode, emailData);
 
     logger.info('Email analysis completed', {
       analysisFailed: result.analysisFailed ?? false,

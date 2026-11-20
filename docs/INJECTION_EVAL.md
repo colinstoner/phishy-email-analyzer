@@ -114,7 +114,7 @@ ANTHROPIC_API_KEY=... npm run eval:injection -- --provider anthropic --model <mo
 | `--mode` | `single` | `single`, `agentic` or `both` |
 | `--effort` | `medium` | `low` or `medium`. Higher levels are rejected: the eval measures the deployed setting |
 | `--repeats` | 1 | Runs per case (1 to 20). With 2 or more, a consistency table is printed (see [Comparing scoring modes](#comparing-scoring-modes)) |
-| `--scoring` | `model` | `model` or `checklist`: run the providers and risk fusion in that [scoring mode](ARCHITECTURE.md#checklist-scoring-experimental). The dry run builds and checks the checklist prompts too |
+| `--scoring` | `model` | `model` or `checklist`: run the providers and risk fusion in that [scoring mode](ARCHITECTURE.md#checklist-scoring-experimental). The dry run builds and checks the checklist prompts too, and lists per case the checklist items Phishy answers itself (known before any call) |
 | `--filter` | all | Comma-separated terms; a term is a category or part of a case id. Controls are added automatically |
 | `--no-profile` | off | Analyze without the invented organization profile |
 | `--refusal-fallback` | disabled | Retry refusals on this model, as production does |
@@ -182,9 +182,9 @@ npm run eval:injection -- --provider anthropic --model claude-opus-5-5 --filter 
 npm run eval:injection -- --provider anthropic --model claude-opus-5-5 --filter benign_odd,control --repeats 5 --scoring checklist
 ```
 
-Every run in checklist mode records, besides `modelVerdict`, `modelRiskScore` (the model's own score) and `fused.riskScore` (the score shown), a `scoring` object: `basis` (`checklist`, or `model` when the checklist was unusable), `checklistStatus` (`ok`, `missing`, `malformed`), the validated `answers`, `checklistScore` (in the model verdict's band) and `checklistRawScore` (before the band). `options.scoringMode` and `options.checklistVersion` say which mode produced the file.
+Every run in checklist mode records, besides `modelVerdict`, `modelRiskScore` (the model's own score) and `fused.riskScore` (the score shown), a `scoring` object: `basis` (`checklist`, or `model` when the checklist was unusable), `checklistStatus` (`ok`, `missing`, `malformed`), every item's validated answer (`answers`) and who gave it (`sources`: `code` for the items Phishy computes itself, `model` for the rest), `checklistScore` (in the model verdict's band) and `checklistRawScore` (before the band). `options.scoringMode` and `options.checklistVersion` say which mode produced the file; results from checklist versions 1 and 2 are not comparable item by item.
 
-The JSON always carries a `consistency` array, one entry per model, mode and case: `shownScore`, `modelScore` and `checklistRawScore` as `{min, max, spread}` over the runs that returned a verdict, `verdicts` (count per shown verdict), `modalVerdict`, `verdictChanges` (runs whose shown verdict differs from the most common one), `checklistItemsVaried` (items whose answer was not the same in every run) and `checklistFallbacks`. With `--repeats` of 2 or more the console prints the same as a table (case ids, numbers and verdict labels only). A spread of 0 in checklist mode with a non-zero `verdictChanges` means the answers were stable and the verdict was not; `checklistRawScore` shows where the checklist alone would have put the email.
+The JSON always carries a `consistency` array, one entry per model, mode and case: `shownScore`, `modelScore` and `checklistRawScore` as `{min, max, spread}` over the runs that returned a verdict, `verdicts` (count per shown verdict), `modalVerdict`, `verdictChanges` (runs whose shown verdict differs from the most common one), `modelItemsVaried` (model items whose answer was not the same in every run: the variation checklist scoring measures), `codeItemsVaried` (code items that varied: Phishy computes them from the same email facts every run, so this should always be empty, and anything in it is a bug) and `checklistFallbacks`. With `--repeats` of 2 or more the console prints the same as a table (case ids, numbers and verdict labels only), followed in checklist mode by the items that varied per case, model and code separately, and a warning if any code item varied. A spread of 0 in checklist mode with a non-zero `verdictChanges` means the answers were stable and the verdict was not; `checklistRawScore` shows where the checklist alone would have put the email.
 
 ## Cost
 
@@ -200,7 +200,7 @@ Four padding cases account for roughly a quarter of the input. Output is typical
 - Estimates use `src/utils/pricing.ts` and are deliberately high (3 characters per token). Reported costs use the token counts the API returns.
 - A failed analysis returns no usage, and an abandoned agentic loop loses its own; those runs are estimated and counted as such in the output.
 - Bedrock prices in `pricing.ts` are first-party list prices. Check your bill, not this number.
-- Checklist mode adds about 4,500 characters to every prompt (roughly 1,100 tokens) and is estimated at 250 extra output tokens per call.
+- Checklist mode (version 2) adds about 3,200 characters to every prompt (roughly 800 tokens) and is estimated at 150 extra output tokens per call.
 - `--max-cost-usd` is checked before each call against spend so far plus calls in flight. Controls are dispatched first, so a run that stops early still has baselines.
 
 ## Adding a case

@@ -81,6 +81,8 @@ export interface RunOutcome {
     basis: 'checklist' | 'model';
     checklistStatus: 'ok' | 'missing' | 'malformed' | 'absent';
     answers?: Record<string, string>;
+    /** Who answered each item: Phishy's code or the model */
+    sources?: Record<string, 'code' | 'model'>;
     /** The checklist score in the model verdict's band, before fusion */
     checklistScore?: number;
     /** The checklist score before the verdict band */
@@ -673,8 +675,17 @@ export interface CaseConsistency {
   modalVerdict: string | null;
   /** Runs whose shown verdict differs from the modal verdict */
   verdictChanges: number;
-  /** Checklist mode: items whose answer was not the same in every run that had answers */
-  checklistItemsVaried: string[];
+  /**
+   * Checklist mode: MODEL items whose answer was not the same in every run
+   * that had answers. This is the variation checklist scoring measures.
+   */
+  modelItemsVaried: string[];
+  /**
+   * Checklist mode: CODE items whose answer was not the same in every run.
+   * Phishy computes these from the same email facts every run, so anything
+   * here means a code answer is not deterministic: a bug.
+   */
+  codeItemsVaried: string[];
   /** Checklist mode: runs whose shown score fell back to the model's own */
   checklistFallbacks: number;
 }
@@ -709,11 +720,15 @@ export function computeConsistency(outcomes: RunOutcome[]): CaseConsistency[] {
     const ranked = Object.entries(verdicts).sort((a, b) => b[1] - a[1] || compareText(a[0], b[0]));
     const modal = ranked[0];
 
-    const withAnswers = ok
-      .map(r => r.scoring?.answers)
-      .filter((a): a is Record<string, string> => a !== undefined);
-    const itemIds = [...new Set(withAnswers.flatMap(a => Object.keys(a)))];
-    const varied = itemIds.filter(id => new Set(withAnswers.map(a => a[id])).size > 1);
+    const withAnswers = ok.filter(r => r.scoring?.answers !== undefined);
+    const itemIds = [...new Set(withAnswers.flatMap(r => Object.keys(r.scoring?.answers ?? {})))];
+    const varied = itemIds.filter(
+      id => new Set(withAnswers.map(r => r.scoring?.answers?.[id])).size > 1
+    );
+    // An item is a code item when any run recorded it as one (the source is
+    // fixed per checklist version, so the runs agree)
+    const isCode = (id: string): boolean =>
+      withAnswers.some(r => r.scoring?.sources?.[id] === 'code');
 
     result.push({
       model: runs[0].model,
@@ -731,7 +746,8 @@ export function computeConsistency(outcomes: RunOutcome[]): CaseConsistency[] {
       verdicts,
       modalVerdict: modal ? modal[0] : null,
       verdictChanges: modal ? ok.length - modal[1] : 0,
-      checklistItemsVaried: varied,
+      modelItemsVaried: varied.filter(id => !isCode(id)),
+      codeItemsVaried: varied.filter(isCode),
       checklistFallbacks: ok.filter(r => r.scoring?.basis === 'model').length,
     });
   }
