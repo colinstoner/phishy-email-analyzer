@@ -14,6 +14,7 @@
  */
 
 import { FileShareFact } from '../types';
+import { registrableOf } from './registrable';
 
 const LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 /** A OneDrive personal-site segment: the owner's UPN with `@` and `.` as `_` */
@@ -139,11 +140,6 @@ function compact(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
-/** Registrable domain (last two labels) of a host name */
-function registrable(host: string): string {
-  return host.toLowerCase().split('.').filter(Boolean).slice(-2).join('.');
-}
-
 /**
  * Whether a file share appears to belong to the claimed sender's
  * organization, from the URL alone:
@@ -161,7 +157,7 @@ export function fileShareRelation(
   senderDomain: string | undefined
 ): FileShareRelation {
   if (!senderDomain || !DOMAIN.test(senderDomain.toLowerCase())) return 'unknown';
-  const senderRegistrable = registrable(senderDomain);
+  const senderRegistrable = registrableOf(senderDomain);
   const senderLabel = senderRegistrable.split('.')[0];
 
   const tenantMatches =
@@ -177,7 +173,7 @@ export function fileShareRelation(
     return ownerMatches || tenantMatches ? 'related' : 'unrelated';
   }
   if (share.ownerDomain) {
-    return registrable(share.ownerDomain) === senderRegistrable || tenantMatches
+    return registrableOf(share.ownerDomain) === senderRegistrable || tenantMatches
       ? 'related'
       : 'unrelated';
   }

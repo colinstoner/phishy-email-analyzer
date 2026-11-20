@@ -13,6 +13,9 @@
 import { domainToUnicode } from 'url';
 import { LinkFact } from '../types';
 import { classifyFileShare } from './file-share';
+import { registrableOf } from './registrable';
+
+export { registrableOf };
 
 export interface CanonicalText {
   canonical: string;
@@ -258,12 +261,6 @@ export function registrableDomain(url: string): string | null {
   } catch {
     return null;
   }
-}
-
-/** Registrable domain (last two labels) of a host name */
-export function registrableOf(host: string): string {
-  const labels = host.toLowerCase().split('.').filter(Boolean);
-  return labels.slice(-2).join('.');
 }
 
 /** Pull a domain-looking token out of anchor text, if any */

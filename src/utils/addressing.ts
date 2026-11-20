@@ -23,6 +23,7 @@
 
 import { ExtractedEmailData } from '../types';
 import { isValidEmail } from './validation';
+import { registrableOf } from './registrable';
 
 /** Longest header value parsed; a longer one is not interpreted at all */
 const MAX_ADDRESS_HEADER = 8000;
@@ -143,7 +144,7 @@ function nameKey(name: string): string {
 }
 
 function domainOf(address: string): string {
-  return address.split('@')[1]?.split('.').filter(Boolean).slice(-2).join('.') ?? '';
+  return registrableOf(address.split('@')[1] ?? '');
 }
 
 interface HeaderSet {

@@ -150,13 +150,23 @@ export function extractHrefUrls(html: string): string[] {
  * otherwise appear as links and spend the link budget.
  */
 const FOLLOWABLE_ATTRIBUTES: ReadonlyArray<{ element: string; attribute: string }> = [
-  { element: 'a', attribute: 'href' },
-  { element: 'area', attribute: 'href' },
   { element: 'form', attribute: 'action' },
   { element: 'button', attribute: 'formaction' },
   { element: 'input', attribute: 'formaction' },
   { element: 'img', attribute: 'src' },
+  { element: 'input', attribute: 'src' },
+  { element: 'iframe', attribute: 'src' },
+  { element: 'embed', attribute: 'src' },
 ];
+
+/**
+ * Elements whose `href` is not a link a reader follows. Every other
+ * element's `href` is taken: anchors and image-map areas, and also the
+ * elements some clients render as clickable (Outlook's VML buttons such as
+ * `<v:roundrect href>`, SVG anchors), which an attacker could otherwise use
+ * to show one client a link the analysis never saw.
+ */
+const NON_LINK_HREF_ELEMENTS = new Set(['link', 'base']);
 
 /** `&amp;` and friends in an attribute value: the browser decodes them before following */
 function decodeAttributeEntities(value: string): string {
@@ -179,11 +189,12 @@ export function extractFollowableUrls(html: string): string[] {
   const safeHtml = html.length > MAX_CONTENT_LENGTH ? html.substring(0, MAX_CONTENT_LENGTH) : html;
   const urls = new Set<string>();
 
-  const tagPattern = /<([a-z][a-z0-9]*)\b([^>]*)>/gi;
+  const tagPattern = /<([a-z][a-z0-9]*(?::[a-z][a-z0-9]*)?)(?=[\s/>])([^>]*)>/gi;
   let tag: RegExpExecArray | null;
   while ((tag = tagPattern.exec(safeHtml)) !== null) {
     const element = tag[1].toLowerCase();
     const wanted = FOLLOWABLE_ATTRIBUTES.filter(f => f.element === element).map(f => f.attribute);
+    if (!NON_LINK_HREF_ELEMENTS.has(element)) wanted.push('href');
     if (wanted.length === 0) continue;
     const attrPattern = /([a-z-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/gi;
     let attr: RegExpExecArray | null;
