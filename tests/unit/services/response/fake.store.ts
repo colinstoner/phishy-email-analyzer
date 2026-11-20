@@ -183,6 +183,18 @@ export class FakeResponseStore {
     this.audit.push(Object.freeze(structuredClone(entry)));
   }
 
+  async findIncidentEmail(
+    messageId: string
+  ): Promise<{ incidentId: string; proposed: string[] } | undefined> {
+    this.check();
+    const entry = [...this.audit]
+      .reverse()
+      .find(e => e.event === 'incident_email_sent' && e.detail?.messageId === messageId);
+    return entry
+      ? { incidentId: entry.incidentId, proposed: (entry.detail?.proposed as string[]) ?? [] }
+      : undefined;
+  }
+
   events(): string[] {
     return this.audit.map(entry => entry.event);
   }

@@ -15,6 +15,13 @@
  * own emails always print the command after other text on the same line
  * ("Reply with this line:  APPROVE ..."), so a quoted copy of one can never
  * match, even when a mail client's quoting is not recognized.
+ *
+ * One shorter form exists for the warning only, because the reference is
+ * awkward to copy on a phone: a line that is exactly `APPROVE WARNING`. It
+ * carries no reference, so it is not a command by itself: the caller binds
+ * it to the one warning proposed in the exact incident email the reply
+ * answers (its In-Reply-To), and it approves nothing when that cannot be
+ * established. Removal always needs its reference.
  */
 
 import { normalizeReference } from '../response/reference';
@@ -33,9 +40,15 @@ export interface ParsedApprovals {
    * gets the exact forms back; nothing is approved and no model is asked.
    */
   malformed: boolean;
+  /**
+   * A line that is exactly `APPROVE WARNING` (no reference). Only the
+   * incident email being replied to can say which warning is meant.
+   */
+  bareWarning: boolean;
 }
 
 const APPROVAL_LINE = /^APPROVE[ \t]+(WARNING|REMOVAL)[ \t]+(\S+)$/i;
+const BARE_WARNING_LINE = /^APPROVE[ \t]+WARNING[.!]?$/i;
 const LOOKS_LIKE_APPROVAL = /^\W{0,3}(approve|approved|approval)\b/i;
 
 /** Most approvals one reply may carry (one of each kind is all an incident ever proposes) */
@@ -44,6 +57,7 @@ const MAX_COMMANDS = 4;
 export function parseApprovalCommands(freshText: string): ParsedApprovals {
   const commands: ApprovalCommand[] = [];
   let malformed = false;
+  let bareWarning = false;
   for (const raw of freshText.split(/\r?\n/)) {
     const line = raw.trim();
     if (!line) {
@@ -56,20 +70,23 @@ export function parseApprovalCommands(freshText: string): ParsedApprovals {
       if (!commands.some(c => c.reference === reference && c.verb === verb)) {
         commands.push({ verb, reference });
       }
+    } else if (BARE_WARNING_LINE.test(line)) {
+      bareWarning = true;
     } else if (LOOKS_LIKE_APPROVAL.test(line)) {
       malformed = true;
     }
   }
   if (commands.length > MAX_COMMANDS) {
-    return { commands: [], malformed: true };
+    return { commands: [], malformed: true, bareWarning: false };
   }
-  return { commands, malformed };
+  return { commands, malformed, bareWarning };
 }
 
 export const APPROVAL_HELP = [
   'To approve a proposed action, reply to the incident email with the line it shows, on a line of its own:',
   '  APPROVE WARNING <reference>   - send the targeted warning',
   '  APPROVE REMOVAL <reference>   - run the removal (a dry run in this version)',
+  'For the warning only, a reply to the latest incident email with just APPROVE WARNING also works.',
   'The reference is the PHY-XXXX-XXXX-XXXX-XXXX code printed next to that action.',
   'Approvals are read only in this exact form, from your own new text; they are never interpreted.',
 ].join('\n');

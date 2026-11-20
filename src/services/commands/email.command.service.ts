@@ -19,7 +19,12 @@ import { IntelligenceDatabaseService, FeedbackRecord } from '../intelligence/dat
 import { SESNotifier } from '../notification/ses.notifier';
 import { AIProvider } from '../ai/provider.interface';
 import { REFERENCE_PATTERN } from '../response/reference';
-import { APPROVAL_HELP, ApprovalCommand, parseApprovalCommands } from './response.commands';
+import {
+  APPROVAL_HELP,
+  ApprovalCommand,
+  ParsedApprovals,
+  parseApprovalCommands,
+} from './response.commands';
 
 const logger = createLogger('email-commands');
 
@@ -40,6 +45,14 @@ export interface CommandResult {
 export interface ResponseCommandHandler {
   handleApprovals(
     commands: ApprovalCommand[],
+    approver: string
+  ): Promise<{ heading: string; body: string[] }>;
+  /**
+   * A reply that says only APPROVE WARNING: bound to the incident email it
+   * answers (the bare SES message IDs from its In-Reply-To), or refused.
+   */
+  handleBareWarningApproval(
+    repliedToMessageIds: string[],
     approver: string
   ): Promise<{ heading: string; body: string[] }>;
   /** A verdict was recorded; returns a line for the reply, if it changed an incident */
@@ -116,8 +129,8 @@ export class EmailCommandService {
     // model's reading. With campaign response off the channel is unchanged.
     if (this.responder) {
       const approvals = parseApprovalCommands(extractFreshText(msg.text));
-      if (approvals.commands.length > 0 || approvals.malformed) {
-        return this.processApprovals(emailData, approvals.commands, this.responder);
+      if (approvals.commands.length > 0 || approvals.malformed || approvals.bareWarning) {
+        return this.processApprovals(emailData, approvals, this.responder, msg);
       }
     }
 
@@ -204,10 +217,21 @@ export class EmailCommandService {
    */
   private async processApprovals(
     emailData: ExtractedEmailData,
-    commands: ApprovalCommand[],
-    responder: ResponseCommandHandler
+    approvals: ParsedApprovals,
+    responder: ResponseCommandHandler,
+    msg: EmailMessage
   ): Promise<CommandResult> {
     const sender = emailData.from_email;
+    const commands: ApprovalCommand[] = approvals.commands;
+    if (commands.length === 0 && approvals.bareWarning && !approvals.malformed) {
+      // No reference: only the exact incident email being answered can say
+      // which warning is meant. In-Reply-To only, never References (those
+      // name older emails in the thread, whose proposals may be stale)
+      const result = await responder.handleBareWarningApproval(this.repliedTo(msg), sender);
+      logger.info('Bare warning approval processed', { sender });
+      await this.reply(emailData, result.heading, result.body.join('\n').trim());
+      return { handled: true, action: 'approval_processed' };
+    }
     if (commands.length === 0) {
       logger.info('Malformed approval from security team — usage sent', { sender });
       await this.reply(emailData, 'Phishy did not understand that approval', APPROVAL_HELP);
@@ -282,6 +306,15 @@ export class EmailCommandService {
     const spf = msg.authVerdicts?.spf?.toUpperCase();
     const dkim = msg.authVerdicts?.dkim?.toUpperCase();
     return spf === 'PASS' || dkim === 'PASS';
+  }
+
+  /** Bare SES message IDs from the In-Reply-To header alone */
+  private repliedTo(msg: EmailMessage): string[] {
+    const headers = msg.headers ?? {};
+    const value = headers['In-Reply-To'] ?? headers['in-reply-to'] ?? '';
+    return (value.match(/<([^@>\s]{1,200})@[^>\s]{1,255}>/g) ?? []).map(raw =>
+      raw.replace(/^<|@[^>]*>$/g, '')
+    );
   }
 
   private getInReplyTo(msg: EmailMessage): string | null {

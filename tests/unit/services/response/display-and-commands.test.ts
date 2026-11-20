@@ -134,6 +134,37 @@ describe('parseApprovalCommands (strict, never a model)', () => {
       { length: 5 },
       (_, i) => `APPROVE WARNING PHY-AAAA-AAAA-AAAA-AAA${'234567'[i]}`
     ).join('\n');
-    expect(parseApprovalCommands(many)).toEqual({ commands: [], malformed: true });
+    expect(parseApprovalCommands(many)).toEqual({
+      commands: [],
+      malformed: true,
+      bareWarning: false,
+    });
+  });
+
+  it('flags a line that is exactly APPROVE WARNING, and nothing looser', () => {
+    for (const text of [
+      'Approve warning',
+      'APPROVE   WARNING',
+      'approve warning.',
+      '\n approve warning \n\nSent from my phone',
+    ]) {
+      expect(parseApprovalCommands(text)).toEqual({
+        commands: [],
+        malformed: false,
+        bareWarning: true,
+      });
+    }
+    for (const text of [
+      'approve removal',
+      'approve',
+      'approved warning',
+      'approve warning please',
+      'please approve warning',
+      'approve warnings',
+    ]) {
+      expect(parseApprovalCommands(text).bareWarning).toBe(false);
+    }
+    // Removal never has a short form: it is malformed without its reference
+    expect(parseApprovalCommands('approve removal').malformed).toBe(true);
   });
 });

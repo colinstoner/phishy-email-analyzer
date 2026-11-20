@@ -372,6 +372,30 @@ export class ResponseStore {
   }
 
   /** Append one audit row. The table rejects UPDATE and DELETE (migration 006). */
+  /**
+   * The incident email Phishy sent under this outbound message ID, and the
+   * actions it proposed. Recorded in the audit trail when the email is sent
+   * (`incident_email_sent`); a reply's In-Reply-To is matched against it.
+   */
+  async findIncidentEmail(
+    messageId: string
+  ): Promise<{ incidentId: string; proposed: string[] } | undefined> {
+    const rows = await this.run(
+      `SELECT incident_id, detail FROM response_action_audit
+       WHERE event = 'incident_email_sent' AND detail->>'messageId' = $1
+       ORDER BY id DESC LIMIT 1`,
+      [messageId]
+    );
+    if (!rows[0]) {
+      return undefined;
+    }
+    const detail = (rows[0].detail ?? {}) as { proposed?: unknown };
+    const proposed = Array.isArray(detail.proposed)
+      ? detail.proposed.filter((id): id is string => typeof id === 'string')
+      : [];
+    return { incidentId: rows[0].incident_id as string, proposed };
+  }
+
   async appendAudit(entry: AuditEntry): Promise<void> {
     await this.run(
       `INSERT INTO response_action_audit (incident_id, action_id, event, actor, detail)
