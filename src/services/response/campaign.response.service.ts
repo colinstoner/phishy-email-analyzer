@@ -1243,14 +1243,49 @@ export class CampaignResponseService {
         );
       }
       const listed = new Set(email.proposed);
-      const warnings = (await this.store.listActions(email.incidentId)).filter(
-        action => action.type === 'send_warning' && listed.has(action.id)
+      const all = (await this.store.listActions(email.incidentId)).filter(
+        action => action.type === 'send_warning'
       );
+      const warnings = all.filter(action => listed.has(action.id));
       if (warnings.length !== 1) {
-        return refuse(
-          'bare_no_single_warning',
-          'The incident email you replied to did not propose a warning to approve.'
-        );
+        // Say what the state actually is, so the approver knows what to do
+        emitCampaignResponseMetric('ResponseActionApprovalsRejected', 1, {
+          ActionType: 'send_warning',
+          Reason: 'bare_no_single_warning',
+        });
+        const heading = 'Phishy did not carry out an approval';
+        if (all.some(action => action.status === 'proposed')) {
+          return {
+            heading,
+            body: [
+              'The incident email you replied to is not the one that proposes the warning. A different incident email in this thread has it: look for the one headed "... waiting for your approval" and reply to that one.',
+              'Nothing was done.',
+            ],
+          };
+        }
+        const sent = [...all]
+          .reverse()
+          .find(action => action.status === 'completed' || action.status === 'approved');
+        if (sent) {
+          const when = sent.approvedAt
+            ? displayTime(sent.approvedAt.toISOString(), this.config.timeZone)
+            : undefined;
+          return {
+            heading,
+            body: [
+              `There is nothing to approve: the warning for this incident was already approved${sent.approvedBy ? ` by ${sent.approvedBy}` : ''}${when ? ` at ${when}` : ''}.`,
+              ...(sent.result?.summary ?? []),
+              'Phishy will propose a new warning in this thread if the email reaches more people.',
+            ],
+          };
+        }
+        return {
+          heading,
+          body: [
+            'There is nothing to approve: no warning is proposed for this incident right now.',
+            'Phishy proposes one, in this thread, when the email is found in the mailbox of someone who has not reported it.',
+          ],
+        };
       }
       return await this.handleApprovals(
         [{ verb: 'WARNING', reference: warnings[0].reference }],
