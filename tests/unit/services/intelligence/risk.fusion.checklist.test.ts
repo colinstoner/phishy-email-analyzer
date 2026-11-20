@@ -12,6 +12,7 @@ import {
 } from '../../../../src/services/intelligence/risk.fusion';
 import {
   CHECKLIST_ITEMS,
+  CHECKLIST_SOURCES,
   CHECKLIST_VERSION,
   ChecklistAnswers,
 } from '../../../../src/services/ai/checklist';
@@ -30,7 +31,7 @@ import { ThreatIndicatorRecord } from '../../../../src/services/intelligence/dat
 
 function allClear(): ChecklistAnswers {
   return Object.fromEntries(
-    CHECKLIST_ITEMS.map(item => [item.id, item.id === 'authentication_result' ? 'not_shown' : 'no'])
+    CHECKLIST_ITEMS.map(item => [item.id, item.id === 'authentication_failed' ? 'unknown' : 'no'])
   ) as ChecklistAnswers;
 }
 
@@ -60,7 +61,14 @@ function result(
       ? {}
       : typeof checklist === 'string'
         ? { checklist: { version: CHECKLIST_VERSION, status: checklist } }
-        : { checklist: { version: CHECKLIST_VERSION, status: 'ok' as const, answers: checklist } }),
+        : {
+            checklist: {
+              version: CHECKLIST_VERSION,
+              status: 'ok' as const,
+              answers: checklist,
+              sources: { ...CHECKLIST_SOURCES },
+            },
+          }),
   };
 }
 
@@ -115,7 +123,7 @@ describe('fuseRisk in model mode', () => {
 
 describe('fuseRisk in checklist mode', () => {
   it('starts from the checklist score, keeping the model score for comparison', () => {
-    const checklist = answers({ asks_for_credentials: 'yes', link_destination_mismatch: 'yes' });
+    const checklist = answers({ asks_for_credentials: 'yes', link_text_mismatch: 'yes' });
     const decision = fuseRisk(
       result({ verdict: 'phishing', riskScore: 92 }, checklist),
       {},
@@ -133,16 +141,16 @@ describe('fuseRisk in checklist mode', () => {
       isPhishing: true,
       confidenceBasis: 'model',
     });
-    expect(decision.riskScore).toBe(55);
+    expect(decision.riskScore).toBe(65);
     expect(decision.checklistReasons).toEqual([
+      CHECKLIST_REASONS.link_text_mismatch,
       CHECKLIST_REASONS.asks_for_credentials,
-      CHECKLIST_REASONS.link_destination_mismatch,
     ]);
   });
 
   it('gives the same score for the same answers whatever the model scored', () => {
     const checklist = answers({
-      unexpected_for_recipient: 'unclear',
+      sender_impersonation: 'unclear',
       document_or_share_lure: 'yes',
     });
     const scores = [8, 22, 30].map(
@@ -160,8 +168,8 @@ describe('fuseRisk in checklist mode', () => {
       legitimate: 10,
       graymail: 29,
       spam: 29,
-      suspicious: 70,
-      bec: 70,
+      suspicious: 79,
+      bec: 90,
     };
     for (const verdict of verdicts) {
       expect(fuseRisk(result({ verdict }, checklist), {}, CHECKLIST).riskScore).toBe(
@@ -181,7 +189,7 @@ describe('fuseRisk in checklist mode', () => {
       {},
       CHECKLIST
     );
-    expect(high).toMatchObject({ riskScore: 60, isPhishing: true });
+    expect(high).toMatchObject({ riskScore: 70, isPhishing: true });
   });
 
   it.each(['missing', 'malformed'] as const)(
@@ -210,9 +218,51 @@ describe('fuseRisk in checklist mode', () => {
   it('falls back for answers from another checklist version', () => {
     const stale: AnalysisResult = {
       ...result({ verdict: 'suspicious', riskScore: 41 }),
-      checklist: { version: CHECKLIST_VERSION + 1, status: 'ok', answers: answers() },
+      checklist: {
+        version: CHECKLIST_VERSION + 1,
+        status: 'ok',
+        answers: answers(),
+        sources: { ...CHECKLIST_SOURCES },
+      },
     };
     expect(fuseRisk(stale, {}, CHECKLIST)).toMatchObject({ riskScore: 41, scoreBasis: 'model' });
+  });
+
+  it('falls back for a version 1 checklist stored or cached before version 2', () => {
+    // The v1 shape: every item answered by the model, no sources
+    const v1 = {
+      ...result({ verdict: 'suspicious', riskScore: 38 }),
+      checklist: {
+        version: 1,
+        status: 'ok',
+        answers: {
+          asks_for_credentials: 'yes',
+          link_destination_mismatch: 'yes',
+          authentication_result: 'not_shown',
+          unexpected_for_recipient: 'unclear',
+        },
+      },
+    } as unknown as AnalysisResult;
+    const decision = fuseRisk(v1, {}, CHECKLIST);
+    expect(decision).toMatchObject({ riskScore: 38, scoreBasis: 'model', modelRiskScore: 38 });
+    expect(decision).not.toHaveProperty('checklistReasons');
+    expect(decision).not.toHaveProperty('checklistRawScore');
+  });
+
+  it('falls back when a stored source disagrees with the item definition', () => {
+    const relabelled = {
+      ...result({ verdict: 'suspicious', riskScore: 43 }, answers({ reply_to_diverts: 'yes' })),
+    };
+    if (relabelled.checklist?.status === 'ok') {
+      relabelled.checklist = {
+        ...relabelled.checklist,
+        sources: { ...relabelled.checklist.sources, reply_to_diverts: 'model' },
+      };
+    }
+    expect(fuseRisk(relabelled, {}, CHECKLIST)).toMatchObject({
+      riskScore: 43,
+      scoreBasis: 'model',
+    });
   });
 
   it('re-validates stored answers and falls back when they are not closed values', () => {
@@ -277,7 +327,7 @@ describe('fuseRisk in checklist mode', () => {
 
     it('the safe-sender cap', () => {
       const decision = fuseRisk(
-        result({ verdict: 'suspicious' }, answers({ unexpected_for_recipient: 'yes' })),
+        result({ verdict: 'suspicious' }, answers({ reply_to_diverts: 'yes' })),
         { isSafeSender: true },
         CHECKLIST
       );
@@ -308,6 +358,23 @@ describe('fuseRisk in checklist mode', () => {
         riskScore: ATTACHMENT_RISK_FLOOR,
         confidenceBasis: 'attachment_inspection',
       });
+    });
+
+    it('a code item that mirrors a floor is not added twice (floor = max)', () => {
+      const attachment = fuseRisk(
+        result({ verdict: 'suspicious' }, answers({ risky_attachment: 'yes' })),
+        { attachmentSignals: ['credential_form'] },
+        CHECKLIST
+      );
+      expect(attachment.checklistRawScore).toBe(55);
+      expect(attachment.riskScore).toBe(ATTACHMENT_RISK_FLOOR);
+      const fanout = fuseRisk(
+        result({ verdict: 'suspicious' }, answers({ sender_fanout_anomalous: 'yes' })),
+        { senderHistory: FANOUT },
+        CHECKLIST
+      );
+      expect(fanout.checklistRawScore).toBe(35);
+      expect(fanout.riskScore).toBe(Math.max(35, SENDER_FANOUT_RISK_FLOOR));
     });
 
     it('an active campaign floor', () => {

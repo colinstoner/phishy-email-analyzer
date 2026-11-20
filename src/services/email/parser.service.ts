@@ -25,7 +25,11 @@ import {
   stripHtml,
 } from '../../utils/validation';
 import { S3Service } from '../storage/s3.service';
-import { buildLinkFacts, canonicalizeText, findAnchorMismatches } from '../../utils/canonicalize';
+import {
+  buildLinkFacts,
+  canonicalizeTextDetailed,
+  findAnchorMismatchDetails,
+} from '../../utils/canonicalize';
 import { claimedSenderDomain } from '../../utils/addressing';
 import { detectUserReport } from './user.report';
 import {
@@ -635,12 +639,17 @@ export class EmailParserService {
     emailData.linkFacts = buildLinkFacts(rawLinks);
     emailData.links = emailData.linkFacts.map(f => f.canonical);
 
-    const { canonical, flags } = canonicalizeText(emailData.text);
+    const { canonical, flags, findings } = canonicalizeTextDetailed(emailData.text);
     emailData.canonicalText = canonical;
-    emailData.contentFlags = [
-      ...flags,
-      ...findAnchorMismatches(emailData.html, { senderDomain: claimedSenderDomain(emailData) }),
-    ];
+    const anchors = findAnchorMismatchDetails(emailData.html, {
+      senderDomain: claimedSenderDomain(emailData),
+    });
+    emailData.contentFlags = [...flags, ...anchors.map(a => a.flag)];
+    // The same findings as fixed codes, for code-computed checklist answers
+    emailData.contentFindings = {
+      text: findings,
+      ...(emailData.html ? { anchors: anchors.map(a => a.kind) } : {}),
+    };
 
     return emailData;
   }

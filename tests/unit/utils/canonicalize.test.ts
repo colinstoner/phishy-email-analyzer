@@ -3,7 +3,10 @@
  */
 
 import {
+  analyzeUrl,
   canonicalizeText,
+  canonicalizeTextDetailed,
+  findAnchorMismatchDetails,
   canonicalizeUrl,
   buildLinkFacts,
   findAnchorMismatches,
@@ -319,5 +322,36 @@ describe('registrableDomain', () => {
   it('returns the last two labels of the host', () => {
     expect(registrableDomain('https://a.b.example.com/x')).toBe('example.com');
     expect(registrableDomain('not a url')).toBeNull();
+  });
+});
+
+describe('structured findings (for code-computed checklist answers)', () => {
+  it('canonicalizeTextDetailed gives one code per flag, in order, with the same text and flags', () => {
+    const raw = 'Pa​ssword ‮txt.exe &#65;';
+    const detailed = canonicalizeTextDetailed(raw);
+    expect(detailed.findings).toEqual([
+      'invisible_characters',
+      'bidi_controls',
+      'numeric_entities',
+    ]);
+    expect({ canonical: detailed.canonical, flags: detailed.flags }).toEqual(canonicalizeText(raw));
+    expect(canonicalizeTextDetailed('').findings).toEqual([]);
+  });
+
+  it('analyzeUrl marks a destination a wrapper still hides', () => {
+    expect(analyzeUrl('https://www.example.net/a').destinationHidden).toBe(false);
+    expect(
+      analyzeUrl('https://us.content.mimecastprotect.com/s/abcdEFGHijk?domain=example.net')
+        .destinationHidden
+    ).toBe(true);
+  });
+
+  it('findAnchorMismatchDetails gives the flags of findAnchorMismatches with their kinds', () => {
+    const html =
+      '<a href="https://login.example.org/x">https://portal.example.net/</a>' +
+      '<a href="https://share.example.org/view">Statement-0042.pdf</a>';
+    const details = findAnchorMismatchDetails(html);
+    expect(details.map(d => d.kind)).toEqual(['displayed_domain', 'file_name_text']);
+    expect(details.map(d => d.flag)).toEqual(findAnchorMismatches(html));
   });
 });

@@ -3,8 +3,9 @@
  * schema can import it without pulling analysis code into other bundles.
  *
  * - `model` (default): the score starts from the model's own riskScore.
- * - `checklist` (experimental): the score is computed by code from the
- *   model's answers to a fixed checklist (services/ai/checklist.ts).
+ * - `checklist` (experimental): the score is computed by code from a fixed
+ *   checklist, answered partly by Phishy and partly by the model
+ *   (services/ai/checklist.ts).
  */
 export const SCORING_MODES = ['model', 'checklist'] as const;
 export type ScoringMode = (typeof SCORING_MODES)[number];

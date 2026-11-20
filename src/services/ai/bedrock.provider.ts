@@ -276,7 +276,7 @@ export class BedrockProvider implements AIProvider {
         this.sendSingleShot(model, prompt, options, isRefusalFallback),
     });
 
-    attachChecklist(result, this.scoringMode);
+    attachChecklist(result, this.scoringMode, emailData);
 
     logger.info('Email analysis completed', {
       analysisFailed: result.analysisFailed ?? false,

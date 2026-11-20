@@ -9,7 +9,12 @@ import { validateConfig } from '../../../../src/config/schema';
 import { AnthropicProvider } from '../../../../src/services/ai/anthropic.provider';
 import { AgenticAnalyzer } from '../../../../src/services/ai/agentic/agentic.analyzer';
 import { AgenticToolExecutor } from '../../../../src/services/ai/agentic/tool.executor';
-import { CHECKLIST_ITEMS } from '../../../../src/services/ai/checklist';
+import {
+  CHECKLIST_VERSION,
+  MODEL_ITEMS,
+  combineChecklist,
+} from '../../../../src/services/ai/checklist';
+import { computeCodeChecklistAnswers } from '../../../../src/services/ai/checklist.facts';
 import { ConversationRequest } from '../../../../src/services/ai/conversation.types';
 import { AIProvider } from '../../../../src/services/ai/provider.interface';
 import { fuseRisk } from '../../../../src/services/intelligence/risk.fusion';
@@ -17,15 +22,9 @@ import { CHECKLIST_REASONS } from '../../../../src/services/intelligence/checkli
 import { buildEmailHtml, buildPlainTextReport } from '../../../../src/templates/report.html';
 import { AnalysisResult, ExtractedEmailData } from '../../../../src/types';
 
+/** The model's part of the checklist: a credential ask, nothing else */
 const ANSWERS = Object.fromEntries(
-  CHECKLIST_ITEMS.map(item => [
-    item.id,
-    item.id === 'asks_for_credentials'
-      ? 'yes'
-      : item.id === 'authentication_result'
-        ? 'fail'
-        : 'no',
-  ])
+  MODEL_ITEMS.map(item => [item.id, item.id === 'asks_for_credentials' ? 'yes' : 'no'])
 );
 
 const VERDICT = {
@@ -139,8 +138,27 @@ describe('AnthropicProvider scoring mode', () => {
     const provider = new AnthropicProvider({ apiKey: 'k', scoringMode: 'checklist' }, h => h);
     const result = await provider.analyzeEmail(EMAIL);
     expect(sentPrompt()).toContain('SCORING CHECKLIST');
-    expect(result.checklist).toEqual({ version: 1, status: 'ok', answers: ANSWERS });
+    expect(result.checklist).toEqual(
+      combineChecklist(ANSWERS as never, computeCodeChecklistAnswers(EMAIL))
+    );
+    expect(result.checklist?.status === 'ok' && result.checklist.sources.risky_attachment).toBe(
+      'code'
+    );
     expect(result.assessment?.riskScore).toBe(90);
+  });
+
+  it('in checklist mode ignores a model answer for a code item', async () => {
+    post.mockResolvedValue(
+      httpReply(
+        JSON.stringify({ ...VERDICT, checklist: { ...ANSWERS, link_text_mismatch: 'yes' } })
+      )
+    );
+    const provider = new AnthropicProvider({ apiKey: 'k', scoringMode: 'checklist' }, h => h);
+    const result = await provider.analyzeEmail(EMAIL);
+    // EMAIL has no HTML body, so Phishy cannot tell: unknown, whatever the model said
+    expect(result.checklist?.status === 'ok' && result.checklist.answers.link_text_mismatch).toBe(
+      'unknown'
+    );
   });
 
   it('in checklist mode never fails the analysis over a missing checklist', async () => {
@@ -148,7 +166,7 @@ describe('AnthropicProvider scoring mode', () => {
     const provider = new AnthropicProvider({ apiKey: 'k', scoringMode: 'checklist' }, h => h);
     const result = await provider.analyzeEmail(EMAIL);
     expect(result.analysisFailed).toBeUndefined();
-    expect(result.checklist).toEqual({ version: 1, status: 'missing' });
+    expect(result.checklist).toEqual({ version: CHECKLIST_VERSION, status: 'missing' });
   });
 });
 
@@ -201,7 +219,7 @@ describe('report in checklist mode', () => {
       threatVectors: [],
       targeting: 'mass',
     },
-    checklist: { version: 1, status: 'ok', answers: ANSWERS as never },
+    checklist: combineChecklist(ANSWERS as never, computeCodeChecklistAnswers(EMAIL)),
   };
 
   function render(decision: ReturnType<typeof fuseRisk>): string {

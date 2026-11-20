@@ -38,9 +38,10 @@ const OVERHEAD_TOKENS = 400;
 const ASSUMED_OUTPUT_TOKENS: Record<EvalMode, number> = { single: 3000, agentic: 6000 };
 /**
  * Extra output tokens assumed per call in checklist scoring mode: the
- * checklist object is 20 short key/value pairs, about 8-10 tokens each.
+ * model's part of the checklist (version 2) is 10 short key/value pairs,
+ * about 8-10 tokens each, rounded up.
  */
-export const CHECKLIST_EXTRA_OUTPUT_TOKENS = 250;
+export const CHECKLIST_EXTRA_OUTPUT_TOKENS = 150;
 /** The agentic loop resends the prompt on every round */
 const AGENTIC_INPUT_MULTIPLIER = 3;
 const MAX_TOOL_INPUT_CHARS = 400;
@@ -253,7 +254,10 @@ async function executeRun(
         ? 'absent'
         : (analysis.checklist?.status ?? 'absent'),
       ...(analysis.checklist?.status === 'ok'
-        ? { answers: { ...analysis.checklist.answers } }
+        ? {
+            answers: { ...analysis.checklist.answers },
+            sources: { ...analysis.checklist.sources },
+          }
         : {}),
       ...(decision.checklistScore !== undefined ? { checklistScore: decision.checklistScore } : {}),
       ...(decision.checklistRawScore !== undefined

@@ -155,6 +155,13 @@ interface HeaderSet {
   replyTo?: string;
   /** A missing Cc means the original had none (false when the header list may be incomplete) */
   ccAbsenceMeansNone: boolean;
+  /**
+   * A missing Reply-To means the original had none. True only for a
+   * complete header list from the retrieved copy: mail clients usually leave
+   * Reply-To out of the forward header they write, so its absence from a
+   * forwarded block says nothing.
+   */
+  replyToAbsenceMeansNone: boolean;
 }
 
 /** One header from a retrieved original, or undefined when absent or repeated */
@@ -178,6 +185,9 @@ function headerSet(emailData: ExtractedEmailData): HeaderSet | undefined {
       replyTo: singleHeader(retrieved.headers, 'Reply-To'),
       // A repeated Cc is unreadable, not absent; a truncated list may have lost it
       ccAbsenceMeansNone: ccCount === 0 && !retrieved.headersTruncated,
+      replyToAbsenceMeansNone:
+        !retrieved.headersTruncated &&
+        !retrieved.headers.some(h => h.name.toLowerCase() === 'reply-to'),
     };
   }
   const forwarded = emailData.forwardedHeaders ?? {};
@@ -191,6 +201,7 @@ function headerSet(emailData: ExtractedEmailData): HeaderSet | undefined {
     // Mail clients write a Cc line into the forward header whenever the
     // original had one, and Phishy's forward-as-attachment block does too
     ccAbsenceMeansNone: true,
+    replyToAbsenceMeansNone: false,
   };
 }
 
@@ -212,6 +223,28 @@ export function claimedSenderDomain(emailData: ExtractedEmailData): string | und
  * headers were there but established nothing.
  */
 export function computeAddressingFacts(emailData: ExtractedEmailData): AddressingFacts | undefined {
+  const details = computeAddressingDetails(emailData);
+  return details ? { source: details.source, facts: details.facts } : undefined;
+}
+
+/**
+ * The addressing facts plus what the headers let Phishy know, so code can
+ * tell "no" from "cannot tell" (unknown stays unknown):
+ *  - `recipientsKnown`: To was readable and Cc readable or certainly absent,
+ *    so `bcc_to_self` / `reporter_not_visible` were actually tested;
+ *  - `replyTo`: `single` when one readable Reply-To was compared, `absent`
+ *    when the original certainly had none (only a complete retrieved header
+ *    list can say so), `unknown` otherwise.
+ */
+export interface AddressingDetails extends AddressingFacts {
+  recipientsKnown: boolean;
+  replyTo: 'single' | 'absent' | 'unknown';
+}
+
+/** computeAddressingFacts with what was knowable; the same computation */
+export function computeAddressingDetails(
+  emailData: ExtractedEmailData
+): AddressingDetails | undefined {
   const set = headerSet(emailData);
   if (!set) return undefined;
   const from = parseAddressList(set.from);
@@ -241,6 +274,7 @@ export function computeAddressingFacts(emailData: ExtractedEmailData): Addressin
   }
 
   const replyTo = parseAddressList(set.replyTo);
+  const replyToSingle = replyTo?.complete === true && replyTo.entries.length === 1;
   if (replyTo?.complete && replyTo.entries.length === 1) {
     const reply = replyTo.entries[0];
     if (reply.address !== sender.address) {
@@ -255,7 +289,16 @@ export function computeAddressingFacts(emailData: ExtractedEmailData): Addressin
     }
   }
 
-  return { source: set.source, facts };
+  return {
+    source: set.source,
+    facts,
+    recipientsKnown: visible !== undefined,
+    replyTo: replyToSingle
+      ? 'single'
+      : set.replyTo === undefined && set.replyToAbsenceMeansNone
+        ? 'absent'
+        : 'unknown',
+  };
 }
 
 /** How each fact is stated in the prompt. No value from the email appears. */

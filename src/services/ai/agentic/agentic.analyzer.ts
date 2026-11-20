@@ -148,7 +148,7 @@ export class AgenticAnalyzer {
         }
         result.tokenUsage = usage.totalTokens > 0 ? usage : undefined;
         result.toolsUsed = toolsUsed;
-        attachChecklist(result, this.scoringMode);
+        attachChecklist(result, this.scoringMode, emailData);
 
         logger.info('Agentic analysis completed', {
           isPhishing: result.isPhishing,

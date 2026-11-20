@@ -4,6 +4,7 @@
 
 import type { AttachmentInspection } from '../services/attachments/types';
 import type { ChecklistOutcome } from '../services/ai/checklist';
+import type { AnchorMismatchKind, TextObfuscationKind } from '../utils/canonicalize';
 
 /**
  * Email message structure as received from various sources
@@ -99,6 +100,17 @@ export interface ExtractedEmailData {
   canonicalText?: string;
   /** Obfuscation indicators found during canonicalization — themselves signals */
   contentFlags?: string[];
+  /**
+   * The structured twin of `contentFlags`, set by the parser from the same
+   * computation: fixed codes for what canonicalizing the body text undid,
+   * and for each anchor trick found (`anchors` is absent when there was no
+   * HTML body to check). Read by code (the checklist's code-computed
+   * answers), never rendered.
+   */
+  contentFindings?: {
+    text: TextObfuscationKind[];
+    anchors?: AnchorMismatchKind[];
+  };
   /** Present when this is an Outlook Report-button submission (handled silently) */
   userReport?: UserReport;
   /**

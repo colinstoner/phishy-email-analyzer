@@ -9,6 +9,7 @@ import {
   addressingSourceText,
   claimedSenderAddress,
   claimedSenderDomain,
+  computeAddressingDetails,
   computeAddressingFacts,
   parseAddressList,
 } from '../../../src/utils/addressing';
@@ -251,5 +252,43 @@ describe('claimed sender and wording', () => {
     }
     expect(addressingSourceText('forwarded')).toContain('CLAIMED');
     expect(addressingSourceText('retrieved')).toContain('retrieved from the reporter');
+  });
+});
+
+describe('computeAddressingDetails', () => {
+  it('gives the same facts as computeAddressingFacts', () => {
+    const data = email({ 'Original-From': SENDER, 'Original-To': SENDER });
+    const details = computeAddressingDetails(data);
+    expect({ source: details?.source, facts: details?.facts }).toEqual(
+      computeAddressingFacts(data)
+    );
+  });
+
+  it('says whether the visible recipients could be read', () => {
+    expect(
+      computeAddressingDetails(email({ 'Original-From': SENDER, 'Original-To': 'a@example.com' }))
+        ?.recipientsKnown
+    ).toBe(true);
+    expect(computeAddressingDetails(email({ 'Original-From': SENDER }))?.recipientsKnown).toBe(
+      false
+    );
+  });
+
+  it('treats a missing Reply-To as unknown in a forward, absent in a complete retrieved copy', () => {
+    expect(computeAddressingDetails(email({ 'Original-From': SENDER }))?.replyTo).toBe('unknown');
+    expect(
+      computeAddressingDetails(
+        email({ 'Original-From': SENDER, 'Original-Reply-To': 'b@vendor.example' })
+      )?.replyTo
+    ).toBe('single');
+    const headers = [{ name: 'From', value: SENDER }];
+    expect(computeAddressingDetails(email({}, retrieved(headers)))?.replyTo).toBe('absent');
+    expect(computeAddressingDetails(email({}, retrieved(headers, true)))?.replyTo).toBe('unknown');
+    const repeated = [
+      { name: 'From', value: SENDER },
+      { name: 'Reply-To', value: 'a@vendor.example' },
+      { name: 'Reply-To', value: 'b@vendor.example' },
+    ];
+    expect(computeAddressingDetails(email({}, retrieved(repeated)))?.replyTo).toBe('unknown');
   });
 });
