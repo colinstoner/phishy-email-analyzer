@@ -78,7 +78,7 @@ Parameters:
   CampaignAlertDistribution:
     Type: String
     Default: ''
-    Description: Address the campaign broadcast is sent to (e.g. all-staff@example.com). Required when CampaignAlertsEnabled is true, unless CampaignResponseEnabled is true and its audience is recipients. Known issue - this value currently fails configuration validation when passed as an environment variable; leave it empty and set campaignAlerts.distributionList in a configuration file (docs/CONFIGURATION.md).
+    Description: Address the campaign broadcast is sent to (e.g. all-staff@example.com). Required when CampaignAlertsEnabled is true, unless CampaignResponseEnabled is true and its audience is recipients.
   CampaignResponseEnabled:
     Type: String
     AllowedValues: ['true', 'false']

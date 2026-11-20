@@ -6,10 +6,12 @@
 import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
 import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 import { Readable } from 'stream';
+import { z } from 'zod';
 import {
   GraphBrokerConfig,
   GraphBrokerConfigSchema,
   PhishyConfig,
+  PhishyConfigSchema,
   PartialPhishyConfig,
   safeValidateConfig,
 } from './schema';
@@ -31,7 +33,7 @@ let cachedDbConnectionString: string | null = null;
 /**
  * Environment variable mappings for backwards compatibility
  */
-const ENV_MAPPINGS: Record<string, string> = {
+export const ENV_MAPPINGS: Readonly<Record<string, string>> = {
   // AI
   ANTHROPIC_API_KEY: 'ai.anthropic.apiKey',
   CLAUDE_MODEL: 'ai.anthropic.model',
@@ -416,28 +418,80 @@ function applyEnvironmentOverrides(config: PartialPhishyConfig): PartialPhishyCo
   for (const [envVar, configPath] of Object.entries(ENV_MAPPINGS)) {
     const value = process.env[envVar];
     if (value !== undefined) {
-      setNestedValue(result, configPath, parseEnvValue(envVar, value));
+      setNestedValue(result, configPath, parseEnvValue(configPath, value));
     }
   }
 
   return result;
 }
 
+/** The shape an environment variable's value takes, decided by its target in the schema */
+export type EnvValueKind = 'boolean' | 'number' | 'list' | 'string';
+
+interface SchemaDef {
+  type: string;
+  innerType?: z.ZodType;
+  in?: z.ZodType;
+  shape?: Record<string, z.ZodType>;
+}
+
+function schemaDef(schema: z.ZodType): SchemaDef {
+  return schema._zod.def;
+}
+
+/** Strip optional / default / transform wrappers down to the schema that holds the value */
+function unwrapSchema(schema: z.ZodType): z.ZodType {
+  let current = schema;
+  for (;;) {
+    const def = schemaDef(current);
+    if (def.innerType) {
+      current = def.innerType;
+    } else if (def.type === 'pipe' && def.in) {
+      current = def.in;
+    } else {
+      return current;
+    }
+  }
+}
+
+/**
+ * The kind of value the schema expects at a dotted configuration path. List
+ * versus scalar (and number versus string) is decided by the target field, not
+ * by the variable's name. Throws for a path the schema does not have, so a
+ * mapping that drifts from the schema fails loudly in tests.
+ */
+export function envValueKind(configPath: string): EnvValueKind {
+  let schema: z.ZodType = PhishyConfigSchema;
+  for (const segment of configPath.split('.')) {
+    const def = schemaDef(unwrapSchema(schema));
+    const next = def.type === 'object' ? def.shape?.[segment] : undefined;
+    if (!next) {
+      throw new Error(`No configuration schema field at ${configPath}`);
+    }
+    schema = next;
+  }
+  switch (schemaDef(unwrapSchema(schema)).type) {
+    case 'boolean':
+      return 'boolean';
+    case 'number':
+      return 'number';
+    case 'array':
+      return 'list';
+    default:
+      return 'string';
+  }
+}
+
 /**
  * Parse environment variable value to appropriate type
  */
-function parseEnvValue(key: string, value: string): unknown {
+function parseEnvValue(configPath: string, value: string): unknown {
   // Boolean values
   if (value.toLowerCase() === 'true') return true;
   if (value.toLowerCase() === 'false') return false;
 
-  // Comma-separated arrays
-  if (
-    key.includes('DOMAINS') ||
-    key.includes('SENDERS') ||
-    key.includes('DISTRIBUTION') ||
-    key.includes('SAFE_SENDER_SECURITY')
-  ) {
+  // Comma-separated arrays, for the fields the schema declares as lists
+  if (envValueKind(configPath) === 'list') {
     return value
       .split(',')
       .map(s => s.trim())

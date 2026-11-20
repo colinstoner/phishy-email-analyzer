@@ -59,7 +59,7 @@ If you deploy with SAM, you can skip to Section 9 (production access) and Sectio
 | `DatabaseSecurityGroupId` | empty | When set, an ingress rule for port 5432 from the function's security group is added to it |
 | `CreateVpcEndpoints` | `true` | Interface endpoints for bedrock-runtime (with Bedrock), SES and Secrets Manager, plus Lambda with Graph, so the VPC-attached function needs no NAT. Set `false` if the VPC already has them or a NAT gateway. The VPC must also have an S3 gateway endpoint or NAT route |
 | `CampaignAlertsEnabled` | `false` | Broadcast warning once several people report one email |
-| `CampaignAlertDistribution` | empty | Where that broadcast goes. **Known issue:** the value currently fails configuration validation as an environment variable; leave it empty and set `campaignAlerts` in a configuration file ([CONFIGURATION.md](docs/CONFIGURATION.md#configuration-priority)) |
+| `CampaignAlertDistribution` | empty | Where that broadcast goes (a single address, typically an all-staff list) |
 
 With `AIProvider=anthropic`, a VPC-attached function also needs NAT egress to reach `api.anthropic.com`: interface endpoints only cover AWS services.
 

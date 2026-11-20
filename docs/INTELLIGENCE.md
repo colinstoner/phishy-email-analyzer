@@ -202,15 +202,14 @@ When several employees report the same phishing email, Phishy can broadcast one 
 
 ```bash
 export PHISHY_CAMPAIGN_ALERTS_ENABLED=true
+export PHISHY_CAMPAIGN_ALERTS_DISTRIBUTION=all-staff@example.com
 ```
 
-and set the broadcast address in the S3 configuration file:
+or the same in the S3 configuration file:
 
 ```json
 { "campaignAlerts": { "enabled": true, "distributionList": "all-staff@example.com" } }
 ```
-
-The `PHISHY_CAMPAIGN_ALERTS_DISTRIBUTION` environment variable currently fails configuration validation (it is parsed as a list; see [CONFIGURATION.md](CONFIGURATION.md#configuration-priority)).
 
 ### Alert Triggers
 
