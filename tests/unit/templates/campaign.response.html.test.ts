@@ -72,14 +72,18 @@ describe('employee warning', () => {
     expect(
       email.text.indexOf('A phishing email reached your mailbox. Please delete it.')
     ).toBeLessThan(email.text.indexOf('Verdict:'));
-    expect(email.text).toContain('An email with the subject "Invoice <b>2291</b> overdue');
-    expect(email.text).toContain('from "Accounts Team" <billing@examp1e-billing[.]test>');
-    expect(email.text).toContain('arrived in your mailbox on Tue, 17 Nov 2026, 09:14 UTC.');
+    expect(email.text).toContain('WHICH EMAIL');
+    expect(email.text).toContain('Subject: "Invoice <b>2291</b> overdue');
+    expect(email.text).toContain('From: "Accounts Team" <billing@examp1e-billing[.]test>');
+    expect(email.text).toContain('Arrived: Tue, 17 Nov 2026, 09:14 UTC');
+    expect(email.text).toContain('Where: In your mailbox.');
+    // Which email comes before what to do
+    expect(email.text.indexOf('WHICH EMAIL')).toBeLessThan(email.text.indexOf('WHAT TO DO'));
   });
 
   it('says what to do, what to do if they clicked, and that they need not forward it', () => {
-    expect(email.text).toContain('- Do not click any link or open any attachment in it.');
-    expect(email.text).toContain('- Delete it.');
+    expect(email.text).toContain('1. Do not click any link or open any attachment in it.');
+    expect(email.text).toContain('3. Delete it.');
     expect(email.text).toContain('You do not need to forward it or report it');
     expect(email.text).toContain(
       'Call the service desk on extension 4400 and change your password.'
@@ -108,11 +112,12 @@ describe('employee warning', () => {
 
   it('adapts to where their copy is', () => {
     const junk = buildEmployeeWarning(context, { address: 'p@example.com', folder: 'junk' });
+    expect(junk.text).toContain('Arrived: Tue, 17 Nov 2026, 09:14 UTC');
     expect(junk.text).toContain(
-      'arrived in your Junk Email folder on Tue, 17 Nov 2026, 09:14 UTC. It is still dangerous there'
+      'Where: Your Junk Email folder. It is still dangerous there: do not open it.'
     );
     const deleted = buildEmployeeWarning(context, { address: 'p@example.com', folder: 'deleted' });
-    expect(deleted.text).toContain('is now in your Deleted Items');
+    expect(deleted.text).toContain('Where: Your Deleted Items.');
   });
 
   it('works without a subject or time', () => {
@@ -121,7 +126,9 @@ describe('employee warning', () => {
       { address: 'p@example.com' }
     );
     expect(bare.subject).toBe('Security warning: a phishing email reached your mailbox');
-    expect(bare.text).toContain('arrived in your mailbox.');
+    expect(bare.text).toContain('Where: In your mailbox.');
+    expect(bare.text).not.toContain('Arrived:');
+    expect(bare.text).not.toContain('Subject:');
   });
 });
 
@@ -170,7 +177,8 @@ describe('distribution warning (campaign response on)', () => {
     const email = buildDistributionWarning(context);
     expect(email.subject).toContain('is going around');
     expect(email.text).toContain('WHAT TO LOOK FOR');
-    expect(email.text).toContain('first seen on Tue, 17 Nov 2026, 09:14 UTC.');
+    expect(email.text).toContain('First seen: Tue, 17 Nov 2026, 09:14 UTC');
+    expect(email.text).toContain('From: "Accounts Team" <billing@examp1e-billing[.]test>');
     noLinks(email.html, email.text);
   });
 });
@@ -263,14 +271,16 @@ describe('incident email', () => {
     timeZone: 'UTC',
   });
 
-  it('leads with a plain summary, then the detail a decision needs', () => {
+  it('leads with the decision, then reach and actions, then the evidence', () => {
     const order = [
+      '2 actions are waiting for your approval.',
       '3 people have reported',
-      'WHAT THE ATTACK IS',
-      'TIMELINE',
-      'BLAST RADIUS',
+      'REACH',
       'WHAT PHISHY HAS DONE',
       'PROPOSED ACTIONS',
+      'WHAT THE ATTACK IS',
+      'TIMELINE',
+      'RECIPIENTS',
     ];
     const positions = order.map(marker => email.text.indexOf(marker));
     expect(positions.every(p => p >= 0)).toBe(true);
@@ -294,6 +304,36 @@ describe('incident email', () => {
     expect(email.html).toContain('APPROVE WARNING PHY-WWWW-WWWW-WWWW-WWWW');
     // The command never stands on a line of its own, so a quoted copy cannot match
     expect(email.text.split('\n').some(line => /^APPROVE /.test(line.trim()))).toBe(false);
+  });
+
+  it('keeps each HTML command in the same paragraph as "Reply with this line:"', () => {
+    for (const command of [
+      'APPROVE WARNING PHY-WWWW-WWWW-WWWW-WWWW',
+      'APPROVE REMOVAL PHY-RRRR-RRRR-RRRR-RRRR',
+    ]) {
+      expect(email.html).toMatch(
+        new RegExp(`Reply with this line:&nbsp; <span[^>]*>${command}</span></p>`)
+      );
+    }
+    // What a mail client makes of a quoted HTML copy: block elements become line breaks
+    const asText = email.html
+      .replace(/<(?:\/p|\/div|\/td|\/tr|\/li|br|\/h[1-6])[^>]*>/gi, '\n')
+      .replace(/<[^>]+>/g, '')
+      .replace(/&nbsp;/g, ' ');
+    expect(asText.split('\n').some(line => /^\W{0,3}approve/i.test(line.trim()))).toBe(false);
+  });
+
+  it('puts the decision in the headline', () => {
+    expect(email.html).toContain('2 actions are waiting for your approval');
+    const off = buildIncidentEmail({
+      incident,
+      proposed: [warning],
+      done: [],
+      notes: [],
+      commandsEnabled: false,
+      timeZone: 'UTC',
+    });
+    expect(off.text).toContain('For information: approvals are off.');
   });
 
   it('defangs and escapes everything from the attack', () => {
@@ -322,6 +362,13 @@ describe('incident email', () => {
     expect(update.subject).toBe(`Re: ${email.subject}`);
     expect(update.text).toContain('WHAT CHANGED');
     expect(update.text).toContain('No action is waiting for approval.');
+    // An update leads with what changed, in both formats
+    expect(update.text.indexOf('WHAT CHANGED')).toBeLessThan(
+      update.text.indexOf('9 people have reported')
+    );
+    expect(update.html.indexOf('What changed')).toBeLessThan(
+      update.html.indexOf('9 people have reported')
+    );
   });
 
   it('says approvals cannot arrive when the command channel is off', () => {

@@ -473,7 +473,7 @@ describe('report: sender relationship', () => {
     expect(html.indexOf('Sender Relationship')).toBeGreaterThan(
       html.indexOf('Original Email for IT Review')
     );
-    expect(section).toContain('<td>Classification</td><td>established</td>');
+    expect(section).toMatch(/>Classification<\/td>\s*<td[^>]*>established<\/td>/);
     expect(section).toContain('at least 2000 messages');
     expect(section).toContain('A known sender is not evidence of safety');
 
@@ -489,7 +489,7 @@ describe('report: sender relationship', () => {
     const html = buildEmailHtml(analysis('legitimate', 5), emailData(facts('established')), {
       risk: { ...fuseRisk(analysis('legitimate', 5), { senderHistory: facts('established') }) },
     });
-    const reporterPart = html.slice(html.indexOf('<body>'), html.indexOf('Original Email for IT Review'));
+    const reporterPart = html.slice(html.indexOf('<body'), html.indexOf('Original Email for IT Review'));
     expect(reporterPart).not.toMatch(/established|emailed your organization before/);
   });
 
@@ -497,7 +497,7 @@ describe('report: sender relationship', () => {
     const history = facts('established_with_anomalous_fanout');
     const risk = fuseRisk(analysis('legitimate', 5), { senderHistory: history });
     const html = buildEmailHtml(analysis('legitimate', 5), emailData(history), { risk });
-    const reporterPart = html.slice(html.indexOf('<body>'), html.indexOf('Original Email for IT Review'));
+    const reporterPart = html.slice(html.indexOf('<body'), html.indexOf('Original Email for IT Review'));
     expect(reporterPart.match(/far more people than usual/g)).toHaveLength(1);
     expect(reporterPart).toContain('SUSPICIOUS');
   });

@@ -11,6 +11,35 @@ import type {
 } from '../services/graph/blast-radius.service';
 import { formatSenderHistoryLines } from '../utils/sender-history.format';
 import { summarizeInspectionForReport } from '../services/attachments/report';
+import {
+  COLOR,
+  FONT,
+  MONO,
+  TEXT_RULE,
+  TEXT_SUBRULE,
+  Tone,
+  TONE,
+  block,
+  bulletList,
+  callout,
+  codeBox,
+  dataTable,
+  divider,
+  emailShell,
+  escapeHtml,
+  facts,
+  heading,
+  hero,
+  instructions,
+  meter,
+  paragraph,
+  paragraphHtml,
+} from './layout';
+
+export { escapeHtml };
+
+/** Reasons shown in the report's first screen; the rest move to "More detail" */
+const TOP_REASONS = 3;
 
 /** Maximum length for email body display */
 const MAX_BODY_LENGTH = 10000;
@@ -145,17 +174,30 @@ export function riskScoreLines(risk: ReportRisk): string[] {
   return lines;
 }
 
-/** The same two lines as HTML, with the score prominent */
-export function riskScoreHtml(risk: ReportRisk): string {
-  if (risk.verdict === 'undetermined') {
-    return `<p class="risk-score">Risk score: <strong>not assessed</strong></p>`;
-  }
-  let html = `<p class="risk-score">Risk score: <strong>${risk.riskScore}/100</strong> (${escapeHtml(risk.riskLevel)})</p>`;
+/**
+ * The same two lines as HTML. By default one compact line, as the warnings
+ * and the incident email carry it; `prominent` (the analysis report) makes
+ * the score the big number with a meter, since employees engage with it.
+ * The level is always a word, never only the meter's colour.
+ */
+export function riskScoreHtml(risk: ReportRisk, options: { prominent?: boolean } = {}): string {
   const confidence = confidenceText(risk);
-  if (confidence) {
-    html += `<p class="risk-score">Confidence: <strong>${escapeHtml(confidence)}</strong></p>`;
+  const line = (html: string): string =>
+    `<p class="ph-muted" style="margin:0 0 4px 0;font-family:${FONT};font-size:14px;line-height:20px;color:${COLOR.muted};">${html}</p>`;
+  if (risk.verdict === 'undetermined') {
+    return line('Risk score: <strong>not assessed</strong>');
   }
-  return html;
+  const confidenceHtml = confidence ? `Confidence: <strong>${escapeHtml(confidence)}</strong>` : '';
+  if (!options.prominent) {
+    return line(
+      `Risk score: <strong>${risk.riskScore}/100</strong> (${escapeHtml(risk.riskLevel)})${confidenceHtml ? ` &nbsp;&middot;&nbsp; ${confidenceHtml}` : ''}`
+    );
+  }
+  const tone: Tone = describeVerdict(risk.verdict).tone;
+  const score = Math.max(0, Math.min(100, risk.riskScore));
+  return `<p class="ph-muted" style="margin:14px 0 0 0;font-family:${FONT};font-size:12px;line-height:16px;font-weight:700;letter-spacing:0.6px;text-transform:uppercase;color:${COLOR.muted};">Risk score</p>
+<p class="ph-ink-${tone}" style="margin:0;font-family:${FONT};color:${TONE[tone].ink};"><strong style="font-size:44px;line-height:50px;font-weight:800;">${risk.riskScore}</strong><span style="font-size:20px;line-height:50px;font-weight:600;">/100</span><span style="font-size:15px;line-height:50px;font-weight:700;">&nbsp;&nbsp;${escapeHtml(risk.riskLevel)} risk</span></p>
+${meter(score / 100, tone)}${confidenceHtml ? line(confidenceHtml) : ''}`;
 }
 
 /** A verdict's label, plain-language gloss and "what to do", as the report words them */
@@ -183,7 +225,7 @@ function securityReplyHint(options?: ReportOptions): string | undefined {
     : undefined;
 }
 
-/** HTML-escape text for any Phishy email */
+/** HTML-escape text for any Phishy email (the same function as `escapeHtml`) */
 export function escapeEmailHtml(text: string): string {
   return escapeHtml(text);
 }
@@ -207,7 +249,18 @@ const SENDER_HISTORY_CAVEAT =
 type VerdictTone = 'danger' | 'caution' | 'safe';
 const VERDICT_DISPLAY: Record<
   string,
-  { label: string; tone: VerdictTone; plain: string; action: string }
+  {
+    label: string;
+    tone: VerdictTone;
+    plain: string;
+    action: string;
+    /** The verdict in a few plain words: the report's headline */
+    headline: string;
+    /** `action` as steps to follow, for the report's "What to do now" */
+    steps: string[];
+    /** A line under the steps that is not itself a step */
+    stepsNote?: string;
+  }
 > = {
   bec: {
     label: 'BUSINESS EMAIL COMPROMISE',
@@ -216,6 +269,11 @@ const VERDICT_DISPLAY: Record<
       'Someone is impersonating a colleague, executive, or vendor to trick you into sending money, data, or credentials.',
     action:
       'Do not reply or act on the request. Verify it with the real person through a known phone number or in person.',
+    headline: 'This email is a scam',
+    steps: [
+      'Do not reply or act on the request.',
+      'Check it with the real person, by a phone number you already know or in person.',
+    ],
   },
   phishing: {
     label: 'PHISHING',
@@ -223,24 +281,35 @@ const VERDICT_DISPLAY: Record<
     plain:
       'This email is trying to steal your password or personal information, usually through a fake login page.',
     action: 'Do not click any links or enter any information. Delete it.',
+    headline: 'This email is a phishing attack',
+    steps: ['Do not click any links or enter any information.', 'Delete it.'],
   },
   malware_delivery: {
     label: 'MALWARE DELIVERY',
     tone: 'danger',
     plain: 'This email is trying to get you to open a file or link that would infect your device.',
     action: 'Do not open the attachment or click any links. Delete it.',
+    headline: 'This email carries malware',
+    steps: ['Do not open the attachment or click any links.', 'Delete it.'],
   },
   suspicious: {
     label: 'SUSPICIOUS',
     tone: 'caution',
     plain: "We couldn't confirm this is an attack, but something about it is off.",
     action: "Treat it with caution. Don't act on it until you've verified the sender another way.",
+    headline: 'Be careful with this email',
+    steps: [
+      "Don't click links, open attachments or act on any request in it yet.",
+      'Check with the sender another way first (a phone number you already know).',
+    ],
   },
   spam: {
     label: 'SPAM',
     tone: 'caution',
     plain: 'This looks like unwanted bulk email rather than a targeted attack.',
     action: 'No real harm expected — you can safely delete it.',
+    headline: 'This email is junk mail',
+    steps: ['No real harm expected. You can safely delete it.'],
   },
   graymail: {
     label: 'LEGITIMATE BULK EMAIL',
@@ -248,12 +317,16 @@ const VERDICT_DISPLAY: Record<
     plain:
       'This is real, legitimate mail (a newsletter, survey, or marketing message) — just the kind you may not want.',
     action: "It's safe. If you'd rather not receive these, use the unsubscribe link.",
+    headline: 'This email is safe, just unwanted',
+    steps: ["It's safe. If you'd rather not receive these, use the unsubscribe link."],
   },
   legitimate: {
     label: 'LIKELY LEGITIMATE',
     tone: 'safe',
     plain: 'This appears to be a genuine, expected email with no signs of an attack.',
     action: 'It looks safe to proceed as normal.',
+    headline: 'This email looks safe',
+    steps: ['It looks safe to proceed as normal.'],
   },
   undetermined: {
     label: 'ANALYSIS UNAVAILABLE',
@@ -262,7 +335,19 @@ const VERDICT_DISPLAY: Record<
       "We couldn't analyze this email — our analysis service was temporarily unavailable. This is not a clean bill of health; the email has not been checked.",
     action:
       "Treat it with caution. Don't click links, open attachments, reply, or act on any request until you've verified the sender another way. Your security team has been notified.",
+    headline: 'We could not check this email',
+    steps: [
+      "Don't click links, open attachments, reply, or act on any request in it.",
+      'Check with the sender another way before you do anything.',
+    ],
+    stepsNote: 'Your security team has been notified.',
   },
+};
+
+/** Without a fused risk decision: the analysis' own yes/no */
+const FALLBACK_DISPLAY: Record<'danger' | 'safe', { label: string; headline: string }> = {
+  danger: { label: 'POTENTIALLY MALICIOUS', headline: 'Treat this email as dangerous' },
+  safe: { label: 'LIKELY LEGITIMATE', headline: 'This email looks safe' },
 };
 
 const TONE_CLASS: Record<VerdictTone, string> = {
@@ -295,7 +380,101 @@ const THREAT_VECTOR_TIPS: Record<string, string> = {
 };
 
 /**
- * Build complete HTML email for analysis report
+ * What the report says, decided once for both formats: the verdict in plain
+ * words, the steps, the lead line, and the reasons split into the few shown
+ * first and the rest.
+ */
+interface ReportView {
+  tone: VerdictTone;
+  label: string;
+  headline: string;
+  plain?: string;
+  steps: string[];
+  stepsNote?: string;
+  /** The reporter thank-you, or for a silent report who reported it */
+  lead: string;
+  silent: boolean;
+  topReasons: string[];
+  moreReasons: string[];
+  tips: string[];
+}
+
+const THANKS_SAFE =
+  'Thanks for checking — flagging anything that looks off is exactly the right habit.';
+const THANKS =
+  'Good catch, and thanks for reporting. Sending this to Phishy helped protect you and your colleagues.';
+
+/** Steps when there is no fused risk decision (the analysis' own yes/no only) */
+const FALLBACK_STEPS = ['Do not click any links, open attachments or reply to it.', 'Delete it.'];
+
+function reportView(analysis: AnalysisResult, options?: ReportOptions): ReportView {
+  const display = options?.risk ? VERDICT_DISPLAY[options.risk.verdict] : undefined;
+  const tone: VerdictTone = display?.tone ?? (analysis.isPhishing ? 'danger' : 'safe');
+  const fallback = FALLBACK_DISPLAY[analysis.isPhishing ? 'danger' : 'safe'];
+  const label = options?.risk
+    ? (display?.label ?? options.risk.verdict.toUpperCase())
+    : fallback.label;
+
+  // The model's indicators (or, in checklist scoring mode, the checklist's
+  // fixed reasons) plus the intelligence reasons behind the score
+  const reasons = whyBase(analysis, options);
+  if (options?.risk?.reasons.length) {
+    reasons.push(...options.risk.reasons);
+  }
+
+  return {
+    tone,
+    label,
+    headline: display?.headline ?? (options?.risk ? label : fallback.headline),
+    ...(display?.plain ? { plain: display.plain } : {}),
+    steps: display?.steps ?? (options?.risk || !analysis.isPhishing ? [] : FALLBACK_STEPS),
+    ...(display?.stepsNote ? { stepsNote: display.stepsNote } : {}),
+    // Thank the reporter every time — reinforcing the habit is the point, and
+    // it keeps people forwarding even when the email turns out to be harmless.
+    // A silent button report tells the security team who reported it instead.
+    lead: options?.silentReport
+      ? silentReportNotice(options.silentReport.reporter)
+      : tone === 'safe'
+        ? THANKS_SAFE
+        : THANKS,
+    silent: !!options?.silentReport,
+    topReasons: reasons.slice(0, TOP_REASONS),
+    moreReasons: reasons.slice(TOP_REASONS),
+    tips: buildTeachingTips(analysis),
+  };
+}
+
+function whyHeading(tone: VerdictTone): string {
+  return tone === 'safe' ? 'What we checked' : 'Why we flagged it';
+}
+
+/** The verdict block: severity word, plain headline, score, what it means */
+function verdictHeroHtml(
+  view: ReportView,
+  analysis: AnalysisResult,
+  options?: ReportOptions
+): string {
+  const score = options?.risk
+    ? riskScoreHtml(options.risk, { prominent: true })
+    : paragraphHtml(
+        `Confidence: <strong>${escapeHtml(normalizeConfidence(analysis.confidence))}</strong>`,
+        { quiet: true }
+      );
+  const meaning = view.plain
+    ? `<p class="ph-muted" style="margin:14px 0 2px 0;font-family:${FONT};font-size:12px;line-height:16px;font-weight:700;letter-spacing:0.6px;text-transform:uppercase;color:${COLOR.muted};">What this means</p>${paragraph(view.plain)}`
+    : '';
+  return `<div class="verdict-banner ${TONE_CLASS[view.tone]}-bg">${hero({
+    tone: view.tone,
+    word: view.label,
+    headline: view.headline,
+    html: `${score}${meaning}`,
+  })}</div>`;
+}
+
+/**
+ * Build complete HTML email for analysis report. First screen: the verdict
+ * in plain words with the score, then the one thing to do, then the top
+ * reasons; detail and the IT-review copy of the email come after, quieter.
  */
 export function buildEmailHtml(
   analysis: AnalysisResult,
@@ -303,323 +482,95 @@ export function buildEmailHtml(
   options?: ReportOptions
 ): string {
   const timestamp = new Date().toLocaleString();
-  const analysisHtml = buildAnalysisSection(analysis, options);
-  const originalSubject = emailData.subject;
+  const view = reportView(analysis, options);
+  const rows: string[] = [];
 
-  return `<!DOCTYPE html>
-<html>
-    <head>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Phishy Analysis: ${escapeHtml(originalSubject)}</title>
-        <style>
-            body {
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-                line-height: 1.5;
-                color: #333;
-                margin: 0;
-                padding: 20px;
-                background-color: #f9f9f9;
-            }
-            .container {
-                max-width: 800px;
-                margin: 0 auto;
-                background-color: #ffffff;
-                border-radius: 8px;
-                overflow: hidden;
-                box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-            }
-            .header {
-                background-color: #2C3E50;
-                color: white;
-                padding: 20px;
-            }
-            .header h1 {
-                margin: 0;
-                font-size: 22px;
-            }
-            .analysis {
-                padding: 20px;
-                border-bottom: 1px solid #eee;
-            }
-            h2 {
-                margin-top: 0;
-                color: #2C3E50;
-                font-size: 18px;
-            }
-            h3 {
-                color: #2c3e50;
-                margin-top: 20px;
-                font-size: 16px;
-            }
-            ul {
-                margin-top: 10px;
-                padding-left: 25px;
-            }
-            li {
-                margin-bottom: 5px;
-            }
-            .verdict-phishing {
-                color: #dc3545;
-                font-weight: bold;
-            }
-            .verdict-legitimate {
-                color: #28a745;
-                font-weight: bold;
-            }
-            .verdict-suspicious {
-                color: #fd7e14;
-                font-weight: bold;
-            }
-            .thanks {
-                color: #555;
-                font-style: italic;
-                margin-bottom: 16px;
-            }
-            .verdict-banner {
-                border-radius: 6px;
-                padding: 14px 16px;
-                margin: 12px 0;
-            }
-            .verdict-line {
-                margin: 0;
-                font-size: 18px;
-            }
-            .risk-score {
-                margin: 6px 0 0 0;
-                font-size: 15px;
-            }
-            .verdict-phishing-bg {
-                background-color: #fdecea;
-                border-left: 4px solid #dc3545;
-            }
-            .verdict-suspicious-bg {
-                background-color: #fff4e5;
-                border-left: 4px solid #fd7e14;
-            }
-            .verdict-legitimate-bg {
-                background-color: #e9f7ef;
-                border-left: 4px solid #28a745;
-            }
-            .metadata {
-                padding: 15px 20px;
-                background-color: #f8f9fa;
-                border-top: 1px solid #eee;
-                font-size: 13px;
-                color: #6c757d;
-            }
-            .ref-line {
-                font-size: 11px;
-                color: #adb5bd;
-            }
-            .metadata p {
-                margin: 5px 0;
-            }
-            .footer {
-                font-size: 12px;
-                color: #777;
-                padding: 15px 20px;
-                background-color: #f5f5f5;
-                border-top: 1px solid #eee;
-            }
-            /* Original email section styles */
-            .original-email {
-                padding: 20px;
-                border-top: 1px solid #eee;
-            }
-            .original-email h2 {
-                margin: 0 0 15px 0;
-                font-size: 18px;
-                color: #2C3E50;
-            }
-            .email-section {
-                padding: 15px;
-                margin-bottom: 15px;
-                background-color: #f8f9fa;
-                border: 1px solid #e9ecef;
-                border-radius: 6px;
-            }
-            .email-section:last-child {
-                margin-bottom: 0;
-            }
-            .email-section h3 {
-                margin: 0 0 10px 0;
-                font-size: 14px;
-                color: #495057;
-            }
-            .email-headers table {
-                width: 100%;
-                border-collapse: collapse;
-                font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
-                font-size: 12px;
-            }
-            .email-headers td {
-                padding: 4px 8px;
-                vertical-align: top;
-                border-bottom: 1px solid #e9ecef;
-            }
-            .email-headers td:first-child {
-                font-weight: bold;
-                white-space: nowrap;
-                width: 150px;
-                color: #495057;
-            }
-            .email-headers td:last-child {
-                word-break: break-all;
-                color: #212529;
-            }
-            .email-links ul,
-            .email-attachments ul {
-                margin: 0;
-                padding-left: 20px;
-            }
-            .email-links li,
-            .email-attachments li {
-                font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
-                font-size: 12px;
-                word-break: break-all;
-                margin-bottom: 6px;
-                color: #495057;
-            }
-            .email-body-preview {
-                padding: 15px;
-                background-color: #fff;
-                border: 1px solid #ddd;
-                border-radius: 4px;
-            }
-            .no-items {
-                color: #6c757d;
-                font-style: italic;
-                font-size: 13px;
-            }
-            @media only screen and (max-width: 600px) {
-                body {
-                    padding: 10px;
-                }
-                .header, .analysis, .metadata, .footer, .original-email {
-                    padding: 15px;
-                }
-                .email-section {
-                    padding: 10px;
-                }
-                .email-headers td:first-child {
-                    width: 100px;
-                }
-            }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <div class="header">
-                <h1>Phishy Analysis</h1>
-            </div>
-            <div class="analysis">
-                ${analysisHtml}
-            </div>
-            ${options?.blastRadius ? buildBlastRadiusHtml(options.blastRadius) : ''}
-            <div class="metadata">
-                <p><strong>Subject:</strong> ${escapeHtml(originalSubject)}</p>
-                <p><strong>Reported by:</strong> ${escapeHtml(emailData.from_email)}</p>
-                ${securityReplyHint(options) ? `<p>${escapeHtml(securityReplyHint(options) ?? '')}</p>` : ''}
-                ${options?.analysisId ? `<p class="ref-line">Reference: ${escapeHtml(options.analysisId)}</p>` : ''}
-            </div>
-            ${buildOriginalEmailSection(emailData, options?.audience)}
-            <div class="footer">
-                <p>This analysis was performed by Phishy powered by Anthropic's Claude AI.</p>
-                <p>Delivered via Amazon SES | Report time: ${timestamp}</p>
-            </div>
-        </div>
-    </body>
-</html>`;
-}
-
-/**
- * Build the analysis section HTML
- */
-function buildAnalysisSection(analysis: AnalysisResult, options?: ReportOptions): string {
-  let html = '';
-
-  const display = options?.risk ? VERDICT_DISPLAY[options.risk.verdict] : undefined;
-  const tone: VerdictTone = display?.tone ?? (analysis.isPhishing ? 'danger' : 'safe');
-
-  // Thank the reporter every time — reinforcing the habit is the point, and it
-  // keeps people forwarding even when the email turns out to be harmless.
-  const thanks =
-    tone === 'safe'
-      ? 'Thanks for checking — flagging anything that looks off is exactly the right habit.'
-      : 'Good catch, and thanks for reporting. Sending this to Phishy helped protect you and your colleagues.';
-  html += options?.silentReport
-    ? `<p class="thanks">${escapeHtml(silentReportNotice(options.silentReport.reporter))}</p>`
-    : `<p class="thanks">${thanks}</p>`;
-
-  // Verdict banner: label + plain-language gloss + the prominent score/level
-  // employees engage with.
-  if (options?.risk) {
-    const label = display?.label ?? options.risk.verdict.toUpperCase();
-    html += `<div class="verdict-banner ${TONE_CLASS[tone]}-bg">`;
-    html += `<p class="verdict-line"><span class="${TONE_CLASS[tone]}">${escapeHtml(label)}</span></p>`;
-    html += riskScoreHtml(options.risk);
-    html += `</div>`;
-    if (display?.plain) {
-      html += `<p><strong>What this means:</strong> ${escapeHtml(display.plain)}</p>`;
-    }
-  } else {
-    const verdictText = analysis.isPhishing ? 'POTENTIALLY MALICIOUS' : 'LIKELY LEGITIMATE';
-    html += `<div class="verdict-banner ${TONE_CLASS[tone]}-bg">`;
-    html += `<p class="verdict-line"><span class="${TONE_CLASS[tone]}">${verdictText}</span></p>`;
-    html += `<p class="risk-score">Confidence: <strong>${normalizeConfidence(analysis.confidence)}</strong></p>`;
-    html += `</div>`;
+  if (view.silent) {
+    rows.push(block(callout({ tone: 'neutral', lines: [view.lead] })));
+  }
+  rows.push(block(verdictHeroHtml(view, analysis, options)));
+  if (view.steps.length) {
+    rows.push(
+      block(
+        instructions({
+          title: 'What to do now',
+          steps: view.steps,
+          ...(view.stepsNote ? { note: view.stepsNote } : {}),
+        })
+      )
+    );
+  }
+  const hint = securityReplyHint(options);
+  if (hint) {
+    rows.push(block(callout({ tone: 'info', lines: [hint] })));
+  }
+  if (!view.silent) {
+    rows.push(
+      block(
+        `<p class="thanks ph-muted" style="margin:0;font-family:${FONT};font-size:15px;line-height:22px;color:${COLOR.muted};">${escapeHtml(view.lead)}</p>`
+      )
+    );
   }
 
-  // What to do — the single most important line, framed by verdict.
-  if (display?.action) {
-    html += `<p><strong>What to do:</strong> ${escapeHtml(display.action)}</p>`;
-  }
-
-  // Summary
-  if (analysis.summary) {
-    html += `<p><strong>Summary:</strong> ${escapeHtml(analysis.summary)}</p>`;
-  }
-
-  // Why Phishy reached this verdict — the model's indicators (or, in
-  // checklist scoring mode, the checklist's fixed reasons) plus the
-  // intelligence reasons behind the score.
-  const whyItems = whyBase(analysis, options);
-  if (options?.risk?.reasons.length) {
-    whyItems.push(...options.risk.reasons);
-  }
-  if (whyItems.length) {
-    html += `<h3>Why we flagged it</h3>`;
-    html += '<ul>';
-    for (const item of whyItems) {
-      html += `<li>${escapeHtml(item)}</li>`;
-    }
-    html += '</ul>';
-  }
-
-  // Recommendations from the analysis
-  if (analysis.recommendations?.length) {
-    html += `<h3>Recommendations</h3>`;
-    html += '<ul>';
-    for (const recommendation of analysis.recommendations) {
-      html += `<li>${escapeHtml(recommendation)}</li>`;
-    }
-    html += '</ul>';
+  if (analysis.summary || view.topReasons.length) {
+    rows.push(
+      block(
+        `${heading(view.topReasons.length ? whyHeading(view.tone) : 'Summary')}${
+          analysis.summary ? paragraph(analysis.summary) : ''
+        }${bulletList(view.topReasons)}`
+      )
+    );
   }
 
   // Teaching moment: how to spot this kind of email next time, driven by the
-  // threat vectors the model identified.
-  const tips = buildTeachingTips(analysis);
-  if (tips.length) {
-    html += `<h3>How to spot this next time</h3>`;
-    html += '<ul>';
-    for (const tip of tips) {
-      html += `<li>${escapeHtml(tip)}</li>`;
-    }
-    html += '</ul>';
+  // threat vectors the model identified
+  if (view.tips.length) {
+    rows.push(
+      block(callout({ tone: 'neutral', title: 'How to spot this next time', lines: view.tips }))
+    );
   }
 
-  return html;
+  const recommendations = analysis.recommendations ?? [];
+  if (view.moreReasons.length || recommendations.length) {
+    let detail = heading('More detail', { quiet: true });
+    if (view.moreReasons.length) {
+      detail += paragraph('Other findings', { quiet: true, bold: true });
+      detail += bulletList(view.moreReasons, { quiet: true });
+    }
+    if (recommendations.length) {
+      detail += paragraph('Recommendations', { quiet: true, bold: true });
+      detail += bulletList(recommendations, { quiet: true });
+    }
+    rows.push(block(divider(), { bottom: 18 }), block(detail));
+  }
+
+  if (options?.blastRadius) {
+    rows.push(buildBlastRadiusHtml(options.blastRadius));
+  }
+
+  rows.push(
+    block(
+      `${heading('About this report', { quiet: true })}${facts([
+        { label: 'Subject', value: emailData.subject },
+        { label: 'Reported by', value: emailData.from_email },
+      ])}`
+    )
+  );
+  rows.push(buildOriginalEmailSection(emailData, options?.audience));
+
+  return emailShell({
+    title: 'Phishy analysis report',
+    preheader: `${view.headline}. ${options?.risk ? riskScoreLines(options.risk)[0] : view.label}.`,
+    label:
+      options?.audience === 'security' || view.silent ? 'Security team copy' : 'Analysis report',
+    tone: view.tone,
+    bodyHtml: rows.join('\n'),
+    footer: [
+      ...(options?.analysisId ? [`Reference: ${options.analysisId}`] : []),
+      "Analysis by Phishy, powered by Anthropic's Claude AI.",
+      `Report time: ${timestamp}`,
+    ],
+  });
 }
 
 /**
@@ -645,114 +596,79 @@ function buildTeachingTips(analysis: AnalysisResult): string[] {
 }
 
 /**
- * Build plain text report
+ * Build plain text report: the same order as the HTML
  */
 export function buildPlainTextReport(
   analysis: AnalysisResult,
   emailData: ExtractedEmailData,
   options?: ReportOptions
 ): string {
-  const lines: string[] = [];
-  const divider = '='.repeat(50);
+  const view = reportView(analysis, options);
+  const lines: string[] = ['PHISHY ANALYSIS REPORT', TEXT_RULE, ''];
 
-  lines.push('PHISHY ANALYSIS REPORT');
-  lines.push(divider);
-  lines.push('');
-
-  const display = options?.risk ? VERDICT_DISPLAY[options.risk.verdict] : undefined;
-  const tone: VerdictTone = display?.tone ?? (analysis.isPhishing ? 'danger' : 'safe');
-
-  // Thank the reporter — or, for a silent button report, tell the security
-  // team who reported it and that the reporter was not notified
-  lines.push(
-    options?.silentReport
-      ? silentReportNotice(options.silentReport.reporter)
-      : tone === 'safe'
-        ? 'Thanks for checking — flagging anything that looks off is exactly the right habit.'
-        : 'Good catch, and thanks for reporting. Sending this to Phishy helped protect you and your colleagues.'
-  );
-  lines.push('');
+  if (view.silent) {
+    lines.push(view.lead, '');
+  }
 
   // Verdict + risk
+  lines.push(`Verdict: ${view.label}`, `${view.headline}.`);
   if (options?.risk) {
-    lines.push(`Verdict: ${display?.label ?? options.risk.verdict.toUpperCase()}`);
     lines.push(...riskScoreLines(options.risk));
-    if (display?.plain) {
-      lines.push(`What this means: ${display.plain}`);
-    }
   } else {
-    const verdictText = analysis.isPhishing ? 'POTENTIALLY MALICIOUS' : 'LIKELY LEGITIMATE';
-    lines.push(`Verdict: ${verdictText}`);
     lines.push(`Confidence: ${normalizeConfidence(analysis.confidence)}`);
   }
-  if (display?.action) {
-    lines.push(`What to do: ${display.action}`);
+  if (view.plain) {
+    lines.push(`What this means: ${view.plain}`);
   }
   lines.push('');
 
-  // Summary
+  if (view.steps.length) {
+    lines.push('What to do:');
+    view.steps.forEach((step, index) => lines.push(`  ${index + 1}. ${step}`));
+    if (view.stepsNote) {
+      lines.push(`  ${view.stepsNote}`);
+    }
+    lines.push('');
+  }
+
+  const hint = securityReplyHint(options);
+  if (hint) {
+    lines.push(hint, '');
+  }
+  if (!view.silent) {
+    lines.push(view.lead, '');
+  }
+
   if (analysis.summary) {
-    lines.push(`Summary: ${analysis.summary}`);
-    lines.push('');
+    lines.push(`Summary: ${analysis.summary}`, '');
   }
-
-  // Why we flagged it (indicators or checklist reasons + intelligence reasons)
-  const whyItems = whyBase(analysis, options);
-  if (options?.risk?.reasons.length) {
-    whyItems.push(...options.risk.reasons);
-  }
-  if (whyItems.length) {
-    lines.push('Why we flagged it:');
-    for (const item of whyItems) {
-      lines.push(`  - ${item}`);
+  const list = (title: string, items: string[]): void => {
+    if (items.length) {
+      lines.push(`${title}:`, ...items.map(item => `  - ${item}`), '');
     }
-    lines.push('');
-  }
-
-  // Recommendations
-  if (analysis.recommendations?.length) {
-    lines.push('Recommendations:');
-    for (const recommendation of analysis.recommendations) {
-      lines.push(`  - ${recommendation}`);
-    }
-    lines.push('');
-  }
-
-  // How to spot this next time
-  const tips = buildTeachingTips(analysis);
-  if (tips.length) {
-    lines.push('How to spot this next time:');
-    for (const tip of tips) {
-      lines.push(`  - ${tip}`);
-    }
-    lines.push('');
-  }
+  };
+  list(whyHeading(view.tone), view.topReasons);
+  list('How to spot this next time', view.tips);
+  list('Other findings', view.moreReasons);
+  list('Recommendations', analysis.recommendations ?? []);
 
   if (options?.blastRadius) {
     lines.push(...buildBlastRadiusText(options.blastRadius), '');
   }
 
-  // Metadata
-  lines.push(divider);
-  lines.push('Email Details:');
+  lines.push(TEXT_RULE, 'Email Details:');
   lines.push(`  Subject: ${emailData.subject}`);
   lines.push(`  Reported by: ${emailData.from_email}`);
-  const hint = securityReplyHint(options);
-  if (hint) {
-    lines.push(`  ${hint}`);
-  }
-
   if (options?.analysisId) {
     lines.push(`  Reference: ${options.analysisId}`);
   }
-
   lines.push('');
 
   // Original email section
   lines.push(buildOriginalEmailTextSection(emailData, options?.audience));
 
-  lines.push(divider);
-  lines.push("This analysis was performed by Phishy powered by Anthropic's Claude AI.");
+  lines.push(TEXT_RULE);
+  lines.push("Analysis by Phishy, powered by Anthropic's Claude AI.");
   lines.push(`Report generated: ${new Date().toLocaleString()}`);
 
   return lines.join('\n');
@@ -868,42 +784,39 @@ function blastRadiusLines(report: BlastRadiusReport): string[] {
  */
 export function buildBlastRadiusHtml(report: BlastRadiusReport): string {
   if (report.status === 'unavailable') {
-    return `
-            <div class="analysis blast-radius">
-                <p><strong>Security team only:</strong> ${escapeHtml(report.note ?? 'Blast radius lookup could not be completed.')}</p>
-            </div>`;
+    return block(
+      callout({
+        tone: 'neutral',
+        html: paragraphHtml(
+          `<strong>Security team only:</strong> ${escapeHtml(report.note ?? 'Blast radius lookup could not be completed.')}`
+        ),
+      })
+    );
   }
 
   const recipients = report.recipients ?? [];
-  const cell = 'padding: 4px 8px; border-bottom: 1px solid #e9ecef; text-align: left;';
   let table = '';
   if (recipients.length) {
-    table += '<table style="width: 100%; border-collapse: collapse; font-size: 13px;">';
-    table += `<tr>${BLAST_COLUMNS.map(name => `<th style="${cell}">${name}</th>`).join('')}</tr>`;
-    for (const recipient of recipients) {
-      const cells = blastRadiusRow(recipient, report.reporterAddress);
-      table += `<tr>${cells.map(text => `<td style="${cell}">${escapeHtml(text)}</td>`).join('')}</tr>`;
-    }
-    table += '</table>';
+    table = dataTable(
+      BLAST_COLUMNS,
+      recipients.map(recipient => blastRadiusRow(recipient, report.reporterAddress))
+    );
     const unlisted = blastRadiusUnlisted(report);
     if (unlisted > 0) {
-      table += `<p class="no-items">${unlisted} more recipient(s) not listed.</p>`;
+      table += paragraph(`${unlisted} more recipient(s) not listed.`, { quiet: true });
     }
   }
 
   const statements = blastRadiusLines(report)
-    .map(line => `<p>${escapeHtml(line)}</p>`)
+    .map(line => paragraph(line))
     .join('');
-  const caveats = (report.caveats ?? []).map(text => `<li>${escapeHtml(text)}</li>`).join('');
 
-  return `
-            <div class="analysis blast-radius">
-                <h2>Blast radius (security team only)</h2>
-                ${statements}
-                ${table}
-                ${caveats ? `<ul style="font-size: 13px; color: #6c757d;">${caveats}</ul>` : ''}
-                <p class="ref-line">Looked up ${escapeHtml(report.lookedUpAt)}. This section is not in the reporter's copy.</p>
-            </div>`;
+  return block(
+    `${heading('Blast radius (security team only)')}${statements}${table}${bulletList(
+      report.caveats ?? [],
+      { quiet: true }
+    )}${paragraph(`Looked up ${report.lookedUpAt}. This section is not in the reporter's copy.`, { quiet: true })}`
+  );
 }
 
 /** Blast-radius section (plain text) for the security team's copy */
@@ -912,7 +825,7 @@ export function buildBlastRadiusText(report: BlastRadiusReport): string[] {
     return [`Security team only: ${report.note ?? 'Blast radius lookup could not be completed.'}`];
   }
 
-  const lines = ['BLAST RADIUS (security team only)', '-'.repeat(40), ...blastRadiusLines(report)];
+  const lines = ['BLAST RADIUS (security team only)', TEXT_SUBRULE, ...blastRadiusLines(report)];
   const recipients = report.recipients ?? [];
   if (recipients.length) {
     lines.push(`  ${BLAST_COLUMNS.join(' | ')}`);
@@ -929,21 +842,6 @@ export function buildBlastRadiusText(report: BlastRadiusReport): string[] {
   }
   lines.push(`Looked up ${report.lookedUpAt}. This section is not in the reporter's copy.`);
   return lines;
-}
-
-/**
- * Escape HTML special characters
- */
-export function escapeHtml(text: string): string {
-  const htmlEntities: Record<string, string> = {
-    '&': '&amp;',
-    '<': '&lt;',
-    '>': '&gt;',
-    '"': '&quot;',
-    "'": '&#39;',
-  };
-
-  return text.replace(/[&<>"']/g, char => htmlEntities[char] ?? char);
 }
 
 /**
@@ -969,63 +867,56 @@ function stripHtmlForDisplay(html: string): string {
 }
 
 /**
- * Build the original email section for HTML report
+ * Build the original email section for HTML report: the IT-review copy,
+ * set apart and quieter than everything above it. Every value is hostile
+ * and escaped; nothing is a link.
  */
 function buildOriginalEmailSection(
   emailData: ExtractedEmailData,
   audience?: ReportOptions['audience']
 ): string {
-  const forwardedHeadersHtml = formatForwardedHeadersForDisplay(emailData.forwardedHeaders);
-  const headersHtml = formatHeadersForDisplay(emailData.headers);
-  const linksHtml = formatLinksForDisplay(emailData.links);
-  const attachmentsHtml = formatAttachmentsForDisplay(emailData.attachments);
+  // Text-only display of the email content: an HTML body is reduced to its
+  // text and escaped, since this is potentially malicious content
+  const content = emailData.text || (emailData.html ? stripHtmlForDisplay(emailData.html) : '');
+  const emailContent = content
+    ? codeBox(content, { mono: false })
+    : paragraph('No email content available', { quiet: true });
 
-  // Format email content - sanitize HTML to prevent XSS from malicious emails
-  // Use text-only display since this is analyzing potentially malicious content
-  const emailContent = emailData.text
-    ? escapeHtml(emailData.text).replace(/\n/g, '<br>')
-    : emailData.html
-      ? escapeHtml(stripHtmlForDisplay(emailData.html)).replace(/\n/g, '<br>')
-      : '<em>No email content available</em>';
+  const sub = (text: string): string => heading(text, { quiet: true });
+  const parts: string[] = [];
 
-  // Only show forwarded headers section if we found any
-  const forwardedHeadersSection =
-    Object.keys(emailData.forwardedHeaders || {}).length > 0
-      ? `
-                <div class="email-section email-forwarded-headers" style="background-color: #fff3cd; border: 1px solid #ffc107;">
-                    <h3>Original Sender Info (from forwarded message)</h3>
-                    ${forwardedHeadersHtml}
-                </div>`
-      : '';
+  // Only show forwarded headers if we found any
+  if (Object.keys(emailData.forwardedHeaders || {}).length > 0) {
+    parts.push(
+      sub('Original sender info (from forwarded message)') +
+        formatForwardedHeadersForDisplay(emailData.forwardedHeaders)
+    );
+  }
+  const senderHistory = buildSenderHistorySection(emailData, audience);
+  if (senderHistory) {
+    parts.push(senderHistory);
+  }
+  parts.push(sub('Original email content') + emailContent);
+  parts.push(sub('Envelope headers (forwarder)') + formatHeadersForDisplay(emailData.headers));
+  parts.push(
+    sub(`Links detected (${emailData.links.length})`) + formatLinksForDisplay(emailData.links)
+  );
+  parts.push(
+    sub(`Attachments (${emailData.attachments.length})`) +
+      formatAttachmentsForDisplay(emailData.attachments)
+  );
 
-  return `
-            <div class="original-email">
-                <h2>Original Email for IT Review</h2>
-                ${forwardedHeadersSection}
-                ${buildSenderHistorySection(emailData, audience)}
-
-                <div class="email-section email-content">
-                    <h3>Original Email Content</h3>
-                    <div class="email-body-preview">
-                        ${emailContent}
-                    </div>
-                </div>
-
-                <div class="email-section email-headers">
-                    <h3>Envelope Headers (forwarder)</h3>
-                    ${headersHtml}
-                </div>
-
-                <div class="email-section email-links">
-                    <h3>Links Detected (${emailData.links.length})</h3>
-                    ${linksHtml}
-                </div>
-
-                <div class="email-section email-attachments">
-                    <h3>Attachments (${emailData.attachments.length})</h3>
-                    ${attachmentsHtml}
-                </div>
-            </div>`;
+  return [
+    block(divider(), { bottom: 18 }),
+    block(
+      `${heading('Original Email for IT Review')}${paragraph(
+        'A text-only copy of the reported email, for your IT team. Do not visit any address in it.',
+        { quiet: true }
+      )}`,
+      { bottom: 10 }
+    ),
+    ...parts.map(part => block(part, { bottom: 18 })),
+  ].join('\n');
 }
 
 /** Heading of the sender-relationship block, by who reads the email */
@@ -1068,16 +959,10 @@ function buildSenderHistorySection(
   if (!lines) {
     return '';
   }
-  let rows = '';
-  for (const [label, value] of lines) {
-    rows += `<tr><td>${escapeHtml(label)}</td><td>${escapeHtml(value)}</td></tr>`;
-  }
-  return `
-                <div class="email-section email-headers email-sender-history">
-                    <h3>${escapeHtml(senderHistoryHeading(audience))}</h3>
-                    <table>${rows}</table>
-                    <p class="no-items">${escapeHtml(SENDER_HISTORY_CAVEAT)}</p>
-                </div>`;
+  return `${heading(senderHistoryHeading(audience), { quiet: true })}${facts(
+    lines.map(([label, value]) => ({ label, value })),
+    { labelWidth: 140 }
+  )}${paragraph(SENDER_HISTORY_CAVEAT, { quiet: true })}`;
 }
 
 /**
@@ -1088,8 +973,8 @@ function buildOriginalEmailTextSection(
   audience?: ReportOptions['audience']
 ): string {
   const lines: string[] = [];
-  const divider = '='.repeat(50);
-  const subDivider = '-'.repeat(40);
+  const divider = TEXT_RULE;
+  const subDivider = TEXT_SUBRULE;
 
   lines.push(divider);
   lines.push('ORIGINAL EMAIL FOR IT REVIEW');
@@ -1171,16 +1056,13 @@ function formatHeadersForDisplay(headers: Record<string, string>): string {
   const securityHeaders = getSecurityHeaders(headers);
 
   if (securityHeaders.length === 0) {
-    return '<p class="no-items">No security-relevant headers found</p>';
+    return paragraph('No security-relevant headers found', { quiet: true });
   }
 
-  let html = '<table>';
-  for (const [name, value] of securityHeaders) {
-    html += `<tr><td>${escapeHtml(name)}</td><td>${escapeHtml(value)}</td></tr>`;
-  }
-  html += '</table>';
-
-  return html;
+  return facts(
+    securityHeaders.map(([label, value]) => ({ label, value })),
+    { labelWidth: 150, mono: true }
+  );
 }
 
 /**
@@ -1212,20 +1094,17 @@ function getSecurityHeaders(headers: Record<string, string>): Array<[string, str
  */
 function formatForwardedHeadersForDisplay(headers: Record<string, string>): string {
   if (!headers || Object.keys(headers).length === 0) {
-    return '<p class="no-items">No forwarded headers found</p>';
+    return paragraph('No forwarded headers found', { quiet: true });
   }
 
-  let html = '<table>';
-  for (const headerName of FORWARDED_HEADERS) {
-    if (headers[headerName]) {
-      // Display without "Original-" prefix for cleaner look
-      const displayName = headerName.replace('Original-', '');
-      html += `<tr><td>${escapeHtml(displayName)}</td><td>${escapeHtml(headers[headerName])}</td></tr>`;
-    }
-  }
-  html += '</table>';
-
-  return html;
+  // Displayed without the "Original-" prefix for a cleaner look
+  return facts(
+    FORWARDED_HEADERS.filter(name => headers[name]).map(name => ({
+      label: name.replace('Original-', ''),
+      value: headers[name],
+    })),
+    { labelWidth: 90, mono: true }
+  );
 }
 
 /**
@@ -1233,38 +1112,30 @@ function formatForwardedHeadersForDisplay(headers: Record<string, string>): stri
  */
 function formatAttachmentsForDisplay(attachments: EmailAttachment[]): string {
   if (attachments.length === 0) {
-    return '<p class="no-items">No attachments</p>';
+    return paragraph('No attachments', { quiet: true });
   }
 
-  let html = '<ul>';
-  for (const attachment of attachments) {
+  const items = attachments.map(attachment => {
     const size = formatFileSize(attachment.size);
     const inspected = summarizeInspectionForReport(attachment.analysis);
-    const inspectedHtml = inspected
-      ? `<br><span style="color: #6c757d; font-size: 0.9em;">${escapeHtml(inspected)}</span>`
-      : '';
-    html += `<li>${escapeHtml(attachment.filename)} <span style="color: #6c757d;">(${escapeHtml(attachment.contentType)}, ${size})</span>${inspectedHtml}</li>`;
-  }
-  html += '</ul>';
-
-  return html;
+    return `<li style="margin:0 0 6px 0;"><span style="font-family:${MONO};font-size:12px;color:${COLOR.text};" class="ph-text">${escapeHtml(attachment.filename)}</span> (${escapeHtml(attachment.contentType)}, ${size})${
+      inspected ? `<br>${escapeHtml(inspected)}` : ''
+    }</li>`;
+  });
+  return `<ul class="ph-muted" style="margin:0 0 8px 0;padding:0 0 0 20px;font-family:${FONT};font-size:13px;line-height:20px;color:${COLOR.muted};word-break:break-word;">${items.join('')}</ul>`;
 }
 
 /**
- * Format links for HTML display (as text, not clickable)
+ * Format links for HTML display (as escaped text, never an anchor)
  */
 function formatLinksForDisplay(links: string[]): string {
   if (links.length === 0) {
-    return '<p class="no-items">No links detected</p>';
+    return paragraph('No links detected', { quiet: true });
   }
 
-  let html = '<ul>';
-  for (const link of links) {
-    html += `<li>${escapeHtml(link)}</li>`;
-  }
-  html += '</ul>';
-
-  return html;
+  return `<ul class="ph-muted" style="margin:0 0 8px 0;padding:0 0 0 20px;font-family:${MONO};font-size:12px;line-height:18px;color:${COLOR.muted};word-break:break-all;">${links
+    .map(link => `<li style="margin:0 0 6px 0;">${escapeHtml(link)}</li>`)
+    .join('')}</ul>`;
 }
 
 /**

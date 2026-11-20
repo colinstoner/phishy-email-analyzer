@@ -54,8 +54,9 @@ describe('report experience', () => {
     const html = buildEmailHtml(analysis, email, { risk });
     expect(text).toContain('  Reported by: reporter@example.com');
     expect(text).not.toContain('  From: reporter@example.com');
-    expect(html).toContain('<strong>Reported by:</strong> reporter@example.com');
-    expect(html).toContain('<strong>Subject:</strong> Fwd: Invoice 2291 overdue');
+    // Labelled fact rows: the label cell, then the value cell
+    expect(html).toMatch(/>Reported by<\/td>\s*<td[^>]*>reporter@example\.com<\/td>/);
+    expect(html).toMatch(/>Subject<\/td>\s*<td[^>]*>Fwd: Invoice 2291 overdue<\/td>/);
     expect(html).not.toContain('Analyzed Email Subject');
   });
 
@@ -87,6 +88,15 @@ describe('report experience', () => {
       'Risk score: not assessed',
     ]);
     expect(riskScoreHtml(risk)).toContain('Risk score: <strong>92/100</strong> (critical)');
+    // The report's prominent form: the big number, its level as a word, and the same confidence
+    const prominent = riskScoreHtml(risk, { prominent: true });
+    expect(prominent).toContain('>92</strong><span');
+    expect(prominent).toContain('/100</span>');
+    expect(prominent).toContain('critical risk');
+    expect(prominent).toContain('Confidence: <strong>Very High</strong>');
+    expect(riskScoreHtml({ ...risk, verdict: 'undetermined' }, { prominent: true })).toContain(
+      'Risk score: <strong>not assessed</strong>'
+    );
     const text = buildPlainTextReport(analysis, email, { risk });
     for (const line of riskScoreLines(risk)) {
       expect(text).toContain(line);
