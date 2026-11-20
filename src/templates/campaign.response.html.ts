@@ -5,15 +5,39 @@
  *
  * Same voice and structure as the analysis report: plain language first,
  * technical detail below; the verdict label, risk score and Confidence line
- * come from the report's own helpers, so they read the same everywhere.
+ * come from the report's own helpers, so they read the same everywhere. The
+ * page itself is built from the shared blocks in `layout.ts`.
  *
  * Every value that came from the suspicious email (subject, sender, the
  * model's description of it, its reasons) has been through `displayText`
- * (one line, defanged so nothing is a link) and is HTML-escaped here. No
+ * (one line, defanged so nothing is a link) and is HTML-escaped here: it is
+ * only ever handed to the layout blocks as plain text, never as markup. No
  * template ever renders a link from the email.
  */
 
 import type { BlastRadiusRecipient } from '../services/graph/blast-radius.service';
+import {
+  Fact,
+  TEXT_RULE,
+  Tone,
+  block,
+  bulletList,
+  callout,
+  codeInline,
+  dataTable,
+  divider,
+  emailShell,
+  facts,
+  heading,
+  hero,
+  instructions,
+  panel,
+  paragraph,
+  paragraphHtml,
+  stats,
+  textFacts,
+  textSection,
+} from './layout';
 import { displaySender, displayText, displayTime } from '../services/response/display';
 import type {
   CampaignIncident,
@@ -21,13 +45,7 @@ import type {
   ResponseAction,
   WarningRecipient,
 } from '../services/response/response.types';
-import {
-  ReportRisk,
-  describeVerdict,
-  escapeEmailHtml as esc,
-  riskScoreHtml,
-  riskScoreLines,
-} from './report.html';
+import { ReportRisk, describeVerdict, riskScoreHtml, riskScoreLines } from './report.html';
 
 export interface RenderedEmail {
   subject: string;
@@ -74,7 +92,7 @@ function quotedSubject(summary: IncidentSummary, max = 80): string | undefined {
 }
 
 // ---------------------------------------------------------------------------
-// Shared layout
+// Sections: simple notices written as headed lists of lines
 // ---------------------------------------------------------------------------
 
 interface Section {
@@ -84,99 +102,65 @@ interface Section {
   tone?: 'danger' | 'caution' | 'note';
 }
 
-const TONE_STYLE: Record<NonNullable<Section['tone']>, string> = {
-  danger: 'background-color: #fdecea; border-left: 4px solid #dc3545;',
-  caution: 'background-color: #fff4e5; border-left: 4px solid #fd7e14;',
-  note: 'background-color: #f8f9fa; border-left: 4px solid #6c757d;',
+const SECTION_TONE: Record<NonNullable<Section['tone']>, Tone> = {
+  danger: 'danger',
+  caution: 'caution',
+  note: 'neutral',
 };
 
-function sectionHtml(section: Section, extraHtml = ''): string {
-  const items = section.lines.filter(line => line.startsWith('- '));
+/** One section as a card row: a tinted callout when it has a tone */
+function sectionBlock(section: Section): string {
+  const items = section.lines.filter(line => line.startsWith('- ')).map(line => line.slice(2));
   const paragraphs = section.lines.filter(line => !line.startsWith('- '));
-  const style = section.tone
-    ? `${TONE_STYLE[section.tone]} padding: 10px 14px; border-radius: 6px;`
-    : '';
-  return `
-      <div style="margin: 0 0 18px 0; ${style}">
-        <h3 style="margin: 0 0 8px 0; font-size: 16px; color: #2C3E50;">${esc(section.heading)}</h3>
-        ${paragraphs.map(line => `<p style="margin: 4px 0;">${esc(line)}</p>`).join('')}
-        ${items.length ? `<ul style="margin: 6px 0; padding-left: 22px;">${items.map(line => `<li>${esc(line.slice(2))}</li>`).join('')}</ul>` : ''}
-        ${extraHtml}
-      </div>`;
+  if (section.tone) {
+    return block(
+      callout({
+        tone: SECTION_TONE[section.tone],
+        title: section.heading,
+        lines: paragraphs,
+        html: bulletList(items),
+      })
+    );
+  }
+  return block(
+    `${heading(section.heading)}${paragraphs.map(line => paragraph(line)).join('')}${bulletList(items)}`
+  );
 }
 
-function sectionText(section: Section): string[] {
-  return [section.heading.toUpperCase(), ...section.lines, ''];
-}
-
-function layout(options: {
+/**
+ * A notice made of a lead (the hero, with its severity word) and sections,
+ * in both formats. For emails with no score and no special structure.
+ */
+function renderSections(options: {
   title: string;
+  label: string;
   lead: string;
-  leadTone: 'danger' | 'caution' | 'safe';
+  tone: Tone;
+  word: string;
   sections: Section[];
-  riskBlock?: { label: string; risk: ReportRisk; plain?: string };
   footer: string[];
-  extraHtml?: Record<number, string>;
 }): { html: string; text: string } {
-  const leadStyle =
-    options.leadTone === 'safe'
-      ? 'background-color: #e9f7ef; border-left: 4px solid #28a745;'
-      : TONE_STYLE[options.leadTone];
-  const risk = options.riskBlock;
-  const riskHtml = risk
-    ? `
-      <div style="margin: 0 0 18px 0; padding: 12px 16px; border-radius: 6px; ${TONE_STYLE[describeVerdict(risk.risk.verdict).tone === 'danger' ? 'danger' : 'caution']}">
-        <p style="margin: 0; font-size: 18px;"><strong>${esc(risk.label)}</strong></p>
-        ${riskScoreHtml(risk.risk)}
-        ${risk.plain ? `<p style="margin: 6px 0 0 0;"><strong>What this means:</strong> ${esc(risk.plain)}</p>` : ''}
-      </div>`
-    : '';
-
-  const html = `<!DOCTYPE html>
-<html>
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>${esc(options.title)}</title>
-  </head>
-  <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; line-height: 1.5; color: #333; margin: 0; padding: 20px; background-color: #f9f9f9;">
-    <div style="max-width: 720px; margin: 0 auto; background-color: #ffffff; border-radius: 8px; overflow: hidden;">
-      <div style="background-color: #2C3E50; color: white; padding: 18px 20px;">
-        <h1 style="margin: 0; font-size: 22px;">${esc(options.title)}</h1>
-      </div>
-      <div style="padding: 20px;">
-        <p style="margin: 0 0 18px 0; padding: 12px 16px; border-radius: 6px; font-size: 16px; ${leadStyle}"><strong>${esc(options.lead)}</strong></p>
-        ${riskHtml}
-        ${options.sections.map((section, index) => sectionHtml(section, options.extraHtml?.[index] ?? '')).join('')}
-      </div>
-      <div style="font-size: 12px; color: #777; padding: 15px 20px; background-color: #f5f5f5; border-top: 1px solid #eee;">
-        ${options.footer.map(line => `<p style="margin: 4px 0;">${esc(line)}</p>`).join('')}
-      </div>
-    </div>
-  </body>
-</html>`;
-
-  const divider = '='.repeat(50);
+  const html = emailShell({
+    title: options.title,
+    preheader: options.lead,
+    label: options.label,
+    tone: options.tone,
+    bodyHtml: [
+      block(hero({ tone: options.tone, word: options.word, headline: options.lead })),
+      ...options.sections.map(sectionBlock),
+    ].join('\n'),
+    footer: options.footer,
+  });
   const text = [
     options.title.toUpperCase(),
-    divider,
+    TEXT_RULE,
     '',
     options.lead,
     '',
-    // The verdict and risk score straight after the plain lead, as in the report
-    ...(risk
-      ? [
-          `Verdict: ${risk.label}`,
-          ...riskScoreLines(risk.risk),
-          ...(risk.plain ? [`What this means: ${risk.plain}`] : []),
-          '',
-        ]
-      : []),
-    ...options.sections.flatMap(sectionText),
-    divider,
+    ...options.sections.flatMap(section => textSection(section.heading, section.lines)),
+    TEXT_RULE,
     ...options.footer,
   ].join('\n');
-
   return { html, text };
 }
 
@@ -184,16 +168,82 @@ function layout(options: {
 // Employee emails
 // ---------------------------------------------------------------------------
 
-function whatToDo(): Section {
-  return {
-    heading: 'What to do',
-    lines: [
-      '- Do not click any link or open any attachment in it.',
-      '- Do not reply to it.',
-      '- Delete it.',
-      'You do not need to forward it or report it: your security team already knows about it.',
-    ],
-  };
+const WHAT_TO_DO_STEPS = [
+  'Do not click any link or open any attachment in it.',
+  'Do not reply to it.',
+  'Delete it.',
+];
+const NO_NEED_TO_REPORT =
+  'You do not need to forward it or report it: your security team already knows about it.';
+
+const EMPLOYEE_FOOTER = (reference: string): string[] => [
+  DEFANG_NOTE,
+  `Reference: ${reference}`,
+  'Phishy, for your security team',
+];
+
+/**
+ * The parts every employee warning has, in one order for both formats:
+ * the lead, the verdict and score, which email (labelled facts), what to
+ * do, what to do if they already clicked, why they are getting it.
+ */
+interface WarningParts {
+  title: string;
+  preheader: string;
+  lead: string;
+  verdictLabel: string;
+  risk: ReportRisk;
+  emailHeading: string;
+  emailFacts: Fact[];
+  clicked: Section;
+  why: string;
+  reference: string;
+}
+
+function renderWarning(parts: WarningParts): { html: string; text: string } {
+  const rows = [
+    block(
+      hero({
+        tone: 'danger',
+        word: parts.verdictLabel,
+        headline: parts.lead,
+        html: riskScoreHtml(parts.risk),
+      })
+    ),
+    block(`${heading(parts.emailHeading)}${facts(parts.emailFacts, { labelWidth: 90 })}`),
+    block(instructions({ title: 'What to do', steps: WHAT_TO_DO_STEPS, note: NO_NEED_TO_REPORT })),
+    block(callout({ tone: 'caution', title: parts.clicked.heading, lines: parts.clicked.lines })),
+    block(paragraph(parts.why, { quiet: true })),
+  ];
+  const html = emailShell({
+    title: parts.title,
+    preheader: parts.preheader,
+    label: 'Security warning',
+    tone: 'danger',
+    bodyHtml: rows.join('\n'),
+    footer: EMPLOYEE_FOOTER(parts.reference),
+  });
+
+  const text = [
+    parts.title.toUpperCase(),
+    TEXT_RULE,
+    '',
+    parts.lead,
+    '',
+    `Verdict: ${parts.verdictLabel}`,
+    ...riskScoreLines(parts.risk),
+    '',
+    ...textSection(parts.emailHeading, textFacts(parts.emailFacts)),
+    ...textSection('What to do', [
+      ...WHAT_TO_DO_STEPS.map((step, index) => `${index + 1}. ${step}`),
+      NO_NEED_TO_REPORT,
+    ]),
+    ...textSection(parts.clicked.heading, parts.clicked.lines),
+    ...textSection('Why you are getting this', [parts.why]),
+    TEXT_RULE,
+    ...EMPLOYEE_FOOTER(parts.reference),
+  ].join('\n');
+  return { html, text };
 }
 
 function alreadyClicked(context: WarningContext): Section {
@@ -214,39 +264,21 @@ function whyYouAreGettingThis(context: WarningContext): string {
     : `${who} reported this email and Phishy checked it.`;
 }
 
-function whatArrived(
-  context: WarningContext,
-  recipient: WarningRecipient
-): { lines: string[]; lead: string } {
-  const subject = quotedSubject(context.summary);
-  const sender = displaySender(context.summary.senderAddress, context.summary.senderName);
-  const when = displayTime(
-    recipient.receivedAt ?? context.summary.firstDeliveryAt,
-    context.timeZone
-  );
-  const lines = [
-    subject ? `An email with the subject ${subject}` : 'An email',
-    ...(sender ? [`from ${sender}`] : []),
+/** Where the recipient's own copy is, in their terms */
+const WHERE_IT_IS: Record<string, string> = {
+  junk: 'Your Junk Email folder. It is still dangerous there: do not open it.',
+  deleted: 'Your Deleted Items. If you did not open it, there is nothing else to do.',
+  recoverable: 'You have already deleted it.',
+};
+
+/** The subject and sender as labelled facts: defanged by `displayText`, escaped when rendered */
+function identifyingFacts(summary: IncidentSummary): Fact[] {
+  const subject = quotedSubject(summary, 80);
+  const sender = displaySender(summary.senderAddress, summary.senderName);
+  return [
+    ...(subject ? [{ label: 'Subject', value: subject }] : []),
+    ...(sender ? [{ label: 'From', value: sender }] : []),
   ];
-  const on = when ? ` on ${when}` : '';
-  switch (recipient.folder) {
-    case 'junk':
-      lines.push(
-        `arrived in your Junk Email folder${on}. It is still dangerous there: do not open it.`
-      );
-      break;
-    case 'deleted':
-      lines.push(
-        `arrived in your mailbox${on} and is now in your Deleted Items. If you did not open it, there is nothing else to do.`
-      );
-      break;
-    case 'recoverable':
-      lines.push(`arrived in your mailbox${on}. You have already deleted it.`);
-      break;
-    default:
-      lines.push(`arrived in your mailbox${on}.`);
-  }
-  return { lines, lead: 'A phishing email reached your mailbox. Please delete it.' };
 }
 
 /** The warning to one person who received the attack */
@@ -256,26 +288,29 @@ export function buildEmployeeWarning(
 ): RenderedEmail {
   const verdict = describeVerdict(context.summary.verdict);
   const subject = quotedSubject(context.summary, 60);
-  const arrived = whatArrived({ ...context, warnedCount: 0 }, recipient);
-  const { html, text } = layout({
+  const when = displayTime(
+    recipient.receivedAt ?? context.summary.firstDeliveryAt,
+    context.timeZone
+  );
+  const lead = 'A phishing email reached your mailbox. Please delete it.';
+  const { html, text } = renderWarning({
     title: 'Security warning from Phishy',
-    lead: arrived.lead,
-    leadTone: 'danger',
-    sections: [
-      { heading: 'What arrived', lines: arrived.lines },
-      whatToDo(),
-      alreadyClicked({ ...context, warnedCount: 0 }),
+    preheader: lead,
+    lead,
+    verdictLabel: verdict.label,
+    risk: summaryRisk(context.summary),
+    emailHeading: 'Which email',
+    emailFacts: [
+      ...identifyingFacts(context.summary),
+      ...(when ? [{ label: 'Arrived', value: when }] : []),
       {
-        heading: 'Why you are getting this',
-        lines: [whyYouAreGettingThis({ ...context, warnedCount: 0 })],
+        label: 'Where',
+        value: WHERE_IT_IS[recipient.folder ?? ''] ?? 'In your mailbox.',
       },
     ],
-    riskBlock: { label: verdict.label, risk: summaryRisk(context.summary), plain: verdict.plain },
-    footer: [
-      DEFANG_NOTE,
-      `Reference: ${context.incidentReference}`,
-      'Phishy, for your security team',
-    ],
+    clicked: alreadyClicked({ ...context, warnedCount: 0 }),
+    why: whyYouAreGettingThis({ ...context, warnedCount: 0 }),
+    reference: context.incidentReference,
   });
   return {
     subject: subjectLine(
@@ -296,10 +331,12 @@ export function buildEmployeeWarning(
 export function buildRemovalNotice(context: Omit<WarningContext, 'warnedCount'>): RenderedEmail {
   const subject = quotedSubject(context.summary);
   const sender = displaySender(context.summary.senderAddress, context.summary.senderName);
-  const { html, text } = layout({
+  const { html, text } = renderSections({
     title: 'Security notice from Phishy',
+    label: 'Security notice',
     lead: 'Your security team removed a phishing email from your mailbox. You do not need to do anything.',
-    leadTone: 'safe',
+    tone: 'safe',
+    word: 'Removed',
     sections: [
       {
         heading: 'What happened',
@@ -354,37 +391,25 @@ export function buildDistributionWarning(
 ): RenderedEmail {
   const verdict = describeVerdict(context.summary.verdict);
   const subject = quotedSubject(context.summary, 60);
-  const sender = displaySender(context.summary.senderAddress, context.summary.senderName);
   const first = displayTime(
     context.summary.firstDeliveryAt ?? context.summary.firstReportAt,
     context.timeZone
   );
-  const { html, text } = layout({
+  const lead = 'A phishing email is going around. If you received it, delete it.';
+  const { html, text } = renderWarning({
     title: 'Security warning from Phishy',
-    lead: 'A phishing email is going around. If you received it, delete it.',
-    leadTone: 'danger',
-    sections: [
-      {
-        heading: 'What to look for',
-        lines: [
-          subject ? `An email with the subject ${subject}` : 'An email',
-          ...(sender ? [`from ${sender}`] : []),
-          ...(first ? [`first seen on ${first}.`] : []),
-        ],
-      },
-      whatToDo(),
-      alreadyClicked({ ...context, warnedCount: 0 }),
-      {
-        heading: 'Why you are getting this',
-        lines: [whyYouAreGettingThis({ ...context, warnedCount: 0 })],
-      },
+    preheader: lead,
+    lead,
+    verdictLabel: verdict.label,
+    risk: summaryRisk(context.summary),
+    emailHeading: 'What to look for',
+    emailFacts: [
+      ...identifyingFacts(context.summary),
+      ...(first ? [{ label: 'First seen', value: first }] : []),
     ],
-    riskBlock: { label: verdict.label, risk: summaryRisk(context.summary), plain: verdict.plain },
-    footer: [
-      DEFANG_NOTE,
-      `Reference: ${context.incidentReference}`,
-      'Phishy, for your security team',
-    ],
+    clicked: alreadyClicked({ ...context, warnedCount: 0 }),
+    why: whyYouAreGettingThis({ ...context, warnedCount: 0 }),
+    reference: context.incidentReference,
   });
   return {
     subject: subjectLine(
@@ -480,92 +505,90 @@ function inShort(incident: CampaignIncident): string {
   return `${opening} It reached ${atLeast}${t.recipients} mailbox(es): ${t.read} opened it, ${t.replied} replied, ${t.forwarded} forwarded it, and ${t.stillInInbox} still have it in their inbox.`;
 }
 
-function attackSection(incident: CampaignIncident): Section {
+/** What the attack is, as labelled facts plus its main reasons (all defanged) */
+function attackView(incident: CampaignIncident): { facts: Fact[]; reasons: string[] } {
   const summary = incident.summary;
   const sender = displaySender(summary.senderAddress, summary.senderName);
-  const lines = [
-    ...(summary.subject ? [`Subject: ${quotedSubject(summary, 120) ?? ''}`] : []),
-    ...(sender ? [`Claimed sender: ${sender}`] : []),
-    ...(summary.lure ? [`Lure: ${displayText(summary.lure, 400) ?? ''}`] : []),
-    `Detected by: ${summary.detectedBy}`,
+  const facts: Fact[] = [
+    ...(summary.subject ? [{ label: 'Subject', value: quotedSubject(summary, 120) ?? '' }] : []),
+    ...(sender ? [{ label: 'Claimed sender', value: sender }] : []),
+    ...(summary.lure ? [{ label: 'Lure', value: displayText(summary.lure, 400) ?? '' }] : []),
+    { label: 'Detected by', value: summary.detectedBy },
   ];
   const reasons = summary.reasons
     .slice(0, 5)
     .map(reason => displayText(reason, 240))
-    .filter((reason): reason is string => !!reason)
-    .map(reason => `- ${reason}`);
-  if (reasons.length) {
-    lines.push('Main reasons:', ...reasons);
-  }
-  return { heading: 'What the attack is', lines };
+    .filter((reason): reason is string => !!reason);
+  return { facts, reasons };
 }
 
-function timelineSection(incident: CampaignIncident, timeZone: string): Section {
+function attackText(view: { facts: Fact[]; reasons: string[] }): string[] {
+  return [
+    ...textFacts(view.facts),
+    ...(view.reasons.length ? ['Main reasons:', ...view.reasons.map(reason => `- ${reason}`)] : []),
+  ];
+}
+
+function timelineFacts(incident: CampaignIncident, timeZone: string): Fact[] {
   const s = incident.summary;
   const t = (iso?: string): string => displayTime(iso, timeZone) ?? 'unknown';
-  return {
-    heading: 'Timeline',
-    lines: [
-      `First delivery: ${s.firstDeliveryAt ? `${t(s.firstDeliveryAt)} (from mailbox records)` : 'unknown'}`,
-      `First report: ${s.firstReportAt ? t(s.firstReportAt) : 'none yet'}`,
-      ...(s.lastReportAt && s.lastReportAt !== s.firstReportAt
-        ? [`Latest report: ${t(s.lastReportAt)}`]
-        : []),
-      `Reports so far: ${incident.reportCount}`,
-    ],
-  };
+  return [
+    {
+      label: 'First delivery',
+      value: s.firstDeliveryAt ? `${t(s.firstDeliveryAt)} (from mailbox records)` : 'unknown',
+    },
+    { label: 'First report', value: s.firstReportAt ? t(s.firstReportAt) : 'none yet' },
+    ...(s.lastReportAt && s.lastReportAt !== s.firstReportAt
+      ? [{ label: 'Latest report', value: t(s.lastReportAt) }]
+      : []),
+    { label: 'Reports so far', value: String(incident.reportCount) },
+  ];
 }
 
-function reachSection(incident: CampaignIncident): {
-  section: Section;
-  table: string;
-  rows: string[];
-} {
+/**
+ * How far it reached, split into the decision-level numbers (near the top)
+ * and the evidence (the recipient list, caveats, lookup time: at the end).
+ */
+interface ReachView {
+  /** The totals in one line (plain text; the HTML shows them as numbers) */
+  totalsLine?: string;
+  /** Coverage, unlisted recipients, or why there is no lookup */
+  notes: string[];
+  caveats: string[];
+  lookedUp?: string;
+  /** Recipients needing attention first, at most LISTED_IN_INCIDENT */
+  listed: BlastRadiusRecipient[];
+  more: number;
+}
+
+function reachView(incident: CampaignIncident): ReachView {
   const reach = incident.reach;
+  const empty = { caveats: [], listed: [], more: 0 };
   if (reach.status === 'not_enabled') {
     return {
-      section: {
-        heading: 'Blast radius',
-        lines: [
-          'Blast radius is not enabled, so Phishy cannot say who else received it or warn them directly.',
-        ],
-      },
-      table: '',
-      rows: [],
+      ...empty,
+      notes: [
+        'Blast radius is not enabled, so Phishy cannot say who else received it or warn them directly.',
+      ],
     };
   }
   if (reach.recipients.length === 0) {
-    return {
-      section: {
-        heading: 'Blast radius',
-        lines: [reach.note ?? 'The blast-radius lookup produced no result.'],
-      },
-      table: '',
-      rows: [],
-    };
+    return { ...empty, notes: [reach.note ?? 'The blast-radius lookup produced no result.'] };
   }
   const t = reach.totals;
-  const lines = [
-    `Recipients: ${t.recipients} · Read: ${t.read} · Replied: ${t.replied} · Forwarded: ${t.forwarded} · Still in inbox: ${t.stillInInbox} · Not delivered: ${t.notDelivered}`,
-  ];
+  const notes: string[] = [];
   if (reach.coverage) {
     const eligible = `${reach.coverage.lowerBound ? 'at least ' : ''}${reach.coverage.mailboxesEligible}`;
-    lines.push(
+    notes.push(
       reach.status === 'partial'
         ? `PARTIAL COVERAGE: checked ${reach.coverage.mailboxesChecked} of ${eligible} mailboxes. Recipients or details may be missing.`
         : `Coverage: checked ${reach.coverage.mailboxesChecked} of ${eligible} mailboxes.`
     );
   }
   if (reach.unlisted > 0) {
-    lines.push(
+    notes.push(
       `${reach.unlisted} more recipient(s) were counted but not listed by a lookup, so Phishy has no address for them.`
     );
-  }
-  if (reach.lookedUpAt) {
-    lines.push(`Latest lookup: ${reach.lookedUpAt}.`);
-  }
-  for (const caveat of reach.caveats.slice(0, 6)) {
-    lines.push(`- ${caveat}`);
   }
 
   // The people needing attention first: replied, forwarded, opened, in a mailbox
@@ -584,25 +607,71 @@ function reachSection(incident: CampaignIncident): {
   const listed = [...reach.recipients]
     .sort((a, b) => rank(a) - rank(b))
     .slice(0, LISTED_IN_INCIDENT);
-  const cell = 'padding: 4px 8px; border-bottom: 1px solid #e9ecef; text-align: left;';
-  let table = '<table style="width: 100%; border-collapse: collapse; font-size: 13px;">';
-  table += `<tr>${RECIPIENT_COLUMNS.map(name => `<th style="${cell}">${name}</th>`).join('')}</tr>`;
-  for (const recipient of listed) {
-    table += `<tr>${recipientCells(recipient)
-      .map(value => `<td style="${cell}">${esc(value)}</td>`)
-      .join('')}</tr>`;
+  return {
+    totalsLine: `Recipients: ${t.recipients} · Read: ${t.read} · Replied: ${t.replied} · Forwarded: ${t.forwarded} · Still in inbox: ${t.stillInInbox} · Not delivered: ${t.notDelivered}`,
+    notes,
+    caveats: reach.caveats.slice(0, 6),
+    ...(reach.lookedUpAt ? { lookedUp: `Latest lookup: ${reach.lookedUpAt}.` } : {}),
+    listed,
+    more: reach.recipients.length - listed.length,
+  };
+}
+
+function reachHtml(incident: CampaignIncident, view: ReachView): string {
+  const t = incident.reach.totals;
+  const attention = (count: number, tone: Tone): Tone | undefined => (count > 0 ? tone : undefined);
+  const tile = (
+    label: string,
+    value: number,
+    tone?: Tone
+  ): { label: string; value: string; tone?: Tone } => ({
+    label,
+    value: String(value),
+    ...(tone ? { tone } : {}),
+  });
+  const numbers = view.totalsLine
+    ? stats([
+        tile('Reports', incident.reportCount),
+        tile('Recipients', t.recipients),
+        tile('Still in inbox', t.stillInInbox, attention(t.stillInInbox, 'caution')),
+      ]) +
+      stats([
+        tile('Opened', t.read, attention(t.read, 'caution')),
+        tile('Replied', t.replied, attention(t.replied, 'danger')),
+        tile('Forwarded', t.forwarded, attention(t.forwarded, 'danger')),
+      ]) +
+      (t.notDelivered ? paragraph(`Not delivered: ${t.notDelivered}`, { quiet: true }) : '')
+    : '';
+  return `${heading('Reach')}${numbers}${view.notes.map(line => paragraph(line, { quiet: !!view.totalsLine })).join('')}`;
+}
+
+function reachText(view: ReachView): string[] {
+  return [...(view.totalsLine ? [view.totalsLine] : []), ...view.notes];
+}
+
+function recipientsText(view: ReachView): string[] {
+  if (!view.listed.length) {
+    return [];
   }
-  table += '</table>';
-  const more = reach.recipients.length - listed.length;
-  if (more > 0) {
-    table += `<p style="font-size: 12px; color: #6c757d;">${more} more recipient(s) not listed here.</p>`;
-  }
-  const rows = [
+  return [
+    ...view.caveats.map(caveat => `- ${caveat}`),
+    ...(view.lookedUp ? [view.lookedUp] : []),
     `  ${RECIPIENT_COLUMNS.join(' | ')}`,
-    ...listed.map(recipient => `  ${recipientCells(recipient).join(' | ')}`),
-    ...(more > 0 ? [`  ${more} more recipient(s) not listed here.`] : []),
+    ...view.listed.map(recipient => `  ${recipientCells(recipient).join(' | ')}`),
+    ...(view.more > 0 ? [`  ${view.more} more recipient(s) not listed here.`] : []),
   ];
-  return { section: { heading: 'Blast radius', lines }, table, rows };
+}
+
+function recipientsHtml(view: ReachView): string {
+  if (!view.listed.length) {
+    return '';
+  }
+  return `${heading('Recipients', { quiet: true })}${bulletList(view.caveats, { quiet: true })}${dataTable(
+    RECIPIENT_COLUMNS,
+    view.listed.map(recipientCells)
+  )}${view.more > 0 ? paragraph(`${view.more} more recipient(s) not listed here.`, { quiet: true }) : ''}${
+    view.lookedUp ? paragraph(view.lookedUp, { quiet: true }) : ''
+  }`;
 }
 
 /** The exact reply line that approves an action */
@@ -658,105 +727,188 @@ function describeProposal(action: ResponseAction): {
   };
 }
 
-function proposalLines(context: IncidentEmailContext): string[] {
-  const lines: string[] = [];
+interface Proposals {
+  /** How approving works, or why it cannot */
+  intro: string;
+  items: Array<{ title: string; reply: string; does: string; notIncluded?: string }>;
+}
+
+function proposals(context: IncidentEmailContext): Proposals {
+  let intro: string;
   if (!context.commandsEnabled) {
-    lines.push(
-      'The email command channel is off (PHISHY_EMAIL_COMMANDS_ENABLED), so Phishy cannot receive approvals. These actions are listed for information only.'
-    );
+    intro =
+      'The email command channel is off (PHISHY_EMAIL_COMMANDS_ENABLED), so Phishy cannot receive approvals. These actions are listed for information only.';
   } else if (context.proposed.length === 0) {
-    lines.push('No action is waiting for approval.');
+    intro = 'No action is waiting for approval.';
   } else {
     const expiry = context.proposed[0].expiresAt;
-    lines.push(
-      `Reply to this email with the line shown, on a line of its own. Each approval is good until ${displayTime(expiry.toISOString(), context.timeZone) ?? expiry.toISOString()} and applies to this incident only.`
-    );
+    intro = `Reply to this email with the line shown, on a line of its own. Each approval is good until ${displayTime(expiry.toISOString(), context.timeZone) ?? expiry.toISOString()} and applies to this incident only.`;
   }
-  let n = 0;
-  for (const action of context.proposed) {
-    n += 1;
+  const items: Proposals['items'] = context.proposed.map(action => {
     const { title, does, notIncluded } = describeProposal(action);
-    lines.push(`${n}. ${title}`);
-    lines.push(`   Reply with this line:  ${approvalLine(action)}`);
-    lines.push(`   What it does: ${does.charAt(0).toUpperCase()}${does.slice(1)}`);
-    if (notIncluded) {
-      lines.push(`   Not included: ${notIncluded}.`);
-    }
-  }
+    return {
+      title,
+      reply: approvalLine(action),
+      does: `${does.charAt(0).toUpperCase()}${does.slice(1)}`,
+      ...(notIncluded ? { notIncluded } : {}),
+    };
+  });
   if (context.incident.summary.analysisId) {
-    n += 1;
-    lines.push(`${n}. Mark the campaign as a false positive`);
-    lines.push('   Reply with this line:  false positive');
-    lines.push(
-      '   What it does: records "false positive" for every report in this campaign, lowers its threat indicators and cancels the proposed actions above.'
-    );
+    items.push({
+      title: 'Mark the campaign as a false positive',
+      reply: 'false positive',
+      does: 'records "false positive" for every report in this campaign, lowers its threat indicators and cancels the proposed actions above.',
+    });
   }
+  return { intro, items };
+}
+
+/**
+ * Plain text. The command never stands on a line of its own ("Reply with
+ * this line:" comes first), so a quoted copy of this email cannot approve.
+ */
+function proposalText(view: Proposals): string[] {
+  const lines = [view.intro];
+  view.items.forEach((item, index) => {
+    lines.push(`${index + 1}. ${item.title}`);
+    lines.push(`   Reply with this line:  ${item.reply}`);
+    lines.push(`   What it does: ${item.does}`);
+    if (item.notIncluded) {
+      lines.push(`   Not included: ${item.notIncluded}.`);
+    }
+  });
   return lines;
 }
 
-function proposalHtml(lines: string[]): string {
-  return `<div style="font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 13px; white-space: pre-wrap; background-color: #f8f9fa; border: 1px solid #e9ecef; border-radius: 6px; padding: 10px;">${lines.map(line => esc(line)).join('\n')}</div>`;
+/**
+ * HTML. As in the text, the command sits inside the same paragraph as
+ * "Reply with this line:", so the text a mail client makes of a quoted copy
+ * never has it on a line of its own.
+ */
+function proposalHtml(view: Proposals): string[] {
+  return view.items.map((item, index) =>
+    panel(
+      `${paragraph(`${index + 1}. ${item.title}`, { bold: true })}${paragraphHtml(
+        `Reply with this line:&nbsp; ${codeInline(item.reply)}`
+      )}${paragraph(`What it does: ${item.does}`, { quiet: true })}${
+        item.notIncluded ? paragraph(`Not included: ${item.notIncluded}.`, { quiet: true }) : ''
+      }`,
+      'info'
+    )
+  );
 }
 
-/** The incident email, or an update to it (`changes` set) */
+/** The decision the incident email asks for, in a few words (code-written) */
+function decisionHeadline(context: IncidentEmailContext): string {
+  const waiting = context.proposed.length;
+  if (!context.commandsEnabled) {
+    return 'For information: approvals are off';
+  }
+  if (waiting === 0) {
+    return 'No action is waiting for you';
+  }
+  return waiting === 1
+    ? '1 action is waiting for your approval'
+    : `${waiting} actions are waiting for your approval`;
+}
+
+/**
+ * The incident email, or an update to it (`changes` set). Decision first:
+ * what changed (updates), what it is and how far it reached, what Phishy
+ * did, the proposed actions with their exact reply lines; then the attack,
+ * the timeline and the recipient evidence.
+ */
 export function buildIncidentEmail(context: IncidentEmailContext): RenderedEmail {
   const incident = context.incident;
   const verdict = describeVerdict(incident.summary.verdict);
-  const reach = reachSection(incident);
-  const proposals = proposalLines(context);
-  const sections: Section[] = [];
+  const tone: Tone = verdict.tone === 'safe' ? 'caution' : verdict.tone;
+  const title = context.changes
+    ? `Phishy incident update ${incident.reference}`
+    : `Phishy incident ${incident.reference}`;
+  const lead = inShort(incident);
+  const headline = decisionHeadline(context);
+  const reach = reachView(incident);
+  const attack = attackView(incident);
+  const timeline = timelineFacts(incident, context.timeZone);
+  const done = [...context.done, ...context.notes];
+  const proposed = proposals(context);
+  const risk = summaryRisk(incident.summary);
+
+  const rows: string[] = [];
   if (context.changes?.length) {
-    sections.push({
-      heading: 'What changed',
-      lines: context.changes.map(line => `- ${line}`),
-      tone: 'note',
-    });
+    rows.push(
+      block(callout({ tone: 'info', title: 'What changed', html: bulletList(context.changes) }))
+    );
   }
-  sections.push(
-    attackSection(incident),
-    timelineSection(incident, context.timeZone),
-    reach.section
+  rows.push(
+    block(
+      hero({
+        tone,
+        word: verdict.label,
+        headline,
+        html: `${paragraph(lead)}${riskScoreHtml(risk)}`,
+      })
+    ),
+    block(reachHtml(incident, reach))
   );
-  sections.push({
-    heading: 'What Phishy has done',
-    lines: [...context.done, ...context.notes].map(line => `- ${line}`),
-  });
-  const proposalIndex = sections.length;
-  sections.push({ heading: 'Proposed actions', lines: [] });
+  if (done.length) {
+    rows.push(block(`${heading('What Phishy has done')}${bulletList(done)}`));
+  }
+  rows.push(block(`${heading('Proposed actions')}${paragraph(proposed.intro)}`, { bottom: 12 }));
+  for (const card of proposalHtml(proposed)) {
+    rows.push(block(card, { bottom: 12 }));
+  }
+  rows.push(
+    block(divider(), { bottom: 18 }),
+    block(
+      `${heading('What the attack is', { quiet: true })}${facts(attack.facts)}${
+        attack.reasons.length
+          ? `${paragraph('Main reasons', { quiet: true, bold: true })}${bulletList(attack.reasons, { quiet: true })}`
+          : ''
+      }`
+    ),
+    block(`${heading('Timeline', { quiet: true })}${facts(timeline)}`)
+  );
+  const evidence = recipientsHtml(reach);
+  if (evidence) {
+    rows.push(block(evidence));
+  }
 
-  const reachIndex = sections.indexOf(reach.section);
-  const { html } = layout({
-    title: context.changes
-      ? `Phishy incident update ${incident.reference}`
-      : `Phishy incident ${incident.reference}`,
-    lead: inShort(incident),
-    leadTone: verdict.tone === 'safe' ? 'caution' : verdict.tone,
-    sections,
-    riskBlock: { label: verdict.label, risk: summaryRisk(incident.summary) },
-    footer: footerLines(incident),
-    extraHtml: { [reachIndex]: reach.table, [proposalIndex]: proposalHtml(proposals) },
-  });
-
-  // Plain text: the table rows and the proposals in place
-  const textSections = sections.map((section, index) => {
-    if (index === reachIndex) {
-      return { ...section, lines: [...section.lines, ...reach.rows] };
-    }
-    if (index === proposalIndex) {
-      return { ...section, lines: proposals };
-    }
-    return section;
-  });
-  const { text } = layout({
-    title: context.changes
-      ? `Phishy incident update ${incident.reference}`
-      : `Phishy incident ${incident.reference}`,
-    lead: inShort(incident),
-    leadTone: 'caution',
-    sections: textSections,
-    riskBlock: { label: verdict.label, risk: summaryRisk(incident.summary) },
+  const html = emailShell({
+    title,
+    preheader: `${headline}. ${incident.reportCount} report(s) so far.`,
+    label: 'Security team',
+    tone,
+    bodyHtml: rows.join('\n'),
     footer: footerLines(incident),
   });
+
+  const text = [
+    title.toUpperCase(),
+    TEXT_RULE,
+    '',
+    ...textSection(
+      'What changed',
+      (context.changes ?? []).map(line => `- ${line}`)
+    ),
+    `${headline}.`,
+    lead,
+    '',
+    `Verdict: ${verdict.label}`,
+    ...riskScoreLines(risk),
+    '',
+    ...textSection('Reach', reachText(reach)),
+    ...textSection(
+      'What Phishy has done',
+      done.map(line => `- ${line}`)
+    ),
+    ...textSection('Proposed actions', proposalText(proposed)),
+    ...textSection('What the attack is', attackText(attack)),
+    ...textSection('Timeline', textFacts(timeline)),
+    ...textSection('Recipients', recipientsText(reach)),
+    TEXT_RULE,
+    ...footerLines(incident),
+  ].join('\n');
 
   const subject = incidentSubject(incident);
   return { subject: context.changes ? `Re: ${subject}` : subject, html, text };
