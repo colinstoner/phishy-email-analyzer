@@ -8,6 +8,7 @@
 import {
   CampaignReportInput,
   CampaignResponseService,
+  countReach,
 } from '../../../../src/services/response/campaign.response.service';
 import type {
   BlastRadiusRecipient,
@@ -75,6 +76,9 @@ function config(overrides: Partial<CampaignResponseConfig> = {}): CampaignRespon
     maxRemovalMailboxes: 500,
     maxRemovalMessages: 1000,
     updateIntervalMinutes: 30,
+    // Off here so the suites above test the report-count trigger alone
+    // (exactly the behaviour before the reach trigger); see 'the reach trigger'
+    reachThreshold: 0,
     alreadyClickedInstructions: DEFAULT_ALREADY_CLICKED_INSTRUCTIONS,
     timeZone: 'UTC',
     ...overrides,
@@ -649,5 +653,363 @@ describe('second trigger: the fan-out scan', () => {
     expect(await service.handleCampaignReport(input)).toBe('updated');
     expect(store.incidents).toHaveLength(1);
     expect(store.incidents[0].summary.detectedBy).toBe('fan-out scan, then employee reports');
+  });
+});
+
+describe('the reach trigger', () => {
+  const ONE = 'reporter1@example.com';
+
+  /** Report N of a campaign that has not crossed the report-count threshold */
+  function earlyReport(
+    reporters: string[] = [ONE],
+    reach: BlastRadiusRecipient[] = [1, 2, 3, 4, 5].map(n => recipient(n)),
+    detectionCount = 1
+  ): CampaignReportInput {
+    const input = reportInput();
+    input.match = {
+      ...input.match,
+      detectionCount,
+      uniqueRecipientCount: reporters.length,
+      shouldAlert: false,
+    };
+    input.campaign = { ...input.campaign, detectionCount, uniqueRecipients: reporters };
+    input.blastRadius = { ...blast(reach), reporterAddress: reporters[reporters.length - 1] };
+    return input;
+  }
+
+  it('opens the incident on the first report when reach is at the threshold', async () => {
+    const { service, sent, store, markCampaignAlerted } = setup({ reachThreshold: 5 });
+    expect(await service.handleCampaignReport(earlyReport())).toBe('opened');
+
+    expect(store.incidents).toHaveLength(1);
+    const incident = store.incidents[0];
+    expect(incident).toMatchObject({ trigger: 'reports', reportCount: 1 });
+    expect(incident.summary.openedOnReach).toEqual({
+      reports: 1,
+      reporters: 1,
+      recipients: 5,
+      threshold: 5,
+    });
+    expect(sent).toHaveLength(1);
+    expect(sent[0].to).toBe('security@example.com');
+    expect(sent[0].text).toContain(
+      'Detected by: reach, after a single report: blast radius found 5 delivered recipient(s) besides the reporter (reach threshold 5), so Phishy did not wait for the report-count threshold'
+    );
+    expect(sent[0].text).toContain('1 person has reported the same');
+    expect(store.audit.find(e => e.event === 'incident_opened')?.detail).toEqual({
+      trigger: 'reports',
+      basis: 'reach',
+      reports: 1,
+      recipients: 5,
+      reporters: 1,
+      reachRecipients: 5,
+      reachThreshold: 5,
+    });
+    // The legacy flag means "crossed the report-count threshold": not yet
+    expect(markCampaignAlerted).not.toHaveBeenCalled();
+    // approve mode (the default): proposed, nothing sent to employees
+    expect(employeeEmails(sent)).toEqual([]);
+    expect(proposed(store, 'send_warning')?.authorization).toBe('approve');
+    expect(sent[0].text).not.toContain('only one person has reported it so far');
+  });
+
+  it('gives the numbers when the report that reaches the threshold is not the first', async () => {
+    const { service, sent } = setup({ reachThreshold: 3 });
+    await service.handleCampaignReport(
+      earlyReport(
+        [ONE],
+        [1, 2, 3].map(n => recipient(n)),
+        2
+      )
+    );
+    expect(sent[0].text).toContain(
+      'Detected by: reach, after 2 reports from 1 person: blast radius found 3 delivered recipient(s)'
+    );
+  });
+
+  it('does not open below the threshold', async () => {
+    const { service, sent, store } = setup({ reachThreshold: 5 });
+    const input = earlyReport(
+      [ONE],
+      [1, 2, 3, 4].map(n => recipient(n))
+    );
+    expect(await service.handleCampaignReport(input)).toBe('below_threshold');
+    expect(store.incidents).toEqual([]);
+    expect(sent).toEqual([]);
+  });
+
+  it('falls back to the report count when blast radius is unusable or absent', async () => {
+    const { service, sent, store } = setup({ reachThreshold: 1 });
+    const unavailable = earlyReport();
+    unavailable.blastRadius = {
+      status: 'unavailable',
+      note: 'Blast radius lookup could not be completed.',
+      lookedUpAt: '2026-11-17T10:00:00.000Z',
+    };
+    expect(await service.handleCampaignReport(unavailable)).toBe('below_threshold');
+    const absent = earlyReport();
+    absent.blastRadius = undefined;
+    expect(await service.handleCampaignReport(absent)).toBe('below_threshold');
+    const disabled = earlyReport();
+    disabled.blastRadius = undefined;
+    disabled.blastRadiusEnabled = false;
+    expect(await service.handleCampaignReport(disabled)).toBe('below_threshold');
+    expect(store.incidents).toEqual([]);
+
+    // The third report crosses the report-count threshold: opened as before
+    const third = reportInput({ blastRadius: undefined });
+    expect(await service.handleCampaignReport(third)).toBe('opened');
+    expect(store.incidents[0].summary.detectedBy).toBe(
+      'employee reports (the campaign alert threshold)'
+    );
+    expect(store.incidents[0].summary.openedOnReach).toBeUndefined();
+    expect(sent).toHaveLength(1);
+  });
+
+  it('uses a partial lookup, counting only the recipients it listed', async () => {
+    const { service, store } = setup({ reachThreshold: 5 });
+    const input = earlyReport(
+      [ONE],
+      [1, 2, 3, 4].map(n => recipient(n))
+    );
+    input.blastRadius = {
+      ...input.blastRadius!,
+      status: 'partial',
+      // The lookup estimates far more than it listed: never counted
+      totals: { recipients: 400, read: 0, replied: 0, forwarded: 0 },
+    };
+    expect(await service.handleCampaignReport(input)).toBe('below_threshold');
+    input.blastRadius.recipients = [1, 2, 3, 4, 5].map(n => recipient(n));
+    expect(await service.handleCampaignReport(input)).toBe('opened');
+    expect(store.incidents[0].summary.openedOnReach?.recipients).toBe(5);
+  });
+
+  it('does not fire for a suspicious verdict, or when the analysis failed', async () => {
+    const { service, store } = setup({ reachThreshold: 1 });
+    const suspicious = earlyReport();
+    suspicious.risk = { ...suspicious.risk, verdict: 'suspicious', riskScore: 88 };
+    expect(await service.handleCampaignReport(suspicious)).toBe('below_threshold');
+    const failed = earlyReport();
+    failed.risk = { ...failed.risk, verdict: 'undetermined' };
+    expect(await service.handleCampaignReport(failed)).toBe('below_threshold');
+    const flagged = earlyReport();
+    flagged.analysis = { ...flagged.analysis, analysisFailed: true };
+    expect(await service.handleCampaignReport(flagged)).toBe('below_threshold');
+    expect(store.incidents).toEqual([]);
+
+    for (const verdict of ['bec', 'malware_delivery']) {
+      const fresh = setup({ reachThreshold: 1 });
+      const input = earlyReport();
+      input.risk = { ...input.risk, verdict };
+      expect(await fresh.service.handleCampaignReport(input)).toBe('opened');
+    }
+  });
+
+  it('is off at threshold 0: exactly the report-count behaviour', async () => {
+    const { service, store, sent } = setup({ reachThreshold: 0 });
+    const wide = earlyReport(
+      [ONE],
+      Array.from({ length: 80 }, (_, n) => recipient(n + 1))
+    );
+    expect(await service.handleCampaignReport(wide)).toBe('below_threshold');
+    expect(store.incidents).toEqual([]);
+    expect(sent).toEqual([]);
+  });
+
+  it('does not count reporters, undelivered or unconfirmed copies, or duplicates', () => {
+    const report: BlastRadiusReport = {
+      ...blast([
+        recipient(1),
+        recipient(2, { folder: 'junk' }),
+        recipient(3, { folder: 'recoverable' }),
+        recipient(1), // listed twice
+        { address: 'Reporter1@Example.com', mailbox: 'found', folder: 'inbox' },
+        { address: 'reporter2@example.com', mailbox: 'found', folder: 'inbox' },
+        { address: 'self@example.com', mailbox: 'found', folder: 'inbox' },
+        { address: 'failed@example.com', mailbox: 'not_delivered' },
+        { address: 'quarantined@example.com', mailbox: 'not_found', deliveryStatus: 'Quarantined' },
+        { address: 'unread-mailbox@example.com', mailbox: 'not_checked' },
+      ]),
+      reporterAddress: 'self@example.com',
+    };
+    expect(countReach(report, [ONE, 'reporter2@example.com'])).toBe(3);
+    expect(countReach(undefined, [])).toBeUndefined();
+    expect(countReach({ ...report, status: 'unavailable' }, [])).toBeUndefined();
+  });
+
+  it('does not open when reporters and undelivered copies are what make up the reach', async () => {
+    const { service, store } = setup({ reachThreshold: 3 });
+    const input = earlyReport(
+      [ONE, 'reporter2@example.com'],
+      [
+        recipient(1),
+        recipient(2),
+        { address: ONE, mailbox: 'found', folder: 'inbox' },
+        { address: 'reporter2@example.com', mailbox: 'found', folder: 'inbox' },
+        { address: 'failed@example.com', mailbox: 'not_delivered' },
+        { address: 'quarantined@example.com', mailbox: 'not_found' },
+      ],
+      2
+    );
+    expect(await service.handleCampaignReport(input)).toBe('below_threshold');
+    expect(store.incidents).toEqual([]);
+  });
+
+  it('never opens a second incident: the report-count trigger later updates the same one', async () => {
+    const { service, store, sent, advance, markCampaignAlerted } = setup({ reachThreshold: 5 });
+    await service.handleCampaignReport(earlyReport());
+    advance(31 * 60_000);
+    const third = reportInput(); // shouldAlert: the report-count threshold is crossed now
+    expect(await service.handleCampaignReport(third)).toBe('updated');
+    expect(store.incidents).toHaveLength(1);
+    expect(store.events().filter(e => e === 'incident_opened')).toHaveLength(1);
+    // Recorded as the report-count trigger would have, once it is crossed
+    expect(markCampaignAlerted).toHaveBeenCalledWith('campaign-1');
+    expect(sent[1].inReplyTo).toBe('ses-1');
+    // "Detected by" keeps what opened it
+    expect(store.incidents[0].summary.detectedBy).toMatch(/^reach, after a single report/);
+  });
+
+  it('opens one incident when both triggers race', async () => {
+    const { service, store } = setup({ reachThreshold: 5 });
+    await Promise.all([
+      service.handleCampaignReport(earlyReport()),
+      service.handleCampaignReport(reportInput()),
+    ]);
+    expect(store.incidents).toHaveLength(1);
+  });
+
+  it('does not broadcast through the legacy alert on one report when the tables are missing', async () => {
+    const { service, store, legacyAlert, sent } = setup({ reachThreshold: 1 });
+    store.unavailable = true;
+    expect(await service.handleCampaignReport(earlyReport())).toBe('fallback');
+    expect(legacyAlert).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
+  });
+});
+
+describe('automatic actions need two reporters', () => {
+  const ONE = 'reporter1@example.com';
+  const TWO = 'reporter2@example.com';
+  const THREE = 'reporter3@example.com';
+  const AUTO: Partial<CampaignResponseConfig> = {
+    reachThreshold: 3,
+    audience: 'both',
+    employeeWarning: 'auto',
+    distributionWarning: 'auto',
+  };
+  const REACH = [1, 2, 3].map(n => recipient(n));
+
+  function report(reporters: string[], detectionCount: number): CampaignReportInput {
+    const input = reportInput();
+    input.match = {
+      ...input.match,
+      detectionCount,
+      uniqueRecipientCount: reporters.length,
+      shouldAlert: false,
+    };
+    input.campaign = { ...input.campaign, detectionCount, uniqueRecipients: reporters };
+    input.blastRadius = blast(REACH);
+    return input;
+  }
+
+  it('holds auto actions for approval on one reporter, then runs them once with the second', async () => {
+    const { service, sent, store, advance } = setup(AUTO, { distributionList: LIST });
+
+    // Report 1, one person: opened on reach, nothing sent to employees
+    expect(await service.handleCampaignReport(report([ONE], 1))).toBe('opened');
+    expect(employeeEmails(sent)).toEqual([]);
+    const held = proposed(store, 'send_warning')!;
+    expect(held.authorization).toBe('approve');
+    expect(held.scope.kind === 'send_warning' && held.scope.distribution).toBe(true);
+    expect(sent[0].text).toContain(
+      'The targeted warning and the warning to the distribution list are set to send automatically, but waiting for your approval because only one person has reported it so far. They go ahead automatically when a second person reports it, or when you approve.'
+    );
+    expect(sent[0].text).toContain(`APPROVE WARNING ${held.reference}`);
+
+    // Report 2, the same person again: still held
+    advance(31 * 60_000);
+    expect(await service.handleCampaignReport(report([ONE], 2))).toBe('updated');
+    expect(employeeEmails(sent)).toEqual([]);
+    expect(store.actions.some(a => a.authorization === 'auto')).toBe(false);
+
+    // Report 3, a second person, one minute later: released at once
+    advance(60_000);
+    expect(await service.handleCampaignReport(report([ONE, TWO], 3))).toBe('updated');
+    const employees = employeeEmails(sent).map(e => e.to);
+    expect(employees.sort()).toEqual(
+      [LIST, ONE, TWO, 'person1@example.com', 'person2@example.com', 'person3@example.com'].sort()
+    );
+    const update = sent.find(e => e.text.includes('A second person has reported it'));
+    expect(update?.inReplyTo).toBe('ses-1');
+    const current = store.actions.find(a => a.id === held.id);
+    expect(current?.status).toBe('cancelled');
+    expect(
+      store.audit.find(e => e.actionId === held.id && e.event === 'action_cancelled')?.detail
+    ).toEqual({ reason: 'released_to_auto' });
+    const auto = store.actions.filter(a => a.authorization === 'auto');
+    expect(auto).toHaveLength(1);
+    expect(auto[0]).toMatchObject({ status: 'completed', approvedBy: 'auto' });
+
+    // The held reference can no longer send anything
+    const reply = await service.handleApprovals(approve('send_warning', held.reference), TEAM[0]);
+    expect(reply.body[0]).toContain('replaced by a newer one');
+
+    // Report 4, a third person: only the new reporter is thanked; nobody twice
+    advance(31 * 60_000);
+    await service.handleCampaignReport(report([ONE, TWO, THREE], 4));
+    const all = employeeEmails(sent).map(e => e.to);
+    expect(all.filter(a => a === THREE)).toHaveLength(1);
+    expect(new Set(all).size).toBe(all.length);
+  });
+
+  it('lets the security team approve during the hold, and sends nothing twice on release', async () => {
+    const { service, sent, store, advance } = setup(AUTO, { distributionList: LIST });
+    await service.handleCampaignReport(report([ONE], 1));
+    const held = proposed(store, 'send_warning')!;
+    const reply = await service.handleApprovals(approve('send_warning', held.reference), TEAM[1]);
+    expect(reply.heading).toBe('Done: approval carried out');
+    const before = employeeEmails(sent).map(e => e.to);
+    expect([...before].sort()).toEqual(
+      [LIST, ONE, 'person1@example.com', 'person2@example.com', 'person3@example.com'].sort()
+    );
+
+    advance(60_000);
+    await service.handleCampaignReport(report([ONE, TWO], 2));
+    const after = employeeEmails(sent).map(e => e.to);
+    // Only the second reporter's thank-you is new; no second broadcast
+    expect(after.slice(before.length)).toEqual([TWO]);
+    expect(new Set(after).size).toBe(after.length);
+  });
+
+  it('leaves approve mode unchanged: no hold note, no release', async () => {
+    const { service, sent, store, advance } = setup({ reachThreshold: 3 });
+    await service.handleCampaignReport(report([ONE], 1));
+    expect(sent[0].text).not.toContain('only one person has reported it so far');
+    advance(60_000);
+    expect(await service.handleCampaignReport(report([ONE, TWO], 2))).toBe('update_deferred');
+    expect(employeeEmails(sent)).toEqual([]);
+    expect(store.actions.every(a => a.authorization === 'approve')).toBe(true);
+  });
+
+  it('holds the default automatic broadcast on one reporter too', async () => {
+    const { service, sent, store } = setup(
+      { reachThreshold: 3, audience: 'distribution' },
+      { distributionList: LIST }
+    );
+    await service.handleCampaignReport(report([ONE], 1));
+    expect(employeeEmails(sent)).toEqual([]);
+    expect(sent[0].text).toContain(
+      'The warning to the distribution list is set to send automatically, but waiting for your approval because only one person has reported it so far. It goes ahead automatically'
+    );
+    const held = proposed(store, 'send_warning');
+    expect(held?.scope.kind === 'send_warning' && held.scope.distribution).toBe(true);
+  });
+
+  it('runs auto at once when the report-count trigger opens (two reporters already)', async () => {
+    const { service, sent } = setup(AUTO, { distributionList: LIST });
+    await service.handleCampaignReport(reportInput());
+    expect(employeeEmails(sent).map(e => e.to)).toContain(LIST);
+    expect(sent[0].text).not.toContain('only one person has reported it so far');
   });
 });

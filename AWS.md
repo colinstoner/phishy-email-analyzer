@@ -42,6 +42,7 @@ All off by default; each is one parameter.
 | `CampaignResponseEnabled` | `false` | Incident email, targeted warning and approved actions. Needs `CampaignAlertsEnabled`, the intelligence database and `migrations/006_campaign_response.sql`; approvals need `EmailCommandsEnabled` |
 | `CampaignResponseAudience` | `distribution` | `distribution`, `recipients` (needs `GraphBlastRadiusEnabled`) or `both` |
 | `CampaignResponseEmployeeWarning` | `approve` | `approve`, `auto` or `off` |
+| `CampaignResponseReachThreshold` | `5` | Open the incident on the first malicious report when its blast radius found at least this many delivered recipients besides the reporters (needs `GraphBlastRadiusEnabled`); `0` waits for the report count. Automatic warnings still wait for a second reporter |
 | `AttachmentAnalysisEnabled` | `false` | Static inspection of attachments |
 
 With `CampaignResponseEnabled`, `CampaignAlertDistribution` may be left empty: no broadcast is sent and only the individual recipients are warned. The other campaign-response and attachment settings keep their defaults unless set in a config file (see [docs/CONFIGURATION.md](docs/CONFIGURATION.md)).

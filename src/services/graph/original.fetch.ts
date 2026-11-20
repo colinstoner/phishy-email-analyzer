@@ -17,7 +17,10 @@
  * - **Matching rule:** exactly one message, counted across the mailbox and
  *   its Recoverable Items, may match. Zero or several: no enrichment.
  * - **Failure:** nothing here throws. Every outcome other than `found`
- *   leaves the pipeline exactly as it is without this feature.
+ *   leaves the pipeline exactly as it is without this feature. A mailbox
+ *   Graph does not know (a plus-address or an alias that is not the
+ *   mailbox's own name) is `not_found` / `mailbox_not_found`; a plus-address
+ *   is retried once without its `+tag` (`enrichWithOriginalVia`).
  *
  * Read-only: GET requests only. What it returns is hostile data.
  */
@@ -56,6 +59,33 @@ const MAX_OFFSET_WEST_MS = 12 * HOUR_MS;
 const MAX_OFFSET_EAST_MS = 14 * HOUR_MS;
 /** Two per location is enough to tell "exactly one" from "more than one" */
 const CANDIDATES_PER_LOCATION = 2;
+/** Least budget left for which the plus-address retry is still attempted */
+const MIN_RETRY_BUDGET_MS = 2000;
+
+/**
+ * Graph error codes, on HTTP 404, that mean the mailbox in the path does not
+ * exist (or has no Exchange mailbox), as opposed to a missing message or
+ * folder (`ErrorItemNotFound`), which stays an error.
+ */
+const MAILBOX_NOT_FOUND_CODES = new Set([
+  'ErrorInvalidUser',
+  'ErrorNonExistentMailbox',
+  'MailboxNotEnabledForRESTAPI',
+  'ResourceNotFound',
+  'Request_ResourceNotFound',
+]);
+
+/** Fixed reason word for a mailbox Graph does not know */
+export const MAILBOX_NOT_FOUND_REASON = 'mailbox_not_found';
+
+function isMailboxNotFound(error: unknown): boolean {
+  return (
+    error instanceof GraphError &&
+    error.kind === 'http' &&
+    error.status === 404 &&
+    MAILBOX_NOT_FOUND_CODES.has(error.code ?? '')
+  );
+}
 
 const MONTH_NAMES = [
   'january',
@@ -323,10 +353,21 @@ async function lookUp(
   // `/messages` covers every ordinary folder (Junk Email and Deleted Items
   // included) but not Recoverable Items, where a message goes when the
   // reporter deletes it for good after forwarding it
-  const [mailbox, recoverable] = await Promise.all([
-    findMessagesBySender(client, query),
-    findMessagesBySender(client, { ...query, folder: 'recoverableitemsdeletions' }),
-  ]);
+  let mailbox: Awaited<ReturnType<typeof findMessagesBySender>>;
+  let recoverable: Awaited<ReturnType<typeof findMessagesBySender>>;
+  try {
+    [mailbox, recoverable] = await Promise.all([
+      findMessagesBySender(client, query),
+      findMessagesBySender(client, { ...query, folder: 'recoverableitemsdeletions' }),
+    ]);
+  } catch (error) {
+    if (isMailboxNotFound(error)) {
+      // The address is not a mailbox's own name (a plus-address or an alias):
+      // nothing to find there, which is not a failure of the lookup
+      return { outcome: 'not_found', reason: MAILBOX_NOT_FOUND_REASON };
+    }
+    throw error;
+  }
 
   const candidates = new Map<string, { summary: MessageSummary; recoverable: boolean }>();
   for (const summary of mailbox.items) {
@@ -480,6 +521,30 @@ export type OriginalMessageFetcher = (
   options: OriginalFetchOptions
 ) => Promise<OriginalFetchResult>;
 
+/**
+ * The address a plus-addressed mailbox delivers to: `name+tag@example.com`
+ * becomes `name@example.com`. Undefined when there is no `+tag`, nothing
+ * would be left of the local part, or the result is not on a safe domain.
+ * Only ever applied to the reporter's own confirmed address, never to an
+ * address from email content.
+ */
+export function plusAddressBase(address: string, safeDomains: string[]): string | undefined {
+  const at = address.lastIndexOf('@');
+  if (at <= 0) {
+    return undefined;
+  }
+  const local = address.slice(0, at);
+  const domain = address.slice(at + 1).toLowerCase();
+  const plus = local.indexOf('+');
+  if (plus <= 0) {
+    return undefined;
+  }
+  if (!safeDomains.some(safeDomain => domainMatches(domain, safeDomain))) {
+    return undefined;
+  }
+  return `${local.slice(0, plus)}@${domain}`;
+}
+
 /** The one parser capability enrichment needs (`EmailParserService` provides it) */
 export interface RetrievedOriginalSink {
   attachRetrievedOriginal(emailData: ExtractedEmailData, original: RetrievedOriginal): void;
@@ -525,22 +590,36 @@ export async function enrichWithOriginalVia(
 ): Promise<OriginalFetchResult> {
   const startedAt = Date.now();
   let result: OriginalFetchResult;
+  let aliasRetried = false;
   try {
     const mailbox = confirmedReporterMailbox(msg, emailData, safeDomains);
+    const request = (address: string): OriginalFetchRequest => ({
+      mailbox: address,
+      claimedFrom: emailData.forwardedHeaders['Original-From'],
+      claimedSent:
+        emailData.forwardedHeaders['Original-Sent'] ?? emailData.forwardedHeaders['Original-Date'],
+      claimedSubject: emailData.forwardedHeaders['Original-Subject'],
+    });
     result =
       mailbox === undefined
         ? { outcome: 'skipped', reason: 'reporter_not_confirmed' }
-        : await fetchOriginal(
-            {
-              mailbox,
-              claimedFrom: emailData.forwardedHeaders['Original-From'],
-              claimedSent:
-                emailData.forwardedHeaders['Original-Sent'] ??
-                emailData.forwardedHeaders['Original-Date'],
-              claimedSubject: emailData.forwardedHeaders['Original-Subject'],
-            },
-            options
-          );
+        : await fetchOriginal(request(mailbox), options);
+
+    // A plus-address is not a mailbox name Graph resolves: try once more
+    // with the +tag removed. Still the reporter's own confirmed address
+    // (same local name, same safe domain), within what is left of the budget
+    if (
+      mailbox !== undefined &&
+      result.outcome === 'not_found' &&
+      result.reason === MAILBOX_NOT_FOUND_REASON
+    ) {
+      const base = plusAddressBase(mailbox, safeDomains);
+      const remainingMs = (options.budgetMs ?? ORIGINAL_FETCH_BUDGET_MS) - (Date.now() - startedAt);
+      if (base !== undefined && remainingMs >= MIN_RETRY_BUDGET_MS) {
+        aliasRetried = true;
+        result = await fetchOriginal(request(base), { ...options, budgetMs: remainingMs });
+      }
+    }
     if (result.outcome === 'found' && result.original) {
       parser.attachRetrievedOriginal(emailData, result.original);
     }
@@ -555,6 +634,7 @@ export async function enrichWithOriginalVia(
     outcome: result.outcome,
     reason: result.reason,
     durationMs,
+    aliasRetried,
     headers: emailData.retrievedOriginal?.headers.length ?? 0,
   });
   return result;

@@ -147,6 +147,13 @@ const CampaignResponseConfigSchema = z.object({
   maxRemovalMessages: z.number().int().min(1).max(10000).default(1000),
   /** Shortest gap between incident updates to the security team */
   updateIntervalMinutes: z.number().int().min(1).max(1440).default(30),
+  /**
+   * Reach trigger: open the incident on the first malicious report when that
+   * report's blast-radius lookup found at least this many delivered
+   * recipients besides the campaign's reporters. 0 turns it off (only the
+   * report-count threshold opens incidents).
+   */
+  reachThreshold: z.number().int().min(0).max(10000).default(5),
   /** The organization's own "if you already clicked" instructions (plain text) */
   alreadyClickedInstructions: z
     .string()

@@ -2,7 +2,9 @@
  * Campaign response: the data model.
  *
  * An **incident** is a campaign Phishy is responding to: opened when a
- * campaign crosses the alert threshold (employee reports), or by a
+ * campaign crosses the alert threshold (employee reports), when one
+ * malicious report's blast radius shows enough reach (the reach trigger,
+ * stored as `reports`), or by a
  * behaviour-based alert before anyone has reported it (the fan-out scan).
  * A **response action** is one thing Phishy may do about an incident, with a
  * scope computed by code, an approver, an approval window and a result.
@@ -209,6 +211,17 @@ export interface IncidentSummary {
   analysisId?: string;
   /** Plain words for what opened the incident */
   detectedBy: string;
+  /**
+   * Set when the reach trigger opened the incident (a malicious report whose
+   * blast-radius lookup found enough delivered recipients) rather than the
+   * report-count threshold. `trigger_source` stays `reports`.
+   */
+  openedOnReach?: {
+    reports: number;
+    reporters: number;
+    recipients: number;
+    threshold: number;
+  };
 }
 
 /** Blast radius merged across the incident's lookups */

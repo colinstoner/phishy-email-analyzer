@@ -395,12 +395,15 @@ export interface IncidentEmailContext {
   timeZone: string;
 }
 
-/** The incident thread's subject: stable, so every update threads under it */
+/**
+ * The incident thread's subject: stable, so every update threads under it.
+ * It carries the reference only, never the suspicious email's own subject:
+ * a subject line that repeats a phishing lure gets the incident email itself
+ * filtered as phishing by the receiving mail system. The lure's subject is in
+ * the body.
+ */
 export function incidentSubject(incident: CampaignIncident): string {
-  const subject = quotedSubject(incident.summary, 70);
-  return subjectLine(
-    `[Phishy incident ${incident.reference}] Active campaign${subject ? `: ${subject}` : ''}`
-  );
+  return subjectLine(`[Phishy incident ${incident.reference}] Active phishing campaign`);
 }
 
 const FOLDER_LABEL: Record<string, string> = {

@@ -286,9 +286,11 @@ describe('incident email', () => {
 
   it('keeps a stable subject so updates thread under it', () => {
     expect(email.subject).toBe(incidentSubject(incident));
-    expect(email.subject).toMatch(
-      /^\[Phishy incident PHY-AAAA-BBBB-CCCC-DDDD\] Active campaign: "/
+    expect(email.subject).toBe(
+      '[Phishy incident PHY-AAAA-BBBB-CCCC-DDDD] Active phishing campaign'
     );
+    // The lure's own subject stays out of the subject line (it is in the body)
+    expect(email.subject).not.toContain(incident.summary.subject ?? '\u0000');
     const update = buildIncidentEmail({
       incident: { ...incident, reportCount: 9 },
       proposed: [],

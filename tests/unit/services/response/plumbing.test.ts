@@ -101,6 +101,7 @@ describe('campaignResponse configuration', () => {
       maxRemovalMailboxes: 500,
       maxRemovalMessages: 1000,
       updateIntervalMinutes: 30,
+      reachThreshold: 5,
       alreadyClickedInstructions: expect.stringContaining('contact your IT or security team'),
       timeZone: 'UTC',
     });
@@ -125,6 +126,15 @@ describe('campaignResponse configuration', () => {
     ).toBe(true);
   });
 
+  it('takes a whole, non-negative reach threshold (0 turns the reach trigger off)', () => {
+    const parse = (reachThreshold: unknown): boolean =>
+      PhishyConfigSchema.safeParse({ ...base, campaignResponse: { reachThreshold } }).success;
+    expect(parse(0)).toBe(true);
+    expect(parse(12)).toBe(true);
+    expect(parse(-1)).toBe(false);
+    expect(parse(2.5)).toBe(false);
+  });
+
   it('maps every setting to an environment variable', async () => {
     const env = {
       PHISHY_CAMPAIGN_RESPONSE_ENABLED: 'true',
@@ -136,6 +146,7 @@ describe('campaignResponse configuration', () => {
       PHISHY_CAMPAIGN_RESPONSE_MAX_REMOVAL_MAILBOXES: '100',
       PHISHY_CAMPAIGN_RESPONSE_MAX_REMOVAL_MESSAGES: '300',
       PHISHY_CAMPAIGN_RESPONSE_UPDATE_INTERVAL_MINUTES: '15',
+      PHISHY_CAMPAIGN_RESPONSE_REACH_THRESHOLD: '0',
       PHISHY_CAMPAIGN_RESPONSE_CLICKED_INSTRUCTIONS: 'Call the service desk on 4400.',
       PHISHY_CAMPAIGN_RESPONSE_TIME_ZONE: 'Europe/London',
       SENDER_EMAIL: 'phishy@example.com',
@@ -157,6 +168,7 @@ describe('campaignResponse configuration', () => {
         maxRemovalMailboxes: 100,
         maxRemovalMessages: 300,
         updateIntervalMinutes: 15,
+        reachThreshold: 0,
         alreadyClickedInstructions: 'Call the service desk on 4400.',
         timeZone: 'Europe/London',
       });
