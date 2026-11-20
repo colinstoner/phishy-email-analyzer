@@ -56,6 +56,7 @@ import { CampaignResponseService } from '../services/response/campaign.response.
 import { ResponseStore } from '../services/response/response.store';
 import type { CampaignMatch, CampaignRecord } from '../services/intelligence/database.service';
 import { isScheduledTaskCandidate } from './scheduled.event';
+import { isOwnReportTraffic } from './own.report';
 
 const logger = createLogger('lambda-handler');
 
@@ -508,6 +509,34 @@ async function processEmailEvent(
       };
     }
     // Not handled (e.g. failed SPF/DKIM) — fall through to the normal pipeline
+  }
+
+  // Phishy's own correspondence (a reply or automatic reply to one of its
+  // reports) is not a report. The subject alone never decides this: see
+  // own.report.ts for what is analyzed anyway.
+  const db = services.intelligenceDb;
+  let ownReport: boolean;
+  try {
+    ownReport = await isOwnReportTraffic(emailData, msg, {
+      senderEmail: config.notification.senderEmail,
+      securityTeam: config.notification.securityTeamDistribution,
+      ...(db
+        ? {
+            sentReport: async (id: string): Promise<boolean> =>
+              (await db.findAnalysisIdByReportMessageId(id)) !== null,
+          }
+        : {}),
+    });
+  } catch (error) {
+    // The lookup failed: analyze rather than skip
+    logger.warn('Could not check whether this is a reply to a Phishy report; analyzing it', {
+      error: error instanceof Error ? error.name : 'unknown',
+    });
+    ownReport = false;
+  }
+  if (ownReport) {
+    logger.info('Skipping analysis email');
+    return { status: 'skipped', reason: 'already_analyzed' };
   }
 
   // Validate email for processing
@@ -1183,35 +1212,10 @@ function checkForDuplicate(
   return null;
 }
 
-/** Is this From address one of the configured security team's? (For skipping only, never for authorization.) */
-function isSecurityTeamSender(from: string | undefined, config: PhishyConfig): boolean {
-  const address = extractEmailAddress(from ?? '')?.toLowerCase();
-  return (
-    !!address &&
-    config.notification.securityTeamDistribution.some(
-      member => member.trim().toLowerCase() === address
-    )
-  );
-}
-
 /**
  * Validate email for processing
  */
 function validateEmail(emailData: ExtractedEmailData, config: PhishyConfig): ProcessingResult {
-  // Skip if already an analysis email
-  if (
-    emailData.subject?.includes('Phishy Analysis') ||
-    emailData.subject?.includes('Phishing Analysis') ||
-    // A reply in an incident thread. Only the security team receives those
-    // emails, so the skip applies only to its members: anyone else's message
-    // with this subject (a forwarded email that imitates it) is analyzed.
-    (emailData.subject?.includes('[Phishy incident ') === true &&
-      isSecurityTeamSender(emailData.from_email, config))
-  ) {
-    logger.info('Skipping analysis email');
-    return { status: 'skipped', reason: 'already_analyzed' };
-  }
-
   // Check if from trusted source
   if (!isFromTrustedSource(emailData.from_email, config)) {
     // Not a reporter: whoever sent this is outside the trusted domains
