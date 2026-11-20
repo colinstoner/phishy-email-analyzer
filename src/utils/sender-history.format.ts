@@ -9,7 +9,19 @@
  * (CLAUDE.md invariant 5): it is never presented as exact.
  */
 
-import { BoundedCount, SenderHistoryFacts } from '../types';
+import { BoundedCount, SenderHistoryFacts, SenderRelationshipClass } from '../types';
+
+/**
+ * The classification in plain words, for an email a person reads. The prompt
+ * and the analysis report keep the raw value (the prompt's guidance names it).
+ */
+export const SENDER_RELATIONSHIP_LABEL: Record<SenderRelationshipClass, string> = {
+  no_history: 'No history: no mail to or from this address in the lookback period',
+  limited_history: 'Limited history: some mail from this address, not enough to be established',
+  established: 'Established contact: regular mail from this address before',
+  established_with_anomalous_fanout:
+    'Established contact, unusual fan-out: a known sender suddenly mailing many people it never wrote to',
+};
 
 function plural(count: number, singular: string, pluralForm = `${singular}s`): string {
   return count === 1 ? singular : pluralForm;
@@ -109,7 +121,10 @@ export function formatSenderHistoryLines(
         ? 'how many of them are new to this address could not be determined (history was cut short)'
         : `${burst.newRecipients.atLeast ? 'at least ' : ''}${burst.newRecipients.count} of them had no mail from this address in the history period`;
   }
-  lines.push([`Burst window (the last ${facts.burstWindowHours} hours)`, burstText]);
+  lines.push([
+    `Burst window (the last ${facts.burstWindowHours} ${plural(facts.burstWindowHours, 'hour')})`,
+    burstText,
+  ]);
 
   const { sameSubject } = burst;
   if (sameSubject.recipients.count > 0) {

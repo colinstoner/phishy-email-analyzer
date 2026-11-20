@@ -93,6 +93,16 @@ describe('report experience', () => {
     expect(prominent).toContain('>92</strong><span');
     expect(prominent).toContain('/100</span>');
     expect(prominent).toContain('critical risk');
+    // "safe" is a level of its own, never "safe risk"
+    const safe = riskScoreHtml(
+      { ...risk, verdict: 'legitimate', riskScore: 6, riskLevel: 'safe' },
+      { prominent: true }
+    );
+    expect(safe).toContain('&nbsp;&nbsp;safe</span>');
+    expect(safe).not.toContain('safe risk');
+    expect(riskScoreHtml({ ...risk, riskLevel: 'low' }, { prominent: true })).toContain(
+      '&nbsp;&nbsp;low risk</span>'
+    );
     expect(prominent).toContain('Confidence: <strong>Very High</strong>');
     expect(riskScoreHtml({ ...risk, verdict: 'undetermined' }, { prominent: true })).toContain(
       'Risk score: <strong>not assessed</strong>'

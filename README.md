@@ -36,7 +36,14 @@ Every reporter gets a plain-language reply: a tone-colored verdict, a 0–100 ri
 | ![Business email compromise — critical](examples/report-bec.png) | ![Credential phishing — critical](examples/report-phishing.png) |
 | ![Suspicious — caution](examples/report-suspicious.png) | ![Legitimate — cleared](examples/report-legitimate.png) |
 
-Screenshots are generated from the real report template — `npm run build && npm i --no-save --no-package-lock puppeteer-core && node scripts/render-report-samples.js`.
+With campaign response on, an outbreak becomes an incident: the security team gets one email to decide from, and the people who received the attack get a short warning once the team approves it.
+
+| | |
+|---|---|
+| ![Incident email to the security team, two actions waiting for approval](examples/incident-email.png) | ![Warning to an employee who received the phishing email](examples/campaign-warning.png) |
+| **Incident email:** reach, what Phishy did, and the exact reply line that approves each action. | **Employee warning:** which email, what to do, and what to do if you already clicked. |
+
+Screenshots are rendered from the real email templates with invented data; see [examples/README.md](examples/README.md) to regenerate them.
 
 ## Optional layers
 

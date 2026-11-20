@@ -213,6 +213,20 @@ describe('isMaterialGrowth', () => {
 });
 
 describe('runFanoutScan', () => {
+  it("writes the alert's times in the campaign-response time zone when one is set", async () => {
+    const base = config();
+    await current.run({
+      config: {
+        ...base,
+        campaignResponse: { timeZone: 'America/Chicago' } as NonNullable<
+          FanoutJobDeps['config']['campaignResponse']
+        >,
+      },
+    });
+    const text = current.sendEmail.mock.calls[0][3] as string;
+    expect(text).toMatch(/First seen: \w{3}, \d{1,2} \w{3} \d{4}, \d{2}:\d{2} GMT-6/);
+  });
+
   it('alerts the security team, and nobody else, about a takeover wave', async () => {
     const summary = await current.run();
 
