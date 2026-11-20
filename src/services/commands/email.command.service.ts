@@ -81,6 +81,21 @@ export class EmailCommandService {
   }
 
   /**
+   * Does the email itself say it is about one of Phishy's reports: a report
+   * or incident subject, an Analysis ID line, or an action reference? (Reply
+   * headers are not counted: forwards carry them too.)
+   */
+  private addressesPhishy(msg: EmailMessage, emailData: ExtractedEmailData): boolean {
+    const subject = emailData.subject.toLowerCase();
+    return (
+      subject.includes('phishing analysis') ||
+      subject.includes('[phishy incident ') ||
+      ANALYSIS_ID_PATTERN.test(msg.text) ||
+      (!!this.responder && REFERENCE_PATTERN.test(msg.text))
+    );
+  }
+
+  /**
    * Process a candidate command email end-to-end.
    */
   async process(msg: EmailMessage, emailData: ExtractedEmailData): Promise<CommandResult> {
@@ -108,6 +123,16 @@ export class EmailCommandService {
 
     const analysisId = await this.matchAnalysis(msg);
     if (!analysisId) {
+      // Reply headers alone do not make a command: a forwarded email carries
+      // In-Reply-To / References from the thread it came from. A security
+      // team member reporting a suspicious email like anyone else must get
+      // an analysis, so without an explicit sign of a command (a report or
+      // incident subject, an Analysis ID, an action reference) the email goes
+      // on to the normal pipeline.
+      if (!this.addressesPhishy(msg, emailData)) {
+        logger.info('Security-team email is not a command; analyzing it as a report', { sender });
+        return { handled: false };
+      }
       logger.info('Security-team email did not match any analysis', { sender });
       await this.reply(
         emailData,

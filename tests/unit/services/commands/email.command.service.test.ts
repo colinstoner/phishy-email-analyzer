@@ -190,6 +190,23 @@ describe('EmailCommandService', () => {
       );
     });
 
+    it('hands a forwarded email back for analysis when nothing marks it as a command', async () => {
+      const { db, notifier, service } = makeFakes();
+      db.findAnalysisIdByReportMessageId.mockResolvedValue(null);
+      // A forward carries the thread's reply headers but is not about a Phishy report
+      const msg = makeMsg({
+        subject: 'FW: Updated remittance details',
+        text: 'Is this real?',
+        headers: { 'In-Reply-To': '<thread-1@mail.example.net>' },
+      });
+
+      const result = await service.process(msg, makeEmailData(msg));
+
+      expect(result).toEqual({ handled: false });
+      expect(notifier.sendEmail).not.toHaveBeenCalled();
+      expect(db.recordFeedback).not.toHaveBeenCalled();
+    });
+
     it('replies with guidance when no analysis can be matched', async () => {
       const { db, notifier, service } = makeFakes();
       db.findAnalysisIdByReportMessageId.mockResolvedValue(null);
