@@ -2,7 +2,7 @@
 
 `npm run graph:probe` asks **your own** Microsoft 365 tenant which Microsoft Graph calls work there, with which permissions and licences. You run it locally, before any Phishy feature depends on those calls.
 
-It exists because Microsoft's reference documentation leaves several behaviours unstated ([the list is below](#what-microsofts-documentation-leaves-unstated)). Features such as fetching a reporter's original message, or finding who else received an email, are built on the answers. The probe gets the answers from your tenant instead of guessing.
+It exists because Microsoft's reference documentation leaves several behaviours unstated ([the list is below](#what-microsofts-documentation-leaves-unstated)). Phishy's Graph features (fetching a reporter's original message, the sender-relationship check, finding who else received an email, the fan-out scan) are built on the answers. The probe gets the answers from your tenant instead of guessing.
 
 ## It is read-only
 
@@ -198,4 +198,4 @@ Results from different tenants are what turn "not stated" into "known". If you o
 
 ## The operations library
 
-The probe calls the same typed, read-only functions pipeline features use (`src/services/graph/mail.operations.ts`, `trace.operations.ts`, `directory.operations.ts`). They follow the rules in [ARCHITECTURE.md](ARCHITECTURE.md#microsoft-graph-optional-foundation): fixed endpoints, every value from data escaped by the request builder, bounded results that report truncation, and metadata only for lookups across mailboxes. The one pipeline feature that calls them today is the [original-message lookup](ARCHITECTURE.md#original-message-lookup), which is off by default.
+The probe calls the same typed, read-only functions pipeline features use (`src/services/graph/mail.operations.ts`, `trace.operations.ts`, `directory.operations.ts`). They follow the rules in [ARCHITECTURE.md](ARCHITECTURE.md#microsoft-graph-optional-foundation): fixed endpoints, every value from data escaped by the request builder, bounded results that report truncation, and metadata only for lookups across mailboxes. The pipeline features that call them — the [original-message lookup](ARCHITECTURE.md#original-message-lookup), the [sender-relationship check](ARCHITECTURE.md#sender-relationship-check), [blast radius](ARCHITECTURE.md#blast-radius-optional) and the [scheduled fan-out scan](ARCHITECTURE.md#scheduled-fan-out-scan) — are each off by default.

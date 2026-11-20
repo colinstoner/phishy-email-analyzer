@@ -1,6 +1,6 @@
 # Architecture
 
-Phishy is an AWS Lambda that receives employee-forwarded emails via SES, analyzes them with Claude, and replies with a security report. Everything else — threat intelligence, campaign detection, the email command channel, agentic analysis, Microsoft Graph access — layers on top of that loop and is individually optional.
+Phishy is an AWS Lambda that receives employee-forwarded emails via SES, analyzes them with Claude, and replies with a security report. Everything else — threat intelligence, campaign detection and campaign response, the email command channel, agentic analysis, attachment analysis, Outlook Report-button intake, Microsoft Graph reads and the scheduled fan-out scan — layers on top of that loop and is individually optional (see [Feature flags](#feature-flags)).
 
 ```
                           ┌─────────────────────────────────────────────┐
@@ -8,15 +8,19 @@ Phishy is an AWS Lambda that receives employee-forwarded emails via SES, analyze
         │                 │                                             │
         ▼                 │  EmailParserService                         │
   SES receipt rule ──────▶│   raw MIME → labeled, canonicalized facts   │
-   (S3 action first,      │        │                                    │
-    then Lambda)          │        ▼                                    │
-        │                 │  command? ──yes──▶ EmailCommandService      │
-        ▼                 │        │            (security team only)    │
-   S3 (raw email)         │        ▼                                    │
+   (S3 action first,      │   (+ attachment analysis, optional)         │
+    then Lambda)          │        │                                    │
+        │                 │        ▼                                    │
+        ▼                 │  Phishy's own mail? ──yes──▶ skip           │
+   S3 (raw email)         │  command / approval? ──yes──▶               │
+                          │        │   EmailCommandService (security    │
+                          │        │   team, SPF/DKIM PASS only)        │
+                          │        ▼                                    │
                           │  campaign cache? ──hit──▶ reuse verdict     │
                           │        │                                    │
                           │        ▼                                    │
-                          │  original-message lookup (Graph, optional)  │
+                          │  Graph reads before analysis (optional):    │
+                          │   original-message lookup, sender history   │
                           │        │                                    │
                           │        ▼                                    │
                           │  AnalysisService                            │
@@ -26,12 +30,16 @@ Phishy is an AWS Lambda that receives employee-forwarded emails via SES, analyze
                           │           refusal-fallback model            │
                           │        │                                    │
                           │        ▼                                    │
-                          │  intelligence DB writes · IOC extraction    │
-                          │  campaign tracking · EMF cost metrics       │
+                          │  risk fusion · intelligence DB writes ·     │
+                          │  IOC extraction · campaign tracking · EMF   │
                           │        │                                    │
                           │        ▼                                    │
                           │  SESNotifier → report to the reporter       │
+                          │   (+ blast radius → security team's copy)   │
+                          │   (+ campaign response: incident, warning)  │
                           └─────────────────────────────────────────────┘
+
+ EventBridge schedule ──▶ same function, scheduled path ──▶ fan-out scan (optional, no model)
 ```
 
 ## The parser is the trust boundary
@@ -87,7 +95,7 @@ Three principals, three levels of trust:
 | Security team | correct verdicts by replying to reports (commands); approve campaign-response actions | membership in `SECURITY_TEAM_DISTRIBUTION` **and** SES SPF or DKIM `PASS` on the reply |
 | The suspicious email | nothing | it is CLAIMED data, everywhere |
 
-**Who Phishy emails** (invariant 4, extended). Phishy sends email to exactly four kinds of address: the reporter (`originalForwarder`, which must be extractable and on a safe domain), the operator-configured security team and distribution list, and, with [campaign response](#campaign-response-optional), the recipients its own blast-radius lookup found and the campaign's reporters. That last source is new and gets the same rule: every address must be a plain address on a configured safe domain, checked when the warning's scope is computed and again immediately before each email is sent (`isSafeRecipient`, `services/response/scope.ts`). An address that fails is counted and skipped, never emailed. No address is ever taken from the suspicious email's content.
+**Who Phishy emails** (invariants 4 and 9). Phishy sends email to exactly three kinds of address: the reporter (`originalForwarder`, which must be extractable and on a safe domain), the operator-configured security team and distribution list, and, with [campaign response](#campaign-response-optional), the recipients its own blast-radius lookup found (the targeted warning, and the dormant removal notice). That last source gets the same rule: every address must be a plain address on a configured safe domain, checked when the warning's scope is computed and again immediately before each email is sent (`isSafeRecipient`, `services/response/scope.ts`). An address that fails is counted and skipped, never emailed. Reporters are never warned (they already have their report). No address is ever taken from the suspicious email's content.
 
 The SES verdicts describe the hop that delivered the reply to Phishy — which is exactly the hop that needs authenticating for commands. They are never presented as authenticating the *suspicious* sender (that email's own Authentication-Results header, when preserved by forward-as-attachment, is surfaced as a CLAIMED/forwarded header instead; so are headers retrieved by the original-message lookup).
 
@@ -106,8 +114,14 @@ The SES verdicts describe the hop that delivered the reply to Phishy — which i
 | `IntelligenceDatabaseService` | `services/intelligence/database.service.ts` | PostgreSQL: analyses, IOCs, campaigns, feedback, usage |
 | `CampaignAlertService` | `services/intelligence/campaign.service.ts` | flood detection → employee alerts |
 | `CampaignResponseService` | `services/response/campaign.response.service.ts` | campaign response (optional): incident email, targeted warning, approved actions, dry-run removal |
-| `SESNotifier` | `services/notification/ses.notifier.ts` | outbound reports and replies |
+| approval parsing | `services/commands/response.commands.ts` | exact-form `APPROVE WARNING` / `APPROVE REMOVAL` lines from the reply's own new text |
+| `SESNotifier` | `services/notification/ses.notifier.ts` | outbound reports, threaded incident updates (`SendRawEmail`) and replies |
 | `AttachmentAnalyzer` | `services/attachments/` | optional static inspection of attachment bytes: real type, per-format facts, bounded extracted text |
+| own-correspondence check | `handlers/own.report.ts` | Phishy's own reports and replies to them are skipped; a forward of someone else's email is analyzed |
+| scheduled handler | `handlers/scheduled.handler.ts`, `scheduled.event.ts` | strict constant-payload dispatch for scheduled tasks (the fan-out scan) |
+| Graph services | `services/graph/` | optional Graph reads and the broker client (see [Microsoft Graph](#microsoft-graph-optional-foundation)) |
+| fan-out job | `services/hunting/` | the scheduled scan's job and its database state (migration 005) |
+| email templates | `templates/` | every email Phishy sends, on the shared blocks in `layout.ts` |
 
 ## When the model does not produce a verdict
 
@@ -125,14 +139,14 @@ The agentic conversation is **append-only**: the system prompt and tool list are
 
 ## Data flow decisions worth knowing
 
-- **Campaign signature** (`computeCampaignSignature`) is the shared grouping key: sender domain + subject with numbers normalized out. Flood alerts, the verdict cache, and campaign-wide feedback all use it. One security-team reply resolves a whole campaign.
+- **Campaign signature** (`computeCampaignSignature`) is the shared grouping key: the reporting employee's domain (the `From` of the forward Phishy received, not the attacker's) + the subject with prefixes removed and numbers normalized out. Flood alerts, the verdict cache, campaign-wide feedback and campaign response all use it. One security-team reply resolves a whole campaign.
 - **IOC provenance**: indicators carry `metadata.sourceAnalysisId`, which is how verdict feedback adjusts the confidence of exactly the indicators an analysis produced, plus `provenance`/`sourceVerdict`/`role`.
 - **Indicators are stored from the model's verdict, never the fused score** (`src/services/intelligence/indicator.policy.ts`). Only a fresh model verdict of `bec`/`phishing`/`malware_delivery`, or a security-team confirmation, stores an email's indicators; a score raised by intelligence never does, so indicators cannot breed indicators. `times_seen` counts distinct reported emails (keyed by campaign signature).
 - **Strong vs weak matches.** In risk fusion only a *strong* match — an exact URL, email address, or sender/payload domain, stored from a model-malicious or security-confirmed report, unexpired — gets the indicator floor (`60 + timesSeen × 8`, cap 95). Everything else (infrastructure such as shared click trackers, legacy rows without provenance, IPs, hashes, expired rows) is *weak*: disclosed as a reason, able to lift a suspicious/unassessed email to at most 40, never able to change a benign verdict or make an email phishing.
 - **Verdict, score and flag agree.** When a strong match or an active campaign raises an email the model called legitimate/graymail/spam, the verdict becomes `suspicious` and a reason says why. The fused score is then clamped into the final verdict's band (`VERDICT_SCORE_BANDS`: legitimate 0–10, graymail/spam 10–29, suspicious 30–79, malicious 55–100), and `isPhishing` follows from verdict and score together: malicious always, suspicious at ≥ 55, benign never. Security-team rulings still return first and are not banded.
 - **Confidence is the model's certainty**, `assessment.verdictConfidence` mapped to the five labels — not a label derived from the risk score. When a security-team ruling or a strong signal decided the outcome, the report says so instead of showing a number (`RiskDecision.confidenceBasis`).
 - **Verdict cache rows** are stored with `ai_provider='cache'` and never serve as cache sources themselves (unless they carry feedback), so campaigns are re-analyzed when the original analysis ages out.
-- **Graceful migration degradation**: the app auto-creates only the 001 baseline schema. Later migrations (002 feedback, 003 campaign signature) are applied manually; every query that needs them catches `42P01`/`42703` and degrades with an instructive log line instead of failing.
+- **Graceful migration degradation**: the app auto-creates only the 001 baseline schema. Later migrations (002 feedback, 003 campaign signature, 004 structured verdict, 005 fan-out scan, 006 campaign response) are applied manually; every query that needs them catches `42P01`/`42703` and degrades with an instructive log line instead of failing.
 - **Cost metrics are EMF**: structured stdout lines CloudWatch converts to metrics. No SDK calls, no IAM, works without the database.
 
 ## Microsoft Graph (optional foundation)
@@ -159,7 +173,7 @@ Trust rules (CLAUDE.md invariant 6):
 - **Code-driven, never model-driven.** Graph is not an agentic tool. Requests go to fixed endpoints chosen by Phishy's code; the model never authors a URL, a filter or a query. Values that originate in a suspicious email (a message ID, a subject) are hostile and enter a request only through `graphPath` (percent-encoded as a single segment), `odataFilter` (escaped string literal) or `kqlSearch` (reduced to plain lower-case words, since mail `$search` has no documented escape).
 - **The client cannot be steered off Graph.** The base URL is fixed to `https://graph.microsoft.com/v1.0` and callers cannot pass a URL. `@odata.nextLink` is followed only on that origin and API version; redirects are refused; paging is capped by the caller and reports truncation; response sizes and time are bounded; throttling (`Retry-After`) is honoured within a bounded wait and attempt count.
 - **Mailbox content is hostile data.** Response bodies are never logged. Content read from any mailbox other than the reporter's own is metadata-only toward the model and logs.
-- **Reads and writes are separate identities.** A client holds exactly one credential. Configuration has a `read` app registration today; a `write` registration, when one exists, is a different app with its own certificate and its own client, so a read path can never obtain a write token. Any write to the tenant additionally requires security-team approval through the authenticated command channel.
+- **Reads and writes are separate identities** (invariants 6 and 7). A client holds exactly one credential. Configuration has a `read` app registration today; a `write` registration, when one exists, is a different app with its own certificate and its own client, so a read path can never obtain a write token. Any write to the tenant additionally requires security-team approval through the authenticated command channel.
 - **Secrets stay secret.** The private key, client assertion and access token never appear in logs or error messages; errors carry only status, Graph error code, request id and a path template with data segments blanked.
 
 ### Graph broker
@@ -173,7 +187,7 @@ The main function parses hostile email, and in a typical deployment it runs in a
 │  parses hostile email                     │        │  holds the read certificate   │
 │  decides: whose mailbox, is the sender    │ Invoke │  never sees a raw email       │
 │   external, how the message is keyed,     │───────▶│  validates the request        │
-│   how much time there is                  │ typed  │  runs one of three lookups    │──▶ login.microsoftonline.com
+│   how much time there is                  │ typed  │  runs one of four operations  │──▶ login.microsoftonline.com
 │  NO Graph credential, client or token     │ request│   (existing feature code:     │──▶ graph.microsoft.com
 │  validates + re-bounds the answer         │◀───────│   graphPath / odataFilter)    │
 │  emits the feature metric                 │ typed  │  rate limits and caches       │
@@ -207,7 +221,7 @@ There is no path, URL, filter, query or "call Graph" operation, and no field is 
 
 **Direction (not built).** Two things this design leaves room for and deliberately does not include:
 
-- *A write tier.* Any write to the tenant (quarantining or removing a message, for example) will be a **separate** broker function with its **own** app registration and certificate, so that the read broker can never obtain a write token (invariant 6), and each write will require security-team approval through the authenticated command channel (invariant 2). It will not be an operation added to this broker. Campaign response already has the approval flow, action model and audit trail such a tier needs, and a dry-run executor in its place ([below](#the-response-action-model)); the write tier itself is not built.
+- *A write tier.* Any write to the tenant (quarantining or removing a message, for example) will be a **separate** broker function with its **own** app registration and certificate, so that the read broker can never obtain a write token (invariants 6 and 7), and each write will require security-team approval through the authenticated command channel (invariant 2). It will not be an operation added to this broker. Campaign response already has the approval flow, action model and audit trail such a tier needs, and a dry-run executor in its place ([below](#the-response-action-model)); the write tier itself is not built.
 - *Model-driven hunting.* A later threat-hunting agent may be allowed to call these same typed read operations. It will never be given raw Graph: no path, filter or query authored by a model. That is why the interface is typed operations today, while the only caller is code. Until then, Graph remains code-driven and is not an agentic tool.
 
 Configuration and what the broker function needs to be deployed with are in [CONFIGURATION.md](CONFIGURATION.md#graph-broker-optional); the SAM template deploys Graph in broker mode (`GraphEnabled=true`), described with its cost in [AWS.md](../AWS.md#optional-microsoft-graph-the-graph-broker-function).
@@ -384,11 +398,11 @@ An action (`services/response/response.types.ts`, table `response_actions`) has 
 
 **Executors** (`services/response/executors.ts`). `SesWarningExecutor` sends the warning, and the removal notice. `DryRunRemovalExecutor` is the only removal executor: on approval it records what a removal *would* do (unread in the inbox, read in the inbox, in Junk, already in Deleted Items, elsewhere; no longer matched; new since approval) and replies to the approver with that result and the statement that no mailbox was changed because the write tier is not installed. **There is no Graph write call anywhere in Phishy.**
 
-**The write-tier seam (not built).** A real removal will be a separate module implementing `RemovalExecutor` with `changesMailboxes: true`, selected in `createRemovalExecutor`. It will not call Graph from the main function or through the read broker. It will invoke a **second broker function**, deployed separately, holding its **own** Entra app registration and certificate with `Mail.ReadWrite` (application), with one typed operation that takes `{ mailboxId, messageIds[] }` exactly as the approved scope names them, re-reads each message by ID, refuses any whose Internet Message-ID does not match the campaign's, moves each to Deleted Items (or Recoverable Items) rather than hard-deleting, and reports per-message outcomes. The read broker and the main function never hold that credential (invariant 6), and every call requires an approved, unexpired action (invariant 2). It returns `dryRun: false` and `removed`: per mailbox (by the approved scope's mailbox ID), the copies actually moved. `CampaignResponseService.sendRemovalNotices` then emails each such mailbox's address *as the approved scope recorded it* (never an address the executor supplies), after the safe-domain check, skipping anyone already sent a notice for the campaign and anyone over the cap; who was notified is stored in the result (`notified`) and counted in the `action_executed` audit row. The action model, scopes, caps, audit, approval flow and removal notice above are already what it needs; only the executor is missing.
+**The write-tier seam (not built).** A real removal will be a separate module implementing `RemovalExecutor` with `changesMailboxes: true`, selected in `createRemovalExecutor`. It will not call Graph from the main function or through the read broker. It will invoke a **second broker function**, deployed separately, holding its **own** Entra app registration and certificate with `Mail.ReadWrite` (application), with one typed operation that takes `{ mailboxId, messageIds[] }` exactly as the approved scope names them, re-reads each message by ID, refuses any whose Internet Message-ID does not match the campaign's, moves each to Deleted Items (or Recoverable Items) rather than hard-deleting, and reports per-message outcomes. The read broker and the main function never hold that credential (invariants 6 and 7), and every call requires an approved, unexpired action (invariant 2). It returns `dryRun: false` and `removed`: per mailbox (by the approved scope's mailbox ID), the copies actually moved. `CampaignResponseService.sendRemovalNotices` then emails each such mailbox's address *as the approved scope recorded it* (never an address the executor supplies), after the safe-domain check, skipping anyone already sent a notice for the campaign and anyone over the cap; who was notified is stored in the result (`notified`) and counted in the `action_executed` audit row. The action model, scopes, caps, audit, approval flow and removal notice above are already what it needs; only the executor is missing.
 
 ### Approvals over the command channel
 
-Approvals use the existing channel and its authentication unchanged: the sender must be on the security team **and** the reply must carry SES SPF or DKIM `PASS` (`EmailCommandService.passesAuthentication`); `CampaignResponseService.handleApprovals` checks membership again. Beyond that:
+Approvals (CLAUDE.md invariant 8) use the existing channel and its authentication unchanged (invariant 2): the sender must be on the security team **and** the reply must carry SES SPF or DKIM `PASS` (`EmailCommandService.passesAuthentication`); `CampaignResponseService.handleApprovals` checks membership again. Beyond that:
 
 - **Exact form, never a model.** Free-text verdicts may be read by the model when agentic mode is on; approvals of actions never are. Only a line consisting of `APPROVE WARNING <ref>` or `APPROVE REMOVAL <ref>` (case and spacing aside) is an approval (`services/commands/response.commands.ts`). A line that starts like an approval but is not exactly one gets the exact forms back and approves nothing. One short form exists, for the warning only: a line that is exactly `APPROVE WARNING`. It carries no reference, so it is bound to what the approver was looking at: each incident email's outbound message ID is recorded with the actions it proposed (audit event `incident_email_sent`), the reply's `In-Reply-To` (never `References`) must match one, that email must have proposed exactly one warning, and the approval then goes through the normal path by that proposal's own reference, so a replaced, expired or completed proposal is refused exactly as a stale reference is. A reply to an older email can never approve a newer, wider scope.
 - **From the reply's own new text only.** Lines are taken from `extractFreshText` (quoted history and everything after a reply separator removed), so a quoted approval, or hostile text quoted from the suspicious email, is never read. Phishy's own emails print each command after other text on the same line (`Reply with this line:  APPROVE …`), so even a quote Phishy fails to recognize cannot match.
@@ -533,7 +547,7 @@ Everything optional is off by default and independently enableable:
 | `PHISHY_CAMPAIGN_CACHE_ENABLED` | verdict reuse | intelligence DB + migration 003 |
 | `PHISHY_EMAIL_COMMANDS_ENABLED` | security-team replies | intelligence DB + migration 002 |
 | `PHISHY_AGENTIC_ENABLED` | tool-loop analysis + AI command parsing | nothing (tools appear as their backends do) |
-| `PHISHY_GRAPH_ENABLED` | Microsoft Graph access (foundation — changes nothing on its own; the three features below have their own flags) | Entra app registration with a certificate; outbound HTTPS to Microsoft |
+| `PHISHY_GRAPH_ENABLED` | Microsoft Graph access (foundation — changes nothing on its own; the features below have their own flags) | Entra app registration with a certificate; outbound HTTPS to Microsoft |
 | `PHISHY_GRAPH_MODE` | `direct` (default): the main function calls Graph. `broker`: it invokes the [Graph broker](#graph-broker) function and holds no Graph credential | for `broker`: the broker function, `PHISHY_GRAPH_BROKER_FUNCTION`, and `lambda:InvokeFunction` on it |
 | `PHISHY_GRAPH_ORIGINAL_FETCH_ENABLED` | read the original message's real headers from the reporter's mailbox | `PHISHY_GRAPH_ENABLED`; `Mail.Read` on reporters' mailboxes |
 | `PHISHY_GRAPH_BLAST_RADIUS_ENABLED` | who else received a malicious email (security-team copy only) | `PHISHY_GRAPH_ENABLED` + read permissions listed in [CONFIGURATION.md](CONFIGURATION.md#blast-radius-optional) |

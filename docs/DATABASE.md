@@ -17,7 +17,20 @@ psql "$DATABASE_URL" -f migrations/001_initial_schema.sql
 
 **Auto-initialization:** for zero-setup convenience, the application also creates the baseline schema (migration 001, exactly) on first connection. This means existing deployments are already at the 001 baseline — running 001 against them is a safe no-op, since every statement is idempotent.
 
-**Policy going forward:** the application only ever auto-creates the *baseline*. Any future schema change ships as a new numbered migration (`002_*.sql`, ...) that operators apply manually before upgrading the Lambda. Each migration must be idempotent or guarded so re-running is safe. The changelog will call out releases that require a migration.
+**Policy going forward:** the application only ever auto-creates the *baseline*. Every later schema change ships as a new numbered migration that operators apply manually before enabling the feature that needs it. Each migration is idempotent or guarded, so re-running is safe, and code that needs a missing table or column catches `42P01` / `42703` and degrades with a log line naming the file. The changelog calls out releases that require a migration.
+
+| Migration | Adds | Needed for |
+|---|---|---|
+| `001_initial_schema.sql` | the baseline tables below | everything (created automatically) |
+| `002_analysis_feedback.sql` | `analysis_feedback`, `email_analyses.report_message_id` | email commands |
+| `003_campaign_verdict_cache.sql` | `email_analyses.campaign_signature` | the campaign verdict cache, campaign-wide feedback, a `false positive` reply closing a campaign-response incident |
+| `004_structured_verdict.sql` | `email_analyses.verdict`, `email_analyses.risk_score` | queryable verdicts (without it the analysis is stored without these columns and a warning is logged) |
+| `005_fanout_scan.sql` | `fanout_scan_state`, `fanout_scan_waves` | the scheduled fan-out scan |
+| `006_campaign_response.sql` | `campaign_incidents`, `response_actions`, `response_action_audit` | campaign response |
+
+```bash
+for f in migrations/00[2-6]_*.sql; do psql "$DATABASE_URL" -f "$f"; done   # all of them, in order
+```
 
 ## Tables
 
@@ -42,13 +55,16 @@ Indicators are written only for a model-malicious verdict from a fresh analysis 
 No migration: all of this lives in the existing `metadata` column, and rows without it are read as legacy (weak) indicators.
 
 ### `campaigns`
-Flood/campaign detection. Emails are grouped by a 16-char SHA-256 signature of `sender_domain + normalized subject` (numbers and punctuation stripped, so "Invoice #4821" and "Invoice #4822" match). Tracks detection count, unique recipients, and escalating risk level. An employee alert fires when a campaign reaches ≥3 detections across ≥2 recipients within 4 hours at high/critical risk, throttled to once per 24h via `alert_sent_at`. With campaign response on, `alert_sent_at` is set when an incident is opened at that threshold, or, for an incident opened earlier on reach, when a later report reaches it.
+Flood/campaign detection. Emails are grouped by a 16-char SHA-256 signature of `sender_domain + normalized subject` (prefixes, numbers and punctuation stripped, so "Invoice #4821" and "Invoice #4822" match). `sender_domain` is the domain of the address the report came from, that is the reporting employee's, not the attacker's; `unique_recipients` likewise holds the reporters. Only reports flagged as phishing are tracked. Tracks detection count, unique recipients, and escalating risk level. An employee alert fires when a campaign reaches ≥3 detections across ≥2 recipients within 4 hours at high/critical risk, throttled to once per 24h via `alert_sent_at`. With campaign response on, `alert_sent_at` is set when an incident is opened at that threshold, or, for an incident opened earlier on reach, when a later report reaches it.
 
 ### `detected_patterns`
-Recurring patterns confirmed across multiple analyses, keyed by `(pattern_type, pattern_name)` with match counting.
+Recurring patterns across analyses, keyed by `(pattern_type, pattern_name)` with match counting. Written only by `PatternDetectorService`, which the pipeline does not currently call, so it normally stays empty.
 
 ### `ai_usage`
 Per-request token counts and estimated cost, optionally linked to the analysis row (`ON DELETE SET NULL`). Powers the cost-analytics stats (totals, 24h/7d windows, per-model breakdown).
+
+### `email_analyses.verdict`, `risk_score` *(migration 004 — not auto-created)*
+The categorical verdict (`bec`, `phishing`, `malware_delivery`, `spam`, `graymail`, `suspicious`, `legitimate`) and the 0–100 risk score as queryable columns, indexed by verdict and time. The full assessment is in `analysis_result` either way.
 
 ### `email_analyses.campaign_signature` *(migration 003 — not auto-created)*
 Tags each analysis with its flood-detection campaign signature, powering the **campaign verdict cache**: a report matching a recently analyzed campaign (within `PHISHY_CAMPAIGN_CACHE_TTL_HOURS`) reuses that verdict instead of triggering a new AI analysis. Cache lookups prefer an analysis with a security-team verdict (`analysis_feedback`) over the most recent raw analysis, and verdict feedback adjusts indicators sourced from *every* analysis sharing the signature — one reply resolves the whole campaign. Cached reports are stored with `ai_provider = 'cache'` and never serve as cache sources themselves (unless they carry feedback), so a campaign is re-analyzed once the original analysis ages out. Apply `migrations/003_campaign_verdict_cache.sql` before setting `PHISHY_CAMPAIGN_CACHE_ENABLED=true`.
