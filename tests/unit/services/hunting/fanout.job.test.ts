@@ -401,7 +401,10 @@ describe('runFanoutScan', () => {
     current.sendEmail.mockResolvedValueOnce({ success: false, error: 'Throttling' });
     const failed = await current.run();
     expect(failed.alertsSent).toBe(0);
+    expect(failed.outcome).toBe('error');
     expect(current.db.waves).toHaveLength(0);
+    // The window is held, so the wave is read again however long the retry takes
+    expect(current.db.state?.last_window_end).toBeNull();
 
     jest.setSystemTime(NOW + 5 * MINUTE);
     const retried = await current.run();
