@@ -277,6 +277,7 @@ export class AnthropicProvider implements AIProvider {
             // Handle specific error codes
             if (axiosError.response?.status === 529) {
               logger.warn('Anthropic API is overloaded');
+              // eslint-disable-next-line preserve-caught-error -- the AxiosError carries request headers (API key) and the email-derived body; it is deliberately not attached as a cause
               throw new Error('Anthropic API is currently overloaded (status 529)');
             }
 
@@ -290,11 +291,13 @@ export class AnthropicProvider implements AIProvider {
             }
 
             if (axiosError.response?.status === 400) {
+              // eslint-disable-next-line preserve-caught-error -- the AxiosError carries request headers (API key) and the email-derived body; it is deliberately not attached as a cause
               throw new Error(
                 `Anthropic API bad request: ${JSON.stringify(axiosError.response.data)}`
               );
             }
 
+            // eslint-disable-next-line preserve-caught-error -- the AxiosError carries request headers (API key) and the email-derived body; it is deliberately not attached as a cause
             throw new Error(
               `Anthropic API error: ${axiosError.response?.status ?? 'unknown'} - ${axiosError.message}`
             );

@@ -328,7 +328,7 @@ export class GraphClient {
     let url: URL;
     if (options.cursor) {
       const held = pageCursors.get(options.cursor);
-      if (!held || held.pathTemplate !== path.template) {
+      if (held?.pathTemplate !== path.template) {
         throw this.requestError('GET', path.template, 'page cursor does not belong to this path');
       }
       url = held.url;
