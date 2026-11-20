@@ -143,10 +143,13 @@ function senderParts(from: string | undefined): { address?: string; name?: strin
     return {};
   }
   const address = from.match(ADDRESS)?.[0]?.toLowerCase();
+  // The bracketed address goes, then every remaining bracket and quote: the
+  // name is escaped again where it is rendered
   const name = from
-    .replace(/<[^>]*>/g, '')
+    .split(/<[^>]*>/)
+    .join('')
     .replace(ADDRESS, '')
-    .replace(/["']/g, '')
+    .replace(/[<>"']/g, '')
     .trim();
   return { address, ...(name ? { name: name.slice(0, 120) } : {}) };
 }
