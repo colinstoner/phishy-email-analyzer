@@ -462,7 +462,8 @@ async function alertOnFlag(
       error: sent.error,
     });
     await store.revertClaim(claim);
-    return;
+    // Counted as a failure so the window is not advanced past this wave
+    throw new Error('fan-out alert was not sent');
   }
   context.summary.alertsSent++;
   logger.info('Fan-out alert sent to the security team', {
