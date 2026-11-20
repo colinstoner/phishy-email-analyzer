@@ -1,7 +1,7 @@
 /**
- * Campaign-response emails: the employee warning, the reporters' thank-you
- * note, the distribution-list warning, and the security team's incident
- * email and its updates.
+ * Campaign-response emails: the employee warning, the removal notice, the
+ * distribution-list warning, and the security team's incident email and its
+ * updates.
  *
  * Same voice and structure as the analysis report: plain language first,
  * technical detail below; the verdict label, risk score and Confidence line
@@ -44,7 +44,7 @@ export interface WarningContext {
   incidentReference: string;
   /** Who confirmed the verdict, as the employee is told */
   confirmedBy: 'security_team' | 'phishy';
-  /** Recipients warned, for the reporters' note */
+  /** Recipients warned (no longer shown: the reporters' note was removed) */
   warnedCount: number;
 }
 
@@ -288,44 +288,64 @@ export function buildEmployeeWarning(
   };
 }
 
-/** The shorter note to someone who already reported the attack */
-export function buildReporterThanks(context: WarningContext): RenderedEmail {
-  const verdict = describeVerdict(context.summary.verdict);
+/**
+ * The notice to someone whose copy was actually removed from their mailbox
+ * (moved to Deleted Items) by an approved removal. Sent only for removals a
+ * real write tier reports per mailbox; the dry run never causes one.
+ */
+export function buildRemovalNotice(context: Omit<WarningContext, 'warnedCount'>): RenderedEmail {
   const subject = quotedSubject(context.summary);
-  const confirmed =
-    context.confirmedBy === 'security_team'
-      ? 'Your security team confirmed it.'
-      : 'Phishy confirmed it.';
-  const did: string[] = [];
-  if (context.warnedCount > 0) {
-    did.push(
-      `- Warned the ${context.warnedCount} other ${context.warnedCount === 1 ? 'person' : 'people'} who received it, each in a separate email.`
-    );
-  }
-  did.push('- Recorded the attack, so new copies are flagged straight away.');
-  if (context.reportCount > 1) {
-    did.push(`- ${context.reportCount} people reported it in all. Every report helped.`);
-  }
+  const sender = displaySender(context.summary.senderAddress, context.summary.senderName);
   const { html, text } = layout({
-    title: 'Thank you for reporting',
-    lead: `The email you reported${subject ? `, ${subject},` : ''} was phishing. ${confirmed}`,
+    title: 'Security notice from Phishy',
+    lead: 'Your security team removed a phishing email from your mailbox. You do not need to do anything.',
     leadTone: 'safe',
     sections: [
-      { heading: 'What we did', lines: did },
+      {
+        heading: 'What happened',
+        lines: [
+          'Your security team identified a phishing email in your mailbox and moved it to your Deleted Items folder.',
+          ...(subject || sender
+            ? [
+                `It ${[
+                  subject ? `had the subject ${subject}` : '',
+                  sender ? `came from ${sender}` : '',
+                ]
+                  .filter(Boolean)
+                  .join(' and ')}.`,
+              ]
+            : []),
+        ],
+      },
       {
         heading: 'What to do',
-        lines: ['Nothing else. If you have not already, delete the email.'],
+        lines: [
+          'Nothing. No action is needed.',
+          '- Do not restore it from Deleted Items or open it there.',
+        ],
       },
-      alreadyClicked(context),
+      {
+        heading: 'If you clicked a link or entered your password',
+        lines: [
+          'Contact your security team straight away.',
+          context.alreadyClickedInstructions.replace(/\s+/g, ' ').trim(),
+        ],
+        tone: 'caution',
+      },
     ],
-    riskBlock: { label: verdict.label, risk: summaryRisk(context.summary) },
     footer: [
       DEFANG_NOTE,
       `Reference: ${context.incidentReference}`,
       'Phishy, for your security team',
     ],
   });
-  return { subject: 'Thank you: the email you reported was phishing', html, text };
+  // The lure's subject stays out of the Subject line: repeating it gets the
+  // notice itself filtered as phishing
+  return {
+    subject: 'Security notice: a phishing email was removed from your mailbox',
+    html,
+    text,
+  };
 }
 
 /** The broadcast to the distribution list (campaign response on) */
@@ -602,9 +622,6 @@ function describeProposal(action: ResponseAction): {
       parts.push(
         `emails a warning to ${scope.recipients.length} recipient(s), one email each (nobody sees anyone else's address)`
       );
-    }
-    if (scope.reporters.length) {
-      parts.push(`sends a thank-you note to ${scope.reporters.length} reporter(s)`);
     }
     if (scope.distribution) {
       parts.push('sends the warning to the distribution list');

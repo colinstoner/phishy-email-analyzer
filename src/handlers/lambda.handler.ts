@@ -52,7 +52,10 @@ import { ThreatIndicatorRecord, FeedbackRecord } from '../services/intelligence/
 import type { BlastRadiusReport } from '../services/graph/blast-radius.service';
 import { GraphGateway, createGraphGateway } from '../services/graph/graph.gateway';
 import { attachmentRiskSignals } from '../services/attachments/risk';
-import { CampaignResponseService } from '../services/response/campaign.response.service';
+import {
+  CampaignResponseService,
+  ReporterReply,
+} from '../services/response/campaign.response.service';
 import { ResponseStore } from '../services/response/response.store';
 import type { CampaignMatch, CampaignRecord } from '../services/intelligence/database.service';
 import { isScheduledTaskCandidate } from './scheduled.event';
@@ -920,7 +923,9 @@ async function processEmailEvent(
   // After the reports have gone: open or update the campaign's incident.
   // This report's own blast-radius result (set by the lookup above, which
   // runs inside the report-sending step) is what the reach trigger counts
-  const respondToCampaign = async (): Promise<void> => {
+  // `reporterReply` is how this report's reporter was answered, so the
+  // incident email never claims a reply that was not sent
+  const respondToCampaign = async (reporterReply: ReporterReply): Promise<void> => {
     if (!trackedCampaign || !services.campaignResponse) {
       return;
     }
@@ -932,6 +937,7 @@ async function processEmailEvent(
       ...(storedAnalysisId ? { analysisId: storedAnalysisId } : {}),
       ...(blastRadiusResult ? { blastRadius: blastRadiusResult } : {}),
       blastRadiusEnabled: services.graph.blastRadius,
+      reporterReply,
       getRemainingMs,
     });
     logger.info('Campaign response', { outcome, campaignId: trackedCampaign.match.campaignId });
@@ -946,7 +952,8 @@ async function processEmailEvent(
       isPhishing: riskDecision.isPhishing,
       lookupBlastRadius,
     });
-    await respondToCampaign();
+    // Silent intake: the reporter is never emailed, whatever was sent to the team
+    await respondToCampaign('silent');
     return silent;
   }
 
@@ -993,7 +1000,7 @@ async function processEmailEvent(
     }
 
     await cleanupStoredEmail(msg, config, services);
-    await respondToCampaign();
+    await respondToCampaign(emailResult.success ? 'emailed' : 'not_sent');
 
     return {
       status: 'processed',
@@ -1006,7 +1013,7 @@ async function processEmailEvent(
   // text the email's headers supplied, so only its facts are logged above debug
   logger.warn('Cannot send analysis - invalid recipient', { recipient: contentFacts(recipient) });
   logger.debug('Invalid recipient value', { recipient });
-  await respondToCampaign();
+  await respondToCampaign('not_sent');
   return { status: 'incomplete', reason: 'invalid_recipient' };
 }
 

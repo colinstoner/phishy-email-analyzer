@@ -4,9 +4,9 @@
  * An executor carries out one approved action whose scope the service has
  * already re-checked. Two exist in this version:
  *
- * - `SesWarningExecutor` sends the employee warning and the reporters'
- *   thank-you notes, one email per person (nobody sees another address),
- *   through SES, to safe-domain addresses only.
+ * - `SesWarningExecutor` sends the employee warning, one email per person
+ *   (nobody sees another address), through SES, to safe-domain addresses
+ *   only. It also sends the removal notice (below), the same way.
  * - `DryRunRemovalExecutor` for "remove remaining copies": it records what
  *   a removal WOULD do and changes nothing. No Graph write exists anywhere
  *   in Phishy.
@@ -16,7 +16,10 @@
  * scope — mailbox IDs and Graph message IDs, never a search — to a second,
  * separate broker function holding its own certificate and `Mail.ReadWrite`.
  * The main function and the read broker never hold that credential.
- * `createRemovalExecutor` is where it would be chosen.
+ * `createRemovalExecutor` is where it would be chosen. It must return
+ * `dryRun: false` and list in `removed` each mailbox a copy was actually
+ * moved out of: only those mailboxes get the removal notice. Until that
+ * tier exists, no removal notice is ever sent.
  */
 
 import { EmailSendResult } from '../../types';
@@ -27,7 +30,7 @@ import {
   WarningContext,
   buildDistributionWarning,
   buildEmployeeWarning,
-  buildReporterThanks,
+  buildRemovalNotice,
 } from '../../templates/campaign.response.html';
 import {
   ActionResult,
@@ -71,82 +74,105 @@ export class SesWarningExecutor {
 
   constructor(private readonly mailer: WarningMailer) {}
 
-  async execute(scope: WarningScope, context: WarningExecutionContext): Promise<ActionResult> {
-    const warned: string[] = [];
-    const thanked: string[] = [];
+  private outOfTime(context: Pick<WarningExecutionContext, 'getRemainingMs'>): boolean {
+    const remaining = context.getRemainingMs?.();
+    return remaining !== undefined && remaining < SEND_RESERVE_MS;
+  }
+
+  /** One email to one address; false when skipped (unsafe) or SES failed (`onFailure` called) */
+  private async send(
+    address: string,
+    email: RenderedEmail,
+    safeDomains: string[],
+    onFailure: () => void
+  ): Promise<boolean> {
+    // Invariant 4, applied again at the moment of sending
+    if (!isSafeRecipient(address, safeDomains)) {
+      emitCampaignResponseMetric('CampaignWarningsSkipped', 1, { Reason: 'unsafe_address' });
+      return false;
+    }
+    try {
+      const result = await this.mailer.sendEmail(
+        address,
+        email.subject,
+        email.html,
+        email.text,
+        []
+      );
+      if (result.success) {
+        return true;
+      }
+    } catch {
+      // counted by the caller
+    }
+    onFailure();
+    return false;
+  }
+
+  /** Send one email to each address, a few at a time, stopping when time runs short */
+  private async sendEach(
+    addresses: string[],
+    build: (address: string, index: number) => RenderedEmail,
+    context: Pick<WarningExecutionContext, 'getRemainingMs' | 'safeDomains'>
+  ): Promise<{ sent: string[]; failed: number; notSentForTime: number }> {
+    const sent: string[] = [];
     let failed = 0;
     let notSentForTime = 0;
-    let distributionSent = false;
-
-    const outOfTime = (): boolean => {
-      const remaining = context.getRemainingMs?.();
-      return remaining !== undefined && remaining < SEND_RESERVE_MS;
-    };
-
-    const send = async (address: string, email: RenderedEmail): Promise<boolean> => {
-      // Invariant 4, applied again at the moment of sending
-      if (!isSafeRecipient(address, context.safeDomains)) {
-        emitCampaignResponseMetric('CampaignWarningsSkipped', 1, { Reason: 'unsafe_address' });
-        return false;
-      }
-      try {
-        const result = await this.mailer.sendEmail(
-          address,
-          email.subject,
-          email.html,
-          email.text,
-          []
-        );
-        if (result.success) {
-          return true;
-        }
-      } catch {
-        // counted below
-      }
-      failed += 1;
-      return false;
-    };
-
-    // 1. The people who received it
-    const queue = [...scope.recipients];
+    const queue = addresses.map((address, index) => ({ address, index }));
     const workers = Array.from({ length: Math.min(SEND_CONCURRENCY, queue.length) }, async () => {
       for (;;) {
-        const recipient = queue.shift();
-        if (!recipient) {
+        const next = queue.shift();
+        if (!next) {
           return;
         }
-        if (outOfTime()) {
+        if (this.outOfTime(context)) {
           notSentForTime += 1;
           continue;
         }
-        if (await send(recipient.address, buildEmployeeWarning(context.warning, recipient))) {
-          warned.push(recipient.address);
+        const ok = await this.send(
+          next.address,
+          build(next.address, next.index),
+          context.safeDomains,
+          () => {
+            failed += 1;
+          }
+        );
+        if (ok) {
+          sent.push(next.address);
         }
       }
     });
     await Promise.all(workers);
+    return { sent, failed, notSentForTime };
+  }
 
-    // 2. The people who reported it
-    const thanks = buildReporterThanks({ ...context.warning, warnedCount: warned.length });
-    for (const reporter of scope.reporters) {
-      if (outOfTime()) {
-        notSentForTime += 1;
-        continue;
-      }
-      if (await send(reporter, thanks)) {
-        thanked.push(reporter);
-      }
-    }
+  async execute(scope: WarningScope, context: WarningExecutionContext): Promise<ActionResult> {
+    let distributionSent = false;
 
-    // 3. The distribution list, when the approved scope includes it
+    // 1. The people who received it (reporters are never in the scope)
+    const recipients = scope.recipients;
+    const sent = await this.sendEach(
+      recipients.map(r => r.address),
+      (_address, index) => buildEmployeeWarning(context.warning, recipients[index]),
+      context
+    );
+    const warned = sent.sent;
+    let failed = sent.failed;
+    const notSentForTime = sent.notSentForTime;
+
+    // 2. The distribution list, when the approved scope includes it
     if (scope.distribution && context.distributionList) {
-      if (await send(context.distributionList, buildDistributionWarning(context.warning))) {
-        distributionSent = true;
-      }
+      distributionSent = await this.send(
+        context.distributionList,
+        buildDistributionWarning(context.warning),
+        context.safeDomains,
+        () => {
+          failed += 1;
+        }
+      );
     }
 
     emitCampaignResponseMetric('CampaignWarningsSent', warned.length, { Audience: 'recipients' });
-    emitCampaignResponseMetric('CampaignThanksSent', thanked.length, { Audience: 'reporters' });
     emitCampaignResponseMetric('CampaignWarningsSent', distributionSent ? 1 : 0, {
       Audience: 'distribution',
     });
@@ -155,16 +181,12 @@ export class SesWarningExecutor {
     logger.info('Campaign warning sent', {
       incidentId: context.incident.id,
       warned: warned.length,
-      thanked: thanked.length,
       distributionSent,
       failed,
       notSentForTime,
     });
 
-    const summary = [
-      `Warned ${warned.length} recipient(s), each in a separate email.`,
-      `Sent ${thanked.length} reporter(s) a thank-you note.`,
-    ];
+    const summary = [`Warned ${warned.length} recipient(s), each in a separate email.`];
     if (scope.distribution) {
       summary.push(
         distributionSent
@@ -185,11 +207,34 @@ export class SesWarningExecutor {
       dryRun: false,
       summary,
       warned,
-      thanked,
       distributionSent,
       failed,
       notSentForTime,
     };
+  }
+
+  /**
+   * The removal notice, one email per person, to addresses the service has
+   * already checked (taken from the approved removal scope for mailboxes the
+   * write tier reported as actually changed; never twice; within the cap).
+   * Safe-domain checked again here. Never called after a dry run.
+   */
+  async sendRemovalNotices(
+    addresses: string[],
+    context: Omit<WarningExecutionContext, 'distributionList'>
+  ): Promise<{ notified: string[]; failed: number; notSentForTime: number }> {
+    const notice = buildRemovalNotice(context.warning);
+    const { sent, failed, notSentForTime } = await this.sendEach(addresses, () => notice, context);
+    emitCampaignResponseMetric('CampaignRemovalNoticesSent', sent.length);
+    emitCampaignResponseMetric('CampaignWarningSendFailures', failed);
+    emitCampaignResponseMetric('CampaignWarningsSkipped', notSentForTime, { Reason: 'no_time' });
+    logger.info('Campaign removal notices sent', {
+      incidentId: context.incident.id,
+      notified: sent.length,
+      failed,
+      notSentForTime,
+    });
+    return { notified: sent, failed, notSentForTime };
   }
 }
 
@@ -198,6 +243,11 @@ export interface RemovalExecutor {
   readonly name: string;
   /** False for the dry run. A real implementation must be a separate module and credential. */
   readonly changesMailboxes: boolean;
+  /**
+   * A real implementation returns `dryRun: false` and `removed` (per
+   * mailbox, by the approved scope's mailbox ID, the copies actually moved
+   * to Deleted Items): that list is what triggers the removal notices.
+   */
   execute(
     action: ResponseAction,
     approved: RemovalScope,

@@ -17,6 +17,11 @@ import type {
 import type { CampaignResponseConfig } from '../../../../src/config/schema';
 import { DEFAULT_ALREADY_CLICKED_INSTRUCTIONS } from '../../../../src/config/schema';
 import type { ApprovalCommand } from '../../../../src/services/commands/response.commands';
+import type { RemovalExecutor } from '../../../../src/services/response/executors';
+import type {
+  ActionResult,
+  RemovedMailbox,
+} from '../../../../src/services/response/response.types';
 import { FakeResponseStore } from './fake.store';
 
 const SAFE = ['example.com'];
@@ -182,7 +187,11 @@ function reportInput(overrides: Partial<CampaignReportInput> = {}): CampaignRepo
 
 function setup(
   cfg: Partial<CampaignResponseConfig> = {},
-  options: { commandsEnabled?: boolean; distributionList?: string } = {}
+  options: {
+    commandsEnabled?: boolean;
+    distributionList?: string;
+    removalExecutor?: RemovalExecutor;
+  } = {}
 ) {
   let now = new Date('2026-11-17T10:00:00.000Z');
   const clock = (): Date => now;
@@ -201,6 +210,7 @@ function setup(
     commandsEnabled: options.commandsEnabled ?? true,
     legacyAlert,
     markCampaignAlerted,
+    ...(options.removalExecutor ? { removalExecutor: options.removalExecutor } : {}),
     now: clock,
     newReference: () => {
       refs += 1;
@@ -255,7 +265,7 @@ describe('opening an incident', () => {
     expect(
       warning?.scope.kind === 'send_warning' && warning.scope.recipients.map(r => r.address)
     ).toEqual(['person1@example.com', 'person2@example.com', 'person3@example.com']);
-    expect(warning?.scope.kind === 'send_warning' && warning.scope.reporters).toEqual(REPORTERS);
+    expect(warning?.scope).not.toHaveProperty('reporters');
     expect(removal?.scope.kind === 'remove_messages' && removal.scope.messageCount).toBe(5);
 
     expect(sent[0].text).toContain(`APPROVE WARNING ${warning?.reference}`);
@@ -267,13 +277,33 @@ describe('opening an incident', () => {
     expect(store.incidents[0].threadMessageId).toBe('ses-1');
   });
 
+  it('says the reporter was sent their analysis only when it was', async () => {
+    const emailed = setup();
+    await emailed.service.handleCampaignReport(reportInput({ reporterReply: 'emailed' }));
+    expect(emailed.sent[0].text).toContain('Sent the reporter of this report their own analysis.');
+
+    const silent = setup();
+    await silent.service.handleCampaignReport(reportInput({ reporterReply: 'silent' }));
+    expect(silent.sent[0].text).not.toContain('their own analysis');
+    expect(silent.sent[0].text).toContain(
+      'This report came through the Report button, so its reporter was not emailed'
+    );
+
+    for (const reporterReply of ['not_sent', undefined] as const) {
+      const quiet = setup();
+      await quiet.service.handleCampaignReport(reportInput({ reporterReply }));
+      expect(quiet.sent[0].text).not.toContain('their own analysis');
+      expect(quiet.sent[0].text).not.toContain('Report button');
+    }
+  });
+
   it('sends at once, one email per person, when set to auto', async () => {
     const { service, sent, store } = setup({ employeeWarning: 'auto' });
     await service.handleCampaignReport(reportInput());
 
     const employees = employeeEmails(sent);
     expect(employees.map(e => e.to).sort()).toEqual(
-      ['person1@example.com', 'person2@example.com', 'person3@example.com', ...REPORTERS].sort()
+      ['person1@example.com', 'person2@example.com', 'person3@example.com'].sort()
     );
     for (const email of employees) {
       expect(email.cc).toEqual([]); // nobody sees anyone else's address
@@ -283,21 +313,47 @@ describe('opening an incident', () => {
     // The incident email went first and said what is being sent
     expect(sent[0].to).toBe('security@example.com');
     expect(sent[0].text).toContain(
-      'Sending the warning to 3 recipient(s), a thank-you note to 3 reporter(s) now'
+      'Sending the warning to 3 recipient(s) now (set to send automatically).'
     );
+    expect(sent[0].text).not.toContain('thank-you');
     const action = store.actions.find(a => a.authorization === 'auto');
     expect(action).toMatchObject({ status: 'completed', approvedBy: 'auto' });
     expect(action?.result?.warned).toHaveLength(3);
     expect(store.events()).toContain('action_executed');
   });
 
-  it('gives reporters the short thank-you note, not the warning', async () => {
+  it('sends nothing when another invocation won the race to approve the auto action', async () => {
+    const { service, sent, store } = setup({ employeeWarning: 'auto' });
+    // Another invocation cancels (or approves) the new proposal before this
+    // one's conditional UPDATE: markAutoApproved finds no `proposed` row
+    const markAutoApproved = jest.spyOn(store, 'markAutoApproved').mockImplementation(async id => {
+      const row = store.actions.find(a => a.id === id);
+      if (row) {
+        row.status = 'cancelled';
+      }
+      return undefined;
+    });
+    await service.handleCampaignReport(reportInput());
+
+    expect(markAutoApproved).toHaveBeenCalledTimes(1);
+    expect(employeeEmails(sent)).toEqual([]);
+    expect(sent[0].to).toBe('security@example.com');
+    expect(sent[0].text).not.toContain('now (set to send automatically)');
+    const action = store.actions.find(a => a.authorization === 'auto');
+    expect(action).toMatchObject({ status: 'cancelled' });
+    expect(action?.result).toBeUndefined();
+    expect(store.events()).not.toContain('action_executed');
+    expect(store.events()).not.toContain('action_failed');
+  });
+
+  it('sends reporters nothing: no thank-you note and no warning', async () => {
     const { service, sent } = setup({ employeeWarning: 'auto' });
     await service.handleCampaignReport(reportInput());
-    const toReporter = sent.find(e => e.to === 'reporter1@example.com');
+    for (const reporter of REPORTERS) {
+      expect(sent.find(e => e.to === reporter)).toBeUndefined();
+    }
+    expect(sent.some(e => /thank you/i.test(e.subject))).toBe(false);
     const toRecipient = sent.find(e => e.to === 'person1@example.com');
-    expect(toReporter?.subject).toBe('Thank you: the email you reported was phishing');
-    expect(toReporter?.text).toContain('Warned the 3 other people who received it');
     expect(toRecipient?.subject).toContain('Security warning: delete the email');
   });
 
@@ -306,7 +362,7 @@ describe('opening an incident', () => {
     await service.handleCampaignReport(reportInput());
     expect(employeeEmails(sent)).toHaveLength(2);
     const scope = store.actions[0].scope;
-    expect(scope.kind === 'send_warning' && scope.skipped.overCap).toBe(4);
+    expect(scope.kind === 'send_warning' && scope.skipped.overCap).toBe(1);
   });
 
   it('keeps the distribution broadcast automatic by default (audience distribution)', async () => {
@@ -360,7 +416,7 @@ describe('approvals', () => {
       'SOC@example.com'
     );
     expect(first.heading).toBe('Done: approval carried out');
-    expect(employeeEmails(sent)).toHaveLength(6);
+    expect(employeeEmails(sent)).toHaveLength(3);
     const confirmed = sent.find(e => e.to === 'person1@example.com');
     expect(confirmed?.text).toContain('your security team confirmed it');
 
@@ -369,7 +425,7 @@ describe('approvals', () => {
       'security@example.com'
     );
     expect(second.body.join('\n')).toContain('already approved by soc@example.com');
-    expect(employeeEmails(sent)).toHaveLength(6);
+    expect(employeeEmails(sent)).toHaveLength(3);
     expect(store.actions.find(a => a.id === warning.id)).toMatchObject({
       status: 'completed',
       approvedBy: 'soc@example.com',
@@ -443,6 +499,38 @@ describe('approvals', () => {
     expect(employeeEmails(sent).map(e => e.to)).not.toContain('person7@example.com');
   });
 
+  it('reads results stored with a thank-you list: those people count as already contacted', async () => {
+    const { service, sent, store } = setup();
+    await service.handleCampaignReport(reportInput());
+    const warning = proposed(store, 'send_warning')!;
+    // A warning completed by an earlier version, whose result carries `thanked`
+    const legacy = await store.createAction({
+      incidentId: warning.incidentId,
+      reference: 'PHY-LLLL-LLLL-LLLL-LLL2',
+      type: 'send_warning',
+      authorization: 'auto',
+      scope: {
+        ...warning.scope,
+        reporters: ['person1@example.com'],
+      } as unknown as typeof warning.scope,
+      scopeHash: 'legacy',
+      expiresAt: new Date('2026-11-17T14:00:00.000Z'),
+    });
+    await store.markAutoApproved(legacy.id);
+    await store.finishAction(legacy.id, 'completed', {
+      executor: 'ses_warning',
+      dryRun: false,
+      summary: [],
+      warned: [],
+      thanked: ['person1@example.com'],
+    });
+
+    await service.handleApprovals(approve('send_warning', warning.reference), TEAM[0]);
+    const to = employeeEmails(sent).map(e => e.to);
+    expect(to).not.toContain('person1@example.com');
+    expect(to.sort()).toEqual(['person2@example.com', 'person3@example.com']);
+  });
+
   it('re-checks the approved scope before sending: nobody is added, nobody is emailed twice', async () => {
     const { service, sent, store } = setup();
     await service.handleCampaignReport(reportInput());
@@ -467,7 +555,7 @@ describe('approvals', () => {
 
 describe('remove remaining copies (dry run only)', () => {
   it('re-checks the scope, records what it would do, and changes nothing', async () => {
-    const { service, store, mailer } = setup();
+    const { service, store, mailer, sent } = setup();
     await service.handleCampaignReport(reportInput());
     const removal = proposed(store, 'remove_messages')!;
     const reply = await service.handleApprovals(
@@ -491,6 +579,9 @@ describe('remove remaining copies (dry run only)', () => {
     expect(audit?.detail).toMatchObject({ messages: 5, mailboxes: 5, unreadInInbox: 2 });
     // The only outbound calls are emails; there is no Graph client here at all
     expect(mailer.sendEmail).toHaveBeenCalledTimes(1);
+    // A dry run removes nothing, so nobody gets a removal notice
+    expect(sent.filter(e => e.subject.startsWith('Security notice'))).toEqual([]);
+    expect(store.actions.find(a => a.id === removal.id)?.result?.notified).toBeUndefined();
   });
 
   it('keeps audit rows append-only (frozen entries, never rewritten)', async () => {
@@ -503,6 +594,143 @@ describe('remove remaining copies (dry run only)', () => {
     );
     expect(store.audit.slice(0, before.length).map(e => JSON.stringify(e))).toEqual(before);
     expect(Object.isFrozen(store.audit[0])).toBe(true);
+  });
+});
+
+describe('removal notice (only after a real removal: the write tier is not built)', () => {
+  /**
+   * Stands in for the future write tier: reports, per mailbox, what it
+   * "removed". No Graph call exists; this only returns a result.
+   */
+  function fakeWriteExecutor(removed: (scope: RemovalMailboxIds) => RemovedMailbox[]) {
+    const executor: RemovalExecutor = {
+      name: 'fake_write_removal',
+      changesMailboxes: true,
+      execute: jest.fn(async (_action, approved): Promise<ActionResult> => ({
+        executor: 'fake_write_removal',
+        dryRun: false,
+        summary: ['Removed.'],
+        removed: removed(approved.mailboxes),
+      })),
+    };
+    return executor;
+  }
+  type RemovalMailboxIds = Array<{ mailboxId: string; address: string }>;
+  const all = (mailboxes: RemovalMailboxIds): RemovedMailbox[] =>
+    mailboxes.map(m => ({ mailboxId: m.mailboxId, messages: 1 }));
+  const notices = (sent: SentEmail[]): SentEmail[] =>
+    sent.filter(
+      e => e.subject === 'Security notice: a phishing email was removed from your mailbox'
+    );
+
+  async function approveRemoval(
+    removed: (scope: RemovalMailboxIds) => RemovedMailbox[],
+    cfg: Partial<CampaignResponseConfig> = {}
+  ) {
+    const ctx = setup(cfg, { removalExecutor: fakeWriteExecutor(removed) });
+    await ctx.service.handleCampaignReport(reportInput());
+    const removal = proposed(ctx.store, 'remove_messages')!;
+    const reply = await ctx.service.handleApprovals(
+      approve('remove_messages', removal.reference),
+      TEAM[0]
+    );
+    return { ...ctx, removal, reply };
+  }
+
+  it('tells each person whose copy was removed, reporters included, one email each', async () => {
+    const { sent, store, removal, reply } = await approveRemoval(all);
+    const to = notices(sent).map(e => e.to);
+    // outsider@partner.test's copy was removed too, but it is not on a safe domain
+    expect([...to].sort()).toEqual(
+      [
+        'person1@example.com',
+        'person2@example.com',
+        'person3@example.com',
+        'reporter1@example.com',
+      ].sort()
+    );
+    expect(to).not.toContain('outsider@partner.test');
+    for (const email of notices(sent)) {
+      expect(email.cc).toEqual([]);
+      expect(email.text).toContain('moved it to your Deleted Items folder');
+      expect(email.text).not.toMatch(/https?:\/\//);
+    }
+    const action = store.actions.find(a => a.id === removal.id);
+    expect(action).toMatchObject({ status: 'completed', executor: 'fake_write_removal' });
+    expect([...(action?.result?.notified ?? [])].sort()).toEqual([...to].sort());
+    const audit = store.audit.find(e => e.event === 'action_executed' && e.actionId === removal.id);
+    expect(audit?.detail).toMatchObject({ notified: 4, removedMailboxes: 5, noticesFailed: 0 });
+    expect(reply.body.join('\n')).toContain('Sent 4 removal notice(s)');
+  });
+
+  it('only for mailboxes a copy was actually removed from, and only ones the approved scope named', async () => {
+    const { sent } = await approveRemoval(mailboxes => [
+      { mailboxId: mailboxes[0].mailboxId, messages: 1 },
+      { mailboxId: mailboxes[1].mailboxId, messages: 0 },
+      { mailboxId: MAILBOX(77), messages: 3 },
+    ]);
+    expect(notices(sent).map(e => e.to)).toEqual(['person1@example.com']);
+  });
+
+  it('never notifies anyone twice', async () => {
+    const { service, sent, store } = await approveRemoval(all);
+    expect(notices(sent)).toHaveLength(4);
+    // A second removal for the same mailboxes (a new proposal, approved)
+    const second = await store.createAction({
+      incidentId: store.incidents[0].id,
+      reference: 'PHY-ZZZZ-ZZZZ-ZZZZ-ZZZ2',
+      type: 'remove_messages',
+      authorization: 'approve',
+      scope: store.actions.find(a => a.type === 'remove_messages')!.scope,
+      scopeHash: 'again',
+      expiresAt: new Date('2026-11-17T14:00:00.000Z'),
+    });
+    await service.handleApprovals(approve('remove_messages', second.reference), TEAM[0]);
+    expect(notices(sent)).toHaveLength(4);
+  });
+
+  it('respects the per-campaign cap, counting people already warned once', async () => {
+    const { sent } = await approveRemoval(all, {
+      employeeWarning: 'auto',
+      maxWarningsPerCampaign: 3,
+    });
+    // The three recipients were warned (the cap); their notices do not count again,
+    // so the reporter, a new person, is over the cap
+    expect(
+      notices(sent)
+        .map(e => e.to)
+        .sort()
+    ).toEqual(['person1@example.com', 'person2@example.com', 'person3@example.com'].sort());
+  });
+
+  it('reports the removal and the notices in the next incident update', async () => {
+    const { service, sent, advance } = await approveRemoval(all);
+    advance(31 * 60_000);
+    const later = reportInput();
+    later.match = { ...later.match, detectionCount: 4, shouldAlert: false };
+    await service.handleCampaignReport(later);
+    const update = sent[sent.length - 1];
+    expect(update.to).toBe('security@example.com');
+    expect(update.text).toContain(
+      'Removed 5 message(s) from 5 mailbox(es), moved to Deleted Items (approved by security@example.com'
+    );
+    expect(update.text).toContain('sent 4 removal notice(s).');
+  });
+
+  it('keeps the removal result when a notice fails', async () => {
+    const ctx = setup({}, { removalExecutor: fakeWriteExecutor(all) });
+    await ctx.service.handleCampaignReport(reportInput());
+    const removal = proposed(ctx.store, 'remove_messages')!;
+    ctx.mailer.sendEmail.mockImplementation(async () => ({
+      success: false,
+      messageId: '',
+      error: 'refused',
+    }));
+    await ctx.service.handleApprovals(approve('remove_messages', removal.reference), TEAM[0]);
+    const action = ctx.store.actions.find(a => a.id === removal.id);
+    expect(action?.status).toBe('completed');
+    expect(action?.result?.notified).toEqual([]);
+    expect(action?.result?.noticesFailed).toBe(4);
   });
 });
 
@@ -631,7 +859,7 @@ describe('second trigger: the fan-out scan', () => {
     expect(employeeEmails(sent)).toEqual([]);
     const warning = proposed(store, 'send_warning');
     expect(warning?.authorization).toBe('approve');
-    expect(warning?.scope.kind === 'send_warning' && warning.scope.reporters).toEqual([]);
+    expect(warning?.scope).not.toHaveProperty('reporters');
     expect(sent[0].text).toContain(
       'fan-out scan saw this email reach many people before anyone reported it'
     );
@@ -938,7 +1166,7 @@ describe('automatic actions need two reporters', () => {
     expect(await service.handleCampaignReport(report([ONE, TWO], 3))).toBe('updated');
     const employees = employeeEmails(sent).map(e => e.to);
     expect(employees.sort()).toEqual(
-      [LIST, ONE, TWO, 'person1@example.com', 'person2@example.com', 'person3@example.com'].sort()
+      [LIST, 'person1@example.com', 'person2@example.com', 'person3@example.com'].sort()
     );
     const update = sent.find(e => e.text.includes('A second person has reported it'));
     expect(update?.inReplyTo).toBe('ses-1');
@@ -955,11 +1183,11 @@ describe('automatic actions need two reporters', () => {
     const reply = await service.handleApprovals(approve('send_warning', held.reference), TEAM[0]);
     expect(reply.body[0]).toContain('replaced by a newer one');
 
-    // Report 4, a third person: only the new reporter is thanked; nobody twice
+    // Report 4, a third person: reporters get nothing; nobody is emailed twice
     advance(31 * 60_000);
     await service.handleCampaignReport(report([ONE, TWO, THREE], 4));
     const all = employeeEmails(sent).map(e => e.to);
-    expect(all.filter(a => a === THREE)).toHaveLength(1);
+    expect(all).not.toContain(THREE);
     expect(new Set(all).size).toBe(all.length);
   });
 
@@ -971,14 +1199,14 @@ describe('automatic actions need two reporters', () => {
     expect(reply.heading).toBe('Done: approval carried out');
     const before = employeeEmails(sent).map(e => e.to);
     expect([...before].sort()).toEqual(
-      [LIST, ONE, 'person1@example.com', 'person2@example.com', 'person3@example.com'].sort()
+      [LIST, 'person1@example.com', 'person2@example.com', 'person3@example.com'].sort()
     );
 
     advance(60_000);
     await service.handleCampaignReport(report([ONE, TWO], 2));
     const after = employeeEmails(sent).map(e => e.to);
-    // Only the second reporter's thank-you is new; no second broadcast
-    expect(after.slice(before.length)).toEqual([TWO]);
+    // Nothing new: reporters are not emailed, and no second broadcast
+    expect(after.slice(before.length)).toEqual([]);
     expect(new Set(after).size).toBe(after.length);
   });
 

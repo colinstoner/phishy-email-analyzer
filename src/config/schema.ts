@@ -140,7 +140,10 @@ const CampaignResponseConfigSchema = z.object({
   distributionWarning: z.enum(['off', 'approve', 'auto']).default('auto'),
   /** How long a proposed action can be approved */
   approvalTtlHours: z.number().positive().max(72).default(4),
-  /** Most employee emails (warnings and thank-you notes) one campaign may send */
+  /**
+   * Most employees one campaign may email (warnings and removal notices;
+   * someone already warned is not counted again for a removal notice)
+   */
   maxWarningsPerCampaign: z.number().int().min(1).max(1000).default(100),
   /** Most mailboxes and messages one removal action may name */
   maxRemovalMailboxes: z.number().int().min(1).max(5000).default(500),

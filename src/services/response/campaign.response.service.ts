@@ -13,11 +13,14 @@
  *    actions with the exact reply that approves each);
  * 2. the people blast radius found get a targeted warning, one email each,
  *    either after a security-team approval (`employeeWarning: approve`, the
- *    default) or at once (`auto`); the people who reported it get a shorter
- *    thank-you note; the distribution list gets its broadcast as before
+ *    default) or at once (`auto`); the people who reported it are not
+ *    warned; the distribution list gets its broadcast as before
  *    (`distributionWarning: auto`) unless the operator changes that;
  * 3. "remove remaining copies" is proposed with a scope of exact message IDs
- *    per mailbox; approving it runs a DRY RUN only (no Graph write exists);
+ *    per mailbox; approving it runs a DRY RUN only (no Graph write exists).
+ *    A removal executor that really changes mailboxes (the future write
+ *    tier) would report each mailbox it removed a copy from, and each of
+ *    those people would get the removal notice; with the dry run, nobody does;
  * 4. later reports and wider reach update the incident in the same thread,
  *    rate-limited.
  *
@@ -64,11 +67,13 @@ import { generateReference } from './reference';
 import { ResponseStore, ResponseStoreUnavailableError } from './response.store';
 import {
   ActionAuthorization,
+  ActionResult,
   ActionScope,
   CampaignIncident,
   FanoutIncidentInput,
   IncidentReach,
   IncidentSummary,
+  RemovalScope,
   ResponseAction,
   ResponseActionType,
   WarningScope,
@@ -123,7 +128,30 @@ export interface CampaignReportInput {
   /** This report's blast-radius lookup, when one ran */
   blastRadius?: BlastRadiusReport;
   blastRadiusEnabled: boolean;
+  /**
+   * How this report's own reporter was answered, so the incident email says
+   * only what happened: `emailed` (their analysis was sent), `silent` (an
+   * Outlook Report-button report: the reporter is deliberately never
+   * emailed) or `not_sent` (no valid reporter address, or the send failed).
+   * Earlier reports of the campaign are not described: how each was answered
+   * is not recorded.
+   */
+  reporterReply?: ReporterReply;
   getRemainingMs?: () => number | undefined;
+}
+
+export type ReporterReply = 'emailed' | 'silent' | 'not_sent';
+
+/** The incident email's "done" line for the report that opened it, if any */
+export function reporterReplyLine(reply: ReporterReply | undefined): string | undefined {
+  switch (reply) {
+    case 'emailed':
+      return 'Sent the reporter of this report their own analysis.';
+    case 'silent':
+      return 'This report came through the Report button, so its reporter was not emailed (button reports are silent).';
+    default:
+      return undefined;
+  }
 }
 
 export type CampaignResponseOutcome =
@@ -224,27 +252,56 @@ function levelFor(score: number): string {
   return 'low';
 }
 
-/** Addresses already warned or thanked, or about to be (an approved action in flight) */
+/**
+ * Employees this campaign has emailed, or is about to (an approved warning
+ * in flight): warned, sent a removal notice, or thanked by an earlier
+ * version (stored results may still carry `thanked`). The per-campaign cap
+ * counts these people; none of them is warned again.
+ */
 function contactedBy(actions: ResponseAction[], except?: string): Set<string> {
   const contacted = new Set<string>();
   for (const action of actions) {
-    if (action.type !== 'send_warning' || action.id === except) {
+    if (action.id === except) {
       continue;
     }
     if (action.result) {
-      for (const address of [...(action.result.warned ?? []), ...(action.result.thanked ?? [])]) {
+      for (const address of [
+        ...(action.result.warned ?? []),
+        ...(action.result.thanked ?? []),
+        ...(action.result.notified ?? []),
+      ]) {
         contacted.add(address.toLowerCase());
       }
     } else if (action.status === 'approved' && action.scope.kind === 'send_warning') {
       for (const recipient of action.scope.recipients) {
         contacted.add(recipient.address);
       }
-      for (const reporter of action.scope.reporters) {
-        contacted.add(reporter);
-      }
     }
   }
   return contacted;
+}
+
+/**
+ * Who has had (or, for an approved removal in flight, may be about to get)
+ * a removal notice for this campaign: nobody gets one twice.
+ */
+function noticedBy(actions: ResponseAction[], except: string): Set<string> {
+  const noticed = new Set<string>();
+  for (const action of actions) {
+    if (action.id === except || action.type !== 'remove_messages') {
+      continue;
+    }
+    if (action.result) {
+      for (const address of action.result.notified ?? []) {
+        noticed.add(address.toLowerCase());
+      }
+    } else if (action.status === 'approved' && action.scope.kind === 'remove_messages') {
+      for (const mailbox of action.scope.mailboxes) {
+        noticed.add(mailbox.address.toLowerCase());
+      }
+    }
+  }
+  return noticed;
 }
 
 function distributionDone(actions: ResponseAction[], except?: string): boolean {
@@ -462,8 +519,9 @@ export class CampaignResponseService {
       reachStatus: reach.status,
     });
 
+    const replyLine = reporterReplyLine(input.reporterReply);
     await this.respond(incident, {
-      done: ['Sent each reporter their own analysis.'],
+      done: replyLine ? [replyLine] : [],
       forceApprove: false,
       getRemainingMs: input.getRemainingMs,
     });
@@ -753,11 +811,7 @@ export class CampaignResponseService {
 
   private scopeCounts(scope: ActionScope): Record<string, number | boolean> {
     return scope.kind === 'send_warning'
-      ? {
-          recipients: scope.recipients.length,
-          reporters: scope.reporters.length,
-          distribution: scope.distribution,
-        }
+      ? { recipients: scope.recipients.length, distribution: scope.distribution }
       : { mailboxes: scope.mailboxes.length, messages: scope.messageCount };
   }
 
@@ -833,18 +887,23 @@ export class CampaignResponseService {
       modes.distribution === 'auto'
     );
     if (!isEmptyScope(autoScope)) {
-      auto = await this.propose(incident, 'send_warning', autoScope, 'auto', actions);
+      const created = await this.propose(incident, 'send_warning', autoScope, 'auto', actions);
+      // Only the invocation whose conditional UPDATE moved it to `approved`
+      // runs it. Undefined means another invocation got there first (it
+      // cancelled or approved this proposal): this one sends nothing
+      auto = created ? await this.store.markAutoApproved(created.id) : undefined;
       if (auto) {
-        auto = (await this.store.markAutoApproved(auto.id)) ?? auto;
         done.push(this.autoLine(autoScope));
+      } else if (created) {
+        logger.info('Automatic warning not run: another invocation handled it', {
+          incidentId: incident.id,
+          actionId: created.id,
+        });
       }
     }
 
     // Approval parts
-    const autoContacted = new Set([
-      ...autoScope.recipients.map(r => r.address),
-      ...autoScope.reporters,
-    ]);
+    const autoContacted = new Set(autoScope.recipients.map(r => r.address));
     const approveScope = this.warningScope(
       incident,
       actions,
@@ -894,9 +953,6 @@ export class CampaignResponseService {
     if (scope.recipients.length) {
       parts.push(`the warning to ${scope.recipients.length} recipient(s)`);
     }
-    if (scope.reporters.length) {
-      parts.push(`a thank-you note to ${scope.reporters.length} reporter(s)`);
-    }
     if (scope.distribution) {
       parts.push('the warning to the distribution list');
     }
@@ -919,8 +975,16 @@ export class CampaignResponseService {
         : '';
       if (action.type === 'send_warning') {
         const r = action.result;
+        // `thanked` only exists on results stored by an earlier version
+        const thanked = r.thanked?.length ? ` and thanked ${r.thanked.length} reporter(s)` : '';
         lines.push(
-          `Warned ${r.warned?.length ?? 0} recipient(s) and thanked ${r.thanked?.length ?? 0} reporter(s)${r.distributionSent ? ', and warned the distribution list' : ''} (${by}${at}).${r.failed ? ` ${r.failed} email(s) failed.` : ''}`
+          `Warned ${r.warned?.length ?? 0} recipient(s)${thanked}${r.distributionSent ? ', and warned the distribution list' : ''} (${by}${at}).${r.failed ? ` ${r.failed} email(s) failed.` : ''}`
+        );
+      } else if (!action.result.dryRun) {
+        const r = action.result;
+        const messages = (r.removed ?? []).reduce((n, m) => n + m.messages, 0);
+        lines.push(
+          `Removed ${messages} message(s) from ${r.removed?.length ?? 0} mailbox(es), moved to Deleted Items (${by}${at}); sent ${r.notified?.length ?? 0} removal notice(s).${r.noticesFailed ? ` ${r.noticesFailed} notice(s) failed.` : ''}`
         );
       } else {
         const counts = action.result.wouldRemove;
@@ -1037,7 +1101,6 @@ export class CampaignResponseService {
         detail: {
           executor: result.executor,
           warned: result.warned?.length ?? 0,
-          thanked: result.thanked?.length ?? 0,
           distributionSent: result.distributionSent ?? false,
           failed: result.failed ?? 0,
           notSentForTime: result.notSentForTime ?? 0,
@@ -1228,7 +1291,18 @@ export class CampaignResponseService {
 
     // remove_messages: the dry run, against the incident's latest reach
     try {
-      const result = await this.removalExecutor.execute(approved, approved.scope, incident.reach);
+      const executed = await this.removalExecutor.execute(approved, approved.scope, incident.reach);
+      // Only a real removal that reports what it changed sends notices; the
+      // dry run (the only executor today) never does
+      const result = executed.dryRun
+        ? executed
+        : await this.sendRemovalNotices(
+            incident,
+            approved,
+            approved.scope,
+            executed,
+            getRemainingMs
+          );
       await this.store.finishAction(
         approved.id,
         result.dryRun ? 'dry_run_completed' : 'completed',
@@ -1239,7 +1313,18 @@ export class CampaignResponseService {
         actionId: approved.id,
         event: result.dryRun ? 'action_dry_run' : 'action_executed',
         actor: approver,
-        detail: { executor: result.executor, ...(result.wouldRemove ?? {}) },
+        detail: {
+          executor: result.executor,
+          ...(result.wouldRemove ?? {}),
+          ...(result.dryRun
+            ? {}
+            : {
+                removedMailboxes: result.removed?.length ?? 0,
+                notified: result.notified?.length ?? 0,
+                noticesFailed: result.noticesFailed ?? 0,
+                noticesNotSentForTime: result.noticesNotSentForTime ?? 0,
+              }),
+        },
       });
       return { acted: true, body: [heading, ...result.summary] };
     } catch (error) {
@@ -1281,9 +1366,115 @@ export class CampaignResponseService {
     return {
       ...scope,
       recipients: scope.recipients.filter(r => keep(r.address)),
-      reporters: scope.reporters.filter(keep),
       distribution: scope.distribution && !distributionDone(actions, action.id),
     };
+  }
+
+  /**
+   * After a real (non-dry-run) removal: tell each person whose copy was
+   * actually removed, one email each. Not live today: the only removal
+   * executor is the dry run, which never reports `removed`; this runs only
+   * once the write tier exists.
+   *
+   * - Only mailboxes the executor reported with at least one copy moved,
+   *   and only ones the approved scope named: the address is the scope's
+   *   (Phishy's own lookup), matched by mailbox ID, never the executor's.
+   * - Reporters included, when their own copy was removed.
+   * - Safe domain (checked here and again at sending), never twice, and
+   *   within `maxWarningsPerCampaign`, which counts distinct people
+   *   emailed: someone already warned is not counted again.
+   *
+   * Never throws: the removal has happened, so its result is kept whatever
+   * the notices do.
+   */
+  private async sendRemovalNotices(
+    incident: CampaignIncident,
+    action: ResponseAction,
+    scope: RemovalScope,
+    result: ActionResult,
+    getRemainingMs?: () => number | undefined
+  ): Promise<ActionResult> {
+    const byMailbox = new Map(scope.mailboxes.map(m => [m.mailboxId, m.address.toLowerCase()]));
+    const targets: string[] = [];
+    for (const removed of result.removed ?? []) {
+      const address = byMailbox.get(removed.mailboxId);
+      if (address && removed.messages > 0 && !targets.includes(address)) {
+        targets.push(address);
+      }
+    }
+    if (targets.length === 0) {
+      return result;
+    }
+    try {
+      const actions = await this.store.listActions(incident.id);
+      const noticed = noticedBy(actions, action.id);
+      const contacted = contactedBy(actions, action.id);
+      let remaining = Math.max(0, this.config.maxWarningsPerCampaign - contacted.size);
+      let unsafe = 0;
+      let overCap = 0;
+      const addresses: string[] = [];
+      for (const address of targets) {
+        if (noticed.has(address)) {
+          continue;
+        }
+        if (!isSafeRecipient(address, this.deps.safeDomains)) {
+          unsafe += 1;
+          continue;
+        }
+        if (!contacted.has(address)) {
+          if (remaining <= 0) {
+            overCap += 1;
+            continue;
+          }
+          remaining -= 1;
+        }
+        addresses.push(address);
+      }
+      const sent =
+        addresses.length > 0
+          ? await this.warningExecutor.sendRemovalNotices(addresses, {
+              incident,
+              warning: this.warningContext(
+                incident,
+                action.authorization === 'approve' ? 'security_team' : 'phishy'
+              ),
+              safeDomains: this.deps.safeDomains,
+              getRemainingMs,
+            })
+          : { notified: [], failed: 0, notSentForTime: 0 };
+      if (unsafe > 0) {
+        emitCampaignResponseMetric('CampaignWarningsSkipped', unsafe, { Reason: 'unsafe_address' });
+      }
+      if (overCap > 0) {
+        emitCampaignResponseMetric('CampaignWarningsSkipped', overCap, { Reason: 'over_cap' });
+      }
+      const summary = [
+        `Sent ${sent.notified.length} removal notice(s), one email per person whose copy was removed.`,
+        ...(sent.failed > 0 ? [`${sent.failed} notice(s) could not be sent.`] : []),
+        ...(sent.notSentForTime > 0
+          ? [`${sent.notSentForTime} notice(s) were not sent because processing time ran out.`]
+          : []),
+        ...(unsafe > 0 ? [`${unsafe} not on a safe domain, so not notified.`] : []),
+        ...(overCap > 0 ? [`${overCap} over the per-campaign cap, so not notified.`] : []),
+      ];
+      return {
+        ...result,
+        summary: [...result.summary, ...summary],
+        notified: sent.notified,
+        noticesFailed: sent.failed,
+        noticesNotSentForTime: sent.notSentForTime,
+      };
+    } catch (error) {
+      logger.error('Removal notices failed', {
+        incidentId: incident.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return {
+        ...result,
+        summary: [...result.summary, 'The removal notices could not be sent. See the logs.'],
+        notified: [],
+      };
+    }
   }
 
   private async alreadyHandled(

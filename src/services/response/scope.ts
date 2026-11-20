@@ -150,10 +150,10 @@ export function firstDelivery(reach: IncidentReach): string | undefined {
 
 export interface WarningScopeInput {
   reach: IncidentReach;
-  /** Addresses that reported the campaign (`campaigns.unique_recipients`) */
+  /** Addresses that reported the campaign (`campaigns.unique_recipients`): never warned */
   reporters: string[];
   safeDomains: string[];
-  /** Addresses already warned or thanked for this campaign */
+  /** Addresses already emailed for this campaign */
   alreadyContacted: Set<string>;
   /** Employee emails this campaign may still send */
   remaining: number;
@@ -163,8 +163,8 @@ export interface WarningScopeInput {
 
 /**
  * Who a warning goes to. Recipients whose copy was never delivered are
- * never warned. Reporters get the thank-you note instead of the warning.
- * Warnings come before thank-you notes when the cap is reached.
+ * never warned. Reporters are not warned either: they reported it
+ * themselves.
  */
 export function computeWarningScope(input: WarningScopeInput): WarningScope {
   const skipped = {
@@ -188,7 +188,7 @@ export function computeWarningScope(input: WarningScopeInput): WarningScope {
       // not_checked on the trace route: message trace says delivered, the
       // mailbox was not read (a shared mailbox, or the lookup ran out of time)
       if (reporters.has(address)) {
-        continue; // thanked below
+        continue; // a reporter: they reported it themselves
       } else if (recipient.mailbox === 'not_delivered' || recipient.mailbox === 'not_found') {
         skipped.notDelivered += 1;
       } else if (!isSafeRecipient(address, input.safeDomains)) {
@@ -205,28 +205,12 @@ export function computeWarningScope(input: WarningScopeInput): WarningScope {
     }
   }
 
-  const thanks: string[] = [];
-  if (input.targeted) {
-    for (const reporter of reporters) {
-      if (!isSafeRecipient(reporter, input.safeDomains)) {
-        skipped.unsafeAddress += 1;
-      } else if (input.alreadyContacted.has(reporter)) {
-        skipped.alreadyContacted += 1;
-      } else {
-        thanks.push(reporter);
-      }
-    }
-  }
-
-  const remaining = Math.max(0, input.remaining);
-  const recipients = targets.slice(0, remaining);
-  const thanked = thanks.slice(0, Math.max(0, remaining - recipients.length));
-  skipped.overCap = targets.length - recipients.length + (thanks.length - thanked.length);
+  const recipients = targets.slice(0, Math.max(0, input.remaining));
+  skipped.overCap = targets.length - recipients.length;
 
   return {
     kind: 'send_warning',
     recipients,
-    reporters: thanked,
     distribution: input.distribution,
     skipped,
   };
@@ -292,7 +276,7 @@ export function computeRemovalScope(reach: IncidentReach, limits: RemovalLimits)
 /** True when a scope has nothing to do */
 export function isEmptyScope(scope: ActionScope): boolean {
   return scope.kind === 'send_warning'
-    ? scope.recipients.length === 0 && scope.reporters.length === 0 && !scope.distribution
+    ? scope.recipients.length === 0 && !scope.distribution
     : scope.mailboxes.length === 0;
 }
 

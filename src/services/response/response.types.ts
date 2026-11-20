@@ -55,7 +55,7 @@ export interface WarningSkips {
   notDelivered: number;
   /** Address not on a configured safe domain, or not a plain address */
   unsafeAddress: number;
-  /** Already warned (or thanked) for this campaign */
+  /** Already emailed for this campaign (warned, sent a removal notice, or thanked by an earlier version) */
   alreadyContacted: number;
   /** Over `maxWarningsPerCampaign` */
   overCap: number;
@@ -65,10 +65,13 @@ export interface WarningSkips {
 
 export interface WarningScope {
   kind: 'send_warning';
-  /** People who received the attack: each gets the warning, individually */
+  /**
+   * People who received the attack: each gets the warning, individually.
+   * Reporters are never in it: they reported it themselves. (Scopes
+   * stored by an earlier version may also carry a `reporters` list for a
+   * thank-you note; it is ignored.)
+   */
   recipients: WarningRecipient[];
-  /** People who reported it: each gets the shorter thank-you note */
-  reporters: string[];
   /** Also send the broadcast to the distribution list */
   distribution: boolean;
   skipped: WarningSkips;
@@ -133,12 +136,34 @@ export interface ActionResult {
   summary: string[];
   /** Warnings: who was emailed (so nobody is emailed twice) */
   warned?: string[];
+  /**
+   * Reporters sent a thank-you note by an earlier version (the note no
+   * longer exists). Only read: still counted as already contacted.
+   */
   thanked?: string[];
   distributionSent?: boolean;
   failed?: number;
   notSentForTime?: number;
   /** Removal dry run: what it would do */
   wouldRemove?: RemovalCounts;
+  /**
+   * A real (non-dry-run) removal: the mailboxes a copy was actually moved
+   * out of, as the executor reports them. Only the future write tier sets
+   * it; the dry-run executor never does. Removal notices go only to these.
+   */
+  removed?: RemovedMailbox[];
+  /** Removal notices: who was emailed (so nobody gets one twice) */
+  notified?: string[];
+  noticesFailed?: number;
+  noticesNotSentForTime?: number;
+}
+
+/** One mailbox a removal executor actually moved copies out of */
+export interface RemovedMailbox {
+  /** Entra directory object ID: must be a mailbox the approved scope named */
+  mailboxId: string;
+  /** Copies moved to Deleted Items in this mailbox (a notice needs at least 1) */
+  messages: number;
 }
 
 export interface RemovalCounts {
@@ -203,8 +228,8 @@ export interface IncidentSummary {
   lastReportAt?: string;
   /**
    * Who reported it (`originalForwarder` of each report, from the campaign
-   * tracker; at most 200). Thanked, never warned; safe-domain checked again
-   * before any email.
+   * tracker; at most 200). Never warned (they reported it themselves);
+   * sent a removal notice only if their own copy is actually removed.
    */
   reporters?: string[];
   /** Latest analysis in the campaign, quoted so "false positive" replies match it */
