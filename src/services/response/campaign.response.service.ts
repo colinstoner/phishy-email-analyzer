@@ -2,8 +2,11 @@
  * Campaign response: what Phishy does once it knows an attack is hitting
  * several people.
  *
- * Off by default (`campaignResponse.enabled`). When on, a campaign that
- * crosses the alert threshold becomes an **incident**:
+ * Off by default (`campaignResponse.enabled`). When on, a campaign becomes
+ * an **incident** when it crosses the alert threshold (3 reports from 2
+ * people) or, earlier, when one malicious report's blast-radius lookup shows
+ * the email reached at least `reachThreshold` people besides its reporters
+ * (the reach trigger). Either way:
  *
  * 1. the security team gets an incident email built for a decision (what the
  *    attack is, timeline, blast radius, what Phishy has done, proposed
@@ -17,6 +20,10 @@
  *    per mailbox; approving it runs a DRY RUN only (no Graph write exists);
  * 4. later reports and wider reach update the incident in the same thread,
  *    rate-limited.
+ *
+ * Nothing runs automatically on one person's word: an action set to `auto`
+ * is proposed for approval instead until at least two people have reported
+ * the campaign, and goes ahead on the update that brings the second reporter.
  *
  * Trust rules:
  * - Approvals arrive only through the command channel (security-team
@@ -35,6 +42,7 @@ import { createLogger } from '../../utils/logger';
 import { emitCampaignResponseMetric } from '../../utils/metrics';
 import type { CampaignResponseConfig } from '../../config/schema';
 import type { AnalysisResult, EmailSendResult, ExtractedEmailData } from '../../types';
+import { MALICIOUS_VERDICTS, ThreatVerdict } from '../../types';
 import type { BlastRadiusReport } from '../graph/blast-radius.service';
 import type { CampaignMatch, CampaignRecord } from '../intelligence/database.service';
 import { computeCampaignSignature } from '../intelligence/database.service';
@@ -109,7 +117,7 @@ export interface CampaignReportInput {
   match: CampaignMatch;
   campaign: CampaignRecord;
   risk: ReportRisk;
-  analysis: Pick<AnalysisResult, 'summary' | 'indicators'>;
+  analysis: Pick<AnalysisResult, 'summary' | 'indicators' | 'analysisFailed'>;
   emailData: Pick<ExtractedEmailData, 'subject' | 'forwardedHeaders'>;
   analysisId?: string;
   /** This report's blast-radius lookup, when one ran */
@@ -132,6 +140,61 @@ export type CampaignResponseOutcome =
 export interface ApprovalReply {
   heading: string;
   body: string[];
+}
+
+/** Distinct reporters a campaign needs before an `auto` action may run */
+export const AUTO_MIN_REPORTERS = 2;
+
+/** Why a reach-triggered incident was opened: the numbers, for the email and the audit */
+export interface ReachBasis {
+  /** Reports of the campaign so far */
+  reports: number;
+  /** Distinct people who reported it */
+  reporters: number;
+  /** Delivered recipients the lookup listed who are not reporters */
+  recipients: number;
+  threshold: number;
+}
+
+/**
+ * Recipients this report's blast-radius lookup actually listed whose copy
+ * reached a mailbox (any folder), not counting anyone who reported the
+ * campaign. Conservative on purpose: a recipient whose mailbox was not read,
+ * whose copy was not found (quarantined, or not there) or whose delivery
+ * failed does not count, and neither does anyone the lookup counted without
+ * listing. Undefined when the lookup gave no usable result.
+ */
+export function countReach(
+  report: BlastRadiusReport | undefined,
+  reporters: string[]
+): number | undefined {
+  if (!report || (report.status !== 'complete' && report.status !== 'partial')) {
+    return undefined;
+  }
+  const excluded = new Set(reporters.map(address => address.trim().toLowerCase()));
+  if (report.reporterAddress) {
+    excluded.add(report.reporterAddress.trim().toLowerCase());
+  }
+  const reached = new Set<string>();
+  for (const recipient of report.recipients ?? []) {
+    const address = recipient.address.trim().toLowerCase();
+    if (recipient.mailbox === 'found' && address && !excluded.has(address)) {
+      reached.add(address);
+    }
+  }
+  return reached.size;
+}
+
+function distinctCount(addresses: string[] | undefined): number {
+  return new Set((addresses ?? []).map(address => address.trim().toLowerCase())).size;
+}
+
+function reachDetectedBy(basis: ReachBasis): string {
+  const reports =
+    basis.reports <= 1
+      ? 'a single report'
+      : `${basis.reports} reports from ${basis.reporters} ${basis.reporters === 1 ? 'person' : 'people'}`;
+  return `reach, after ${reports}: blast radius found ${basis.recipients} delivered recipient(s) besides the ${basis.reporters === 1 ? 'reporter' : 'reporters'} (reach threshold ${basis.threshold}), so Phishy did not wait for the report-count threshold`;
 }
 
 const ADDRESS = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/;
@@ -231,10 +294,11 @@ export class CampaignResponseService {
     try {
       const existing = await this.store.getIncidentBySignature(input.match.signature);
       if (!existing) {
-        if (!input.match.shouldAlert) {
-          return 'below_threshold';
+        if (input.match.shouldAlert) {
+          return await this.open(input);
         }
-        return await this.open(input);
+        const reach = this.reachBasis(input);
+        return reach ? await this.open(input, reach) : 'below_threshold';
       }
       return await this.update(existing, input);
     } catch (error) {
@@ -250,6 +314,35 @@ export class CampaignResponseService {
       });
       return 'error';
     }
+  }
+
+  /**
+   * The reach trigger: should this report open the incident before the
+   * report-count threshold? Only for a malicious verdict (phishing, bec,
+   * malware_delivery: not `suspicious`, never a failed analysis), with the
+   * trigger on, and only on this report's own usable blast-radius lookup.
+   * Safelist reporters never get here: the handler does not track them.
+   */
+  private reachBasis(input: CampaignReportInput): ReachBasis | undefined {
+    const threshold = this.config.reachThreshold ?? 0;
+    if (
+      threshold <= 0 ||
+      input.analysis.analysisFailed ||
+      !MALICIOUS_VERDICTS.includes(input.risk.verdict as ThreatVerdict)
+    ) {
+      return undefined;
+    }
+    const reporters = input.campaign.uniqueRecipients ?? [];
+    const recipients = countReach(input.blastRadius, reporters);
+    if (recipients === undefined || recipients < threshold) {
+      return undefined;
+    }
+    return {
+      reports: input.match.detectionCount,
+      reporters: Math.max(1, distinctCount(reporters)),
+      recipients,
+      threshold,
+    };
   }
 
   private summaryFrom(input: CampaignReportInput, previous?: IncidentSummary): IncidentSummary {
@@ -295,6 +388,7 @@ export class CampaignResponseService {
       detectedBy: previous?.detectedBy.startsWith('fan-out scan')
         ? 'fan-out scan, then employee reports'
         : (previous?.detectedBy ?? 'employee reports (the campaign alert threshold)'),
+      ...(previous?.openedOnReach ? { openedOnReach: previous.openedOnReach } : {}),
     };
   }
 
@@ -309,9 +403,23 @@ export class CampaignResponseService {
     return earliest ? { ...summary, firstDeliveryAt: earliest } : summary;
   }
 
-  private async open(input: CampaignReportInput): Promise<CampaignResponseOutcome> {
+  /**
+   * Open the incident. `onReach` is set when the reach trigger opened it
+   * (before the report-count threshold); it is stored as `trigger_source =
+   * 'reports'` (migration 006's CHECK allows only that and `fanout_scan`)
+   * with the basis in the summary (`openedOnReach`, "Detected by") and the
+   * audit row.
+   */
+  private async open(
+    input: CampaignReportInput,
+    onReach?: ReachBasis
+  ): Promise<CampaignResponseOutcome> {
     const reach = mergeReach(undefined, input.blastRadius, input.blastRadiusEnabled);
-    const summary = this.withDelivery(this.summaryFrom(input), reach);
+    const base = this.summaryFrom(input);
+    const summary = this.withDelivery(
+      onReach ? { ...base, detectedBy: reachDetectedBy(onReach), openedOnReach: onReach } : base,
+      reach
+    );
     const { incident, created } = await this.store.createIncident({
       campaignId: input.campaign.id,
       campaignSignature: input.match.signature,
@@ -322,6 +430,7 @@ export class CampaignResponseService {
       reportCount: input.match.detectionCount,
     });
     if (!created) {
+      // Another report opened it a moment ago (either trigger): join it
       return this.update(incident, input);
     }
     await this.store.appendAudit({
@@ -330,13 +439,24 @@ export class CampaignResponseService {
       actor: PHISHY,
       detail: {
         trigger: 'reports',
+        basis: onReach ? 'reach' : 'report_count',
         reports: incident.reportCount,
         recipients: reach.totals.recipients,
+        ...(onReach
+          ? {
+              reporters: onReach.reporters,
+              reachRecipients: onReach.recipients,
+              reachThreshold: onReach.threshold,
+            }
+          : {}),
       },
     });
-    emitCampaignResponseMetric('CampaignIncidentsOpened', 1, { Trigger: 'reports' });
+    emitCampaignResponseMetric('CampaignIncidentsOpened', 1, {
+      Trigger: onReach ? 'reach' : 'reports',
+    });
     logger.info('Campaign incident opened', {
       incidentId: incident.id,
+      basis: onReach ? 'reach' : 'report_count',
       reports: incident.reportCount,
       recipients: reach.totals.recipients,
       reachStatus: reach.status,
@@ -347,7 +467,10 @@ export class CampaignResponseService {
       forceApprove: false,
       getRemainingMs: input.getRemainingMs,
     });
-    if (input.campaign.id) {
+    // `alert_sent_at` means the campaign crossed the report-count threshold
+    // and was handled. An incident opened on reach has not crossed it, so it
+    // is marked later, by the report that does (see `update`)
+    if (input.campaign.id && !onReach) {
       await this.deps.markCampaignAlerted(input.campaign.id);
     }
     return 'opened';
@@ -366,6 +489,15 @@ export class CampaignResponseService {
     const summary = this.withDelivery(this.summaryFrom(input, stored.summary), reach);
     await this.store.updateIncident(stored.id, { reach, summary, reportCount });
     const incident: CampaignIncident = { ...stored, reach, summary, reportCount };
+    if (stored.summary.openedOnReach && input.match.shouldAlert && input.campaign.id) {
+      // The reach-opened incident has now crossed the report-count threshold
+      // too: record it as the report-count trigger would have
+      await this.deps.markCampaignAlerted(input.campaign.id);
+    }
+    // The report that brings the second reporter releases `auto` actions
+    // held for approval until now
+    const released =
+      this.autoConfigured(incident) && this.autoHeld(stored) && !this.autoHeld(incident);
 
     const expired = await this.expire(incident);
     const changes: string[] = [];
@@ -382,6 +514,11 @@ export class CampaignResponseService {
     if (expired.length > 0) {
       changes.push(`${expired.length} proposed action(s) expired without approval.`);
     }
+    if (released) {
+      changes.push(
+        'A second person has reported it, so actions set to send automatically are no longer held for approval.'
+      );
+    }
     if (changes.length === 0) {
       return 'unchanged';
     }
@@ -390,8 +527,9 @@ export class CampaignResponseService {
     // An incident whose first email has not gone yet (a report racing the one
     // that opened it) counts from its creation, so it is not emailed twice
     const last = (incident.lastUpdateSentAt ?? incident.createdAt).getTime();
-    if (this.now().getTime() - last < intervalMs) {
-      // Folded into the next update; proposals are not changed without one
+    if (!released && this.now().getTime() - last < intervalMs) {
+      // Folded into the next update; proposals are not changed without one.
+      // A release is never deferred: it is decided on this transition only
       return 'update_deferred';
     }
 
@@ -399,6 +537,7 @@ export class CampaignResponseService {
       done: [],
       changes,
       forceApprove: incident.trigger === 'fanout_scan' && incident.reportCount === 0,
+      releaseHeld: released,
       getRemainingMs: input.getRemainingMs,
     });
     return 'updated';
@@ -493,9 +632,25 @@ export class CampaignResponseService {
     return expired;
   }
 
+  /** Something this incident could send would run without an approval, but for the hold */
+  private autoConfigured(incident: CampaignIncident): boolean {
+    const modes = this.modes(incident, false, false);
+    return modes.targeted === 'auto' || modes.distribution === 'auto';
+  }
+
+  /**
+   * `auto` actions wait for an approval until the campaign has reports from
+   * at least two different people (a reach-triggered incident can open on
+   * one report from one person).
+   */
+  private autoHeld(incident: CampaignIncident): boolean {
+    return distinctCount(this.reportersOf(incident)) < AUTO_MIN_REPORTERS;
+  }
+
   private modes(
     incident: CampaignIncident,
-    forceApprove: boolean
+    forceApprove: boolean,
+    applyHold = true
   ): {
     targeted: 'off' | 'approve' | 'auto';
     distribution: 'off' | 'approve' | 'auto';
@@ -519,7 +674,20 @@ export class CampaignResponseService {
       );
       targeted = 'off';
     }
-    if (forceApprove) {
+    const held = applyHold && !forceApprove && this.autoHeld(incident);
+    if (held && incident.reportCount > 0 && (targeted === 'auto' || distribution === 'auto')) {
+      const parts = [
+        ...(targeted === 'auto' ? ['the targeted warning'] : []),
+        ...(distribution === 'auto' ? ['the warning to the distribution list'] : []),
+      ];
+      const what = parts.join(' and ');
+      const [is, it] = parts.length > 1 ? ['are', 'they go'] : ['is', 'it goes'];
+      notes.push(
+        `${what.charAt(0).toUpperCase()}${what.slice(1)} ${is} set to send automatically, but waiting for your approval because only one person has reported it so far. ${it.charAt(0).toUpperCase()}${it.slice(1)} ahead automatically when a second person reports it, or when you approve.`
+      );
+    }
+    if (forceApprove || held) {
+      // The fan-out scan's mechanism: proposed for approval, never sent unasked
       targeted = targeted === 'auto' ? 'approve' : targeted;
       distribution = distribution === 'auto' ? 'approve' : distribution;
     }
@@ -632,10 +800,26 @@ export class CampaignResponseService {
       done: string[];
       changes?: string[];
       forceApprove: boolean;
+      /** The second reporter arrived: warnings held for approval give way to `auto` */
+      releaseHeld?: boolean;
       getRemainingMs?: () => number | undefined;
     }
   ): Promise<void> {
     const modes = this.modes(incident, options.forceApprove);
+    if (options.releaseHeld) {
+      // The held proposals are replaced by what runs now (and by a fresh
+      // proposal for anything still set to approve), so no reference the
+      // team holds can send the same warning a second time
+      for (const cancelled of await this.store.cancelProposed(incident.id, 'send_warning')) {
+        await this.store.appendAudit({
+          incidentId: incident.id,
+          actionId: cancelled.id,
+          event: 'action_cancelled',
+          actor: PHISHY,
+          detail: { reason: 'released_to_auto' },
+        });
+      }
+    }
     const actions = await this.store.listActions(incident.id);
     const done = [...options.done, ...this.history(actions)];
     const notes = [...modes.notes];

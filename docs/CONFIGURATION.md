@@ -177,13 +177,15 @@ With [campaign response](#campaign-response-optional) on, the channel also accep
 
 ### Campaign Response (Optional)
 
-What Phishy does once a campaign crosses the alert threshold (at least 3 reports from at least 2 people within 4 hours). Off by default; off means the campaign alert behaves exactly as before: one generic warning to `PHISHY_CAMPAIGN_ALERTS_DISTRIBUTION`.
+What Phishy does once a campaign crosses the alert threshold (at least 3 reports from at least 2 people within 4 hours), or earlier, once one report shows the email reached enough people (below). Off by default; off means the campaign alert behaves exactly as before: one generic warning to `PHISHY_CAMPAIGN_ALERTS_DISTRIBUTION`.
 
 When on, each campaign becomes an **incident**:
 
 - **The security team** gets one incident email: what the attack is, timeline, blast radius, what Phishy has done, and proposed actions, each with the exact reply line that approves it. Later reports and wider reach arrive as replies in the same thread, at most one per `updateIntervalMinutes`.
 - **The people who received it** (found by blast radius) get a plain-language warning, one email each, with your organization's own "if you already clicked" instructions. People who reported it get a short thank-you note instead. Nobody whose copy was not delivered is warned; every address must be on a safe domain; no link from the attack is ever included.
 - **Remove remaining copies** is proposed with a scope of exact message IDs per mailbox. In this version approving it runs a **dry run**: Phishy replies with what it would remove, and no mailbox is changed (the mailbox write tier is not built).
+
+**Reach trigger.** With [blast radius](#blast-radius-optional) on, the incident opens on the *first* malicious report (verdict phishing, BEC or malware delivery; not merely suspicious) when that report's lookup found at least `reachThreshold` people (default 5) whose copy was delivered to a mailbox, not counting anyone who reported it. Only recipients the lookup actually listed count; failed, quarantined and unread-mailbox rows do not. When the lookup is unavailable or blast radius is off, the report-count threshold still applies. `0` turns the reach trigger off. Because such an incident can rest on one person's report, anything set to `auto` is proposed for approval instead until a second person reports it; it then goes ahead automatically (once), unless the security team approved it first.
 
 `audience` decides who is warned. The default, `distribution`, keeps today's broadcast. Choose `recipients` (or `both`) to warn the people who actually received it; that needs [blast radius](#blast-radius-optional). `employeeWarning` decides whether the targeted warning waits for an approval (`approve`, the default), goes out at once (`auto`) or never (`off`); `distributionWarning` does the same for the broadcast (default `auto`, as before). An approval is good for `approvalTtlHours` and applies to its own campaign only; a late approval is proposed again under a new reference.
 
@@ -200,6 +202,7 @@ Requires campaign alerts (`PHISHY_CAMPAIGN_ALERTS_ENABLED`), the intelligence da
 | `PHISHY_CAMPAIGN_RESPONSE_MAX_REMOVAL_MAILBOXES` | `campaignResponse.maxRemovalMailboxes` | `500` | Most mailboxes one removal may name |
 | `PHISHY_CAMPAIGN_RESPONSE_MAX_REMOVAL_MESSAGES` | `campaignResponse.maxRemovalMessages` | `1000` | Most messages one removal may name |
 | `PHISHY_CAMPAIGN_RESPONSE_UPDATE_INTERVAL_MINUTES` | `campaignResponse.updateIntervalMinutes` | `30` | Shortest gap between incident updates |
+| `PHISHY_CAMPAIGN_RESPONSE_REACH_THRESHOLD` | `campaignResponse.reachThreshold` | `5` | Open the incident on the first malicious report when its blast radius found at least this many delivered recipients besides the reporters; `0` = report count only |
 | `PHISHY_CAMPAIGN_RESPONSE_CLICKED_INSTRUCTIONS` | `campaignResponse.alreadyClickedInstructions` | *(see below)* | Plain text shown under "If you already clicked or entered your password" |
 | `PHISHY_CAMPAIGN_RESPONSE_TIME_ZONE` | `campaignResponse.timeZone` | `UTC` | IANA time zone for the times in the warning (e.g. `Europe/London`) |
 

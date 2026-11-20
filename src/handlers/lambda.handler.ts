@@ -917,7 +917,9 @@ async function processEmailEvent(
       }
     : undefined;
 
-  // After the reports have gone: open or update the campaign's incident
+  // After the reports have gone: open or update the campaign's incident.
+  // This report's own blast-radius result (set by the lookup above, which
+  // runs inside the report-sending step) is what the reach trigger counts
   const respondToCampaign = async (): Promise<void> => {
     if (!trackedCampaign || !services.campaignResponse) {
       return;

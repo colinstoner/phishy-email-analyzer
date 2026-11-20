@@ -105,6 +105,16 @@ Parameters:
       How the targeted employee warning is authorized: approve (a security-team
       member replies with the approval line), auto (sent as soon as the campaign
       is detected) or off. Used only when CampaignResponseEnabled is true.
+  CampaignResponseReachThreshold:
+    Type: Number
+    Default: 5
+    MinValue: 0
+    Description: >
+      Open the campaign incident on the first malicious report when its
+      blast-radius lookup found at least this many delivered recipients
+      besides the reporters (0 = wait for the report-count threshold only).
+      Automatic warnings still wait for a second reporter. Used only when
+      CampaignResponseEnabled is true.
   EmailCommandsEnabled:
     Type: String
     AllowedValues: ['true', 'false']
@@ -431,6 +441,7 @@ Resources:
           PHISHY_CAMPAIGN_RESPONSE_ENABLED: !If [UseCampaignResponse, 'true', !Ref AWS::NoValue]
           PHISHY_CAMPAIGN_RESPONSE_AUDIENCE: !If [UseCampaignResponse, !Ref CampaignResponseAudience, !Ref AWS::NoValue]
           PHISHY_CAMPAIGN_RESPONSE_EMPLOYEE_WARNING: !If [UseCampaignResponse, !Ref CampaignResponseEmployeeWarning, !Ref AWS::NoValue]
+          PHISHY_CAMPAIGN_RESPONSE_REACH_THRESHOLD: !If [UseCampaignResponse, !Ref CampaignResponseReachThreshold, !Ref AWS::NoValue]
           PHISHY_EMAIL_COMMANDS_ENABLED: !If [UseEmailCommands, 'true', !Ref AWS::NoValue]
           PHISHY_ATTACHMENT_ANALYSIS_ENABLED: !If [UseAttachmentAnalysis, 'true', !Ref AWS::NoValue]
           PHISHY_REPORT_BUTTON_ENABLED: !If [UseReportButton, 'true', !Ref AWS::NoValue]

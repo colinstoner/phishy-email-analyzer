@@ -77,6 +77,7 @@ const ENV_MAPPINGS: Record<string, string> = {
   PHISHY_CAMPAIGN_RESPONSE_MAX_REMOVAL_MAILBOXES: 'campaignResponse.maxRemovalMailboxes',
   PHISHY_CAMPAIGN_RESPONSE_MAX_REMOVAL_MESSAGES: 'campaignResponse.maxRemovalMessages',
   PHISHY_CAMPAIGN_RESPONSE_UPDATE_INTERVAL_MINUTES: 'campaignResponse.updateIntervalMinutes',
+  PHISHY_CAMPAIGN_RESPONSE_REACH_THRESHOLD: 'campaignResponse.reachThreshold',
   PHISHY_CAMPAIGN_RESPONSE_CLICKED_INSTRUCTIONS: 'campaignResponse.alreadyClickedInstructions',
   PHISHY_CAMPAIGN_RESPONSE_TIME_ZONE: 'campaignResponse.timeZone',
 

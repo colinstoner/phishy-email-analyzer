@@ -192,6 +192,58 @@ function forward(): SESEvent {
   );
 }
 
+/** An Outlook Report-button phishing submission (the original attached as message/rfc822) */
+function reportButtonEvent(): SESEvent {
+  sequence += 1;
+  const subject = `Phishing:11111111-2222-4333-8444-55555555555${sequence % 10}|billing@examp1e-billing.test|(Invoice 2291 overdue) 11/17/2026 09:14:00`;
+  const inner = [
+    'From: "Accounts Team" <billing@examp1e-billing.test>',
+    'To: employee@example.com',
+    'Subject: Invoice 2291 overdue',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'Pay at https://pay.examp1e-billing.test/now today.',
+  ].join(CRLF);
+  const raw = [
+    'From: Employee <employee@example.com>',
+    'To: phishy@example.com',
+    `Subject: ${subject}`,
+    'MIME-Version: 1.0',
+    'Content-Type: multipart/mixed; boundary="report-boundary"',
+    '',
+    '--report-boundary',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'Reported by the Outlook Report button.',
+    '--report-boundary',
+    'Content-Type: message/rfc822',
+    '',
+    inner,
+    '--report-boundary--',
+    '',
+  ].join(CRLF);
+  return {
+    Records: [
+      {
+        eventSource: 'aws:ses',
+        eventVersion: '1.0',
+        ses: {
+          mail: {
+            source: 'employee@example.com',
+            messageId: `ses-button-${sequence}`,
+            timestamp: '2026-11-17T09:21:00.000Z',
+            destination: ['phishy@example.com'],
+            headers: [{ name: 'From', value: 'Employee <employee@example.com>' }],
+            commonHeaders: { from: ['Employee <employee@example.com>'], subject },
+          },
+          receipt: { action: { type: 'Lambda' } },
+          content: raw,
+        },
+      },
+    ],
+  } as unknown as SESEvent;
+}
+
 const PHISH = {
   summary: 'Credential phishing behind a fake invoice.',
   isPhishing: true,
@@ -334,6 +386,42 @@ describe('campaign response on', () => {
   it('does nothing for a benign verdict', async () => {
     mockConfig = config(on);
     mockAnalyzeEmail.mockResolvedValue({ ...PHISH, isPhishing: false, indicators: [] });
+    await loadHandler()(forward(), {} as Context);
+    expect(mockTrackDetection).not.toHaveBeenCalled();
+    expect(mockHandleCampaignReport).not.toHaveBeenCalled();
+  });
+
+  it('hands a Report-button report to campaign response after its single security email, with its blast radius', async () => {
+    mockConfig = { ...config({ ...on, reachThreshold: 1 }), reportButton: { enabled: true } };
+    const order: string[] = [];
+    mockSendAnalysisReport.mockImplementation((to: string) => {
+      order.push(`send:${to}`);
+      return Promise.resolve({ success: true, messageId: 'out-1' });
+    });
+    mockHandleCampaignReport.mockImplementation(() => {
+      order.push('respond');
+      return Promise.resolve('opened');
+    });
+
+    await loadHandler()(reportButtonEvent(), {} as Context);
+
+    expect(mockTrackDetection).toHaveBeenCalledTimes(1);
+    expect(mockLookup).toHaveBeenCalledTimes(1);
+    // Silent: the reporter is never emailed; one email to the security team, then the response
+    expect(order).toEqual(['send:security@example.com', 'respond']);
+    const input = mockHandleCampaignReport.mock.calls[0][0];
+    expect(input.blastRadius).toBe(SECTION);
+    expect(input.risk.verdict).toBeDefined();
+    expect(input.analysis.analysisFailed).toBeFalsy();
+    expect(mockResponseCtor.mock.calls[0][0].config.reachThreshold).toBe(1);
+  });
+
+  it('never tracks or responds to a report from a safelist user', async () => {
+    const base = config(on);
+    mockConfig = {
+      ...base,
+      email: { ...(base.email as Record<string, unknown>), safeSenders: ['employee@example.com'] },
+    };
     await loadHandler()(forward(), {} as Context);
     expect(mockTrackDetection).not.toHaveBeenCalled();
     expect(mockHandleCampaignReport).not.toHaveBeenCalled();
