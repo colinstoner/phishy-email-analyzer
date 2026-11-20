@@ -318,7 +318,8 @@ describe('incident email', () => {
     // What a mail client makes of a quoted HTML copy: block elements become line breaks
     const asText = email.html
       .replace(/<(?:\/p|\/div|\/td|\/tr|\/li|br|\/h[1-6])[^>]*>/gi, '\n')
-      .replace(/<[^>]+>/g, '')
+      .split(/<[^>]*>/)
+      .join('')
       .replace(/&nbsp;/g, ' ');
     expect(asText.split('\n').some(line => /^\W{0,3}approve/i.test(line.trim()))).toBe(false);
   });
