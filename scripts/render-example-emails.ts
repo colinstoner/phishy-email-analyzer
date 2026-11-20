@@ -441,7 +441,7 @@ const employeeWarning = buildEmployeeWarning(
 const fanoutFacts: SenderHistoryFacts = {
   classification: 'established_with_anomalous_fanout',
   lookbackDays: 30,
-  burstWindowHours: 24,
+  burstWindowHours: 1,
   history: {
     messages: { count: 37, atLeast: false },
     recipients: { count: 4, atLeast: false },
@@ -501,6 +501,7 @@ const fanoutAlert = buildFanoutAlert({
   waveFirstSeen: '2026-11-19T16:04:00.000Z',
   window: { from: '2026-11-19T15:15:00.000Z', to: '2026-11-19T16:15:00.000Z' },
   incompleteReasons: [],
+  timeZone: TIME_ZONE,
 });
 
 // ---------------------------------------------------------------------------
