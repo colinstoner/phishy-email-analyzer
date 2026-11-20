@@ -857,10 +857,18 @@ export class CampaignResponseService {
       modes.distribution === 'auto'
     );
     if (!isEmptyScope(autoScope)) {
-      auto = await this.propose(incident, 'send_warning', autoScope, 'auto', actions);
+      const created = await this.propose(incident, 'send_warning', autoScope, 'auto', actions);
+      // Only the invocation whose conditional UPDATE moved it to `approved`
+      // runs it. Undefined means another invocation got there first (it
+      // cancelled or approved this proposal): this one sends nothing
+      auto = created ? await this.store.markAutoApproved(created.id) : undefined;
       if (auto) {
-        auto = (await this.store.markAutoApproved(auto.id)) ?? auto;
         done.push(this.autoLine(autoScope));
+      } else if (created) {
+        logger.info('Automatic warning not run: another invocation handled it', {
+          incidentId: incident.id,
+          actionId: created.id,
+        });
       }
     }
 

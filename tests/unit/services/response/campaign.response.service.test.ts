@@ -311,6 +311,30 @@ describe('opening an incident', () => {
     expect(store.events()).toContain('action_executed');
   });
 
+  it('sends nothing when another invocation won the race to approve the auto action', async () => {
+    const { service, sent, store } = setup({ employeeWarning: 'auto' });
+    // Another invocation cancels (or approves) the new proposal before this
+    // one's conditional UPDATE: markAutoApproved finds no `proposed` row
+    const markAutoApproved = jest.spyOn(store, 'markAutoApproved').mockImplementation(async id => {
+      const row = store.actions.find(a => a.id === id);
+      if (row) {
+        row.status = 'cancelled';
+      }
+      return undefined;
+    });
+    await service.handleCampaignReport(reportInput());
+
+    expect(markAutoApproved).toHaveBeenCalledTimes(1);
+    expect(employeeEmails(sent)).toEqual([]);
+    expect(sent[0].to).toBe('security@example.com');
+    expect(sent[0].text).not.toContain('now (set to send automatically)');
+    const action = store.actions.find(a => a.authorization === 'auto');
+    expect(action).toMatchObject({ status: 'cancelled' });
+    expect(action?.result).toBeUndefined();
+    expect(store.events()).not.toContain('action_executed');
+    expect(store.events()).not.toContain('action_failed');
+  });
+
   it('gives reporters the short thank-you note, not the warning', async () => {
     const { service, sent } = setup({ employeeWarning: 'auto' });
     await service.handleCampaignReport(reportInput());
