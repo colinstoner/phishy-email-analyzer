@@ -32,11 +32,15 @@ body:
       label: Area
       options:
         - Email parsing / MIME
-        - AI analysis / verdicts
-        - Reports (employee email)
-        - Email commands (security-team replies)
+        - Attachment analysis
+        - AI analysis / verdicts / checklist scoring
+        - Reports and other emails Phishy sends
+        - Email commands / approvals (security-team replies)
+        - Outlook Report-button intake
         - Threat intelligence / database
-        - Campaign detection / cache
+        - Campaign detection / cache / campaign response
+        - Microsoft Graph (lookups, blast radius, fan-out scan, broker)
+        - Injection eval
         - Deployment (SAM / AWS)
         - Configuration
         - Other
@@ -50,7 +54,7 @@ body:
         Phishy version: 3.0.0
         Provider: bedrock (global.anthropic.claude-opus-5-5)
         Node: 22
-        Features enabled: intelligence, agentic
+        Features enabled: intelligence, agentic, graph (broker)
   - type: textarea
     id: logs
     attributes:
