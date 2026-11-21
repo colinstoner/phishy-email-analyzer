@@ -849,24 +849,59 @@ export function buildBlastRadiusText(report: BlastRadiusReport): string[] {
   return lines;
 }
 
+/** The entities stripHtmlForDisplay decodes, each to its one character */
+const DISPLAY_ENTITIES: Readonly<Record<string, string>> = {
+  '&nbsp;': ' ',
+  '&amp;': '&',
+  '&lt;': '<',
+  '&gt;': '>',
+  '&quot;': '"',
+  '&#39;': "'",
+};
+
 /**
- * Strip HTML tags and convert to plain text for safe display
- * This prevents XSS from malicious email content
+ * Drop every "<...>" (a "<", at least one character, then the next ">"),
+ * the strings `/<[^>]+>/g` removes, in one linear pass. Nothing that is
+ * removed can re-form a tag from its neighbours: every "<" with a ">" after
+ * it goes, along with everything up to that ">", except a bare "<>". The
+ * regex retried from every "<" and was quadratic on a long run of them.
  */
-function stripHtmlForDisplay(html: string): string {
+function dropTagsForDisplay(html: string): string {
+  let out = '';
+  let pos = 0;
+  let open = html.indexOf('<');
+  while (open !== -1) {
+    const close = html.indexOf('>', open + 1);
+    if (close === -1) break;
+    if (close === open + 1) {
+      // "<>" is not a tag: keep it and look past it
+      open = html.indexOf('<', open + 1);
+      continue;
+    }
+    out += html.slice(pos, open);
+    pos = close + 1;
+    open = html.indexOf('<', pos);
+  }
+  return out + html.slice(pos);
+}
+
+/**
+ * Reduce an HTML body to plain text for display. The result is still
+ * hostile text: codeBox escapes it, so decoded "<" and ">" render as
+ * characters. Entities are decoded in a single pass, so "&amp;lt;" becomes
+ * the text "&lt;" and is never decoded a second time into "<".
+ */
+export function stripHtmlForDisplay(html: string): string {
   if (!html) return '';
-  return html
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/p>/gi, '\n\n')
-    .replace(/<\/div>/gi, '\n')
-    .replace(/<\/li>/gi, '\n')
-    .replace(/<[^>]+>/g, '')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
+  const text = dropTagsForDisplay(
+    html
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<\/p>/gi, '\n\n')
+      .replace(/<\/div>/gi, '\n')
+      .replace(/<\/li>/gi, '\n')
+  );
+  return text
+    .replace(/&(?:nbsp|amp|lt|gt|quot|#39);/g, entity => DISPLAY_ENTITIES[entity])
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 }

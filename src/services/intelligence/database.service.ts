@@ -47,6 +47,57 @@ export function stripSslOverrides(connectionString: string): string {
 }
 
 /**
+ * The host names a Postgres connection string names, lower-case: the URL's
+ * host (and any `host` query parameter), or the libpq key=value `host`.
+ * Comma-separated multi-host lists are split. Empty when none is named.
+ */
+export function connectionHosts(connectionString: string): string[] {
+  const split = (value: string | null | undefined): string[] =>
+    (value ?? '')
+      .split(',')
+      .map(host => host.trim().toLowerCase())
+      .filter(host => host.length > 0);
+  const decode = (value: string): string => {
+    try {
+      return decodeURIComponent(value);
+    } catch {
+      return value;
+    }
+  };
+  try {
+    const url = new URL(connectionString);
+    return [...split(decode(url.hostname)), ...split(url.searchParams.get('host'))];
+  } catch {
+    // Not WHATWG-parseable: a multi-host URL ("h1:5432,h2:5433") or libpq form
+  }
+  const scheme = /^[a-z][a-z0-9+.-]*:\/\//i.exec(connectionString);
+  if (scheme) {
+    const rest = connectionString.slice(scheme[0].length);
+    const end = rest.search(/[/?#]/);
+    const authority = end === -1 ? rest : rest.slice(0, end);
+    const hostList = authority.slice(authority.lastIndexOf('@') + 1);
+    return split(decode(hostList)).map(host => host.replace(/:\d*$/, ''));
+  }
+  // libpq key=value form; a value may be single-quoted
+  const match = /(?:^|\s)host\s*=\s*(?:'([^']*)'|(\S+))/i.exec(connectionString);
+  return match ? split(match[1] ?? match[2]) : [];
+}
+
+/** RDS endpoint host names, commercial and China partitions */
+const RDS_HOST_SUFFIXES = ['.rds.amazonaws.com', '.rds.amazonaws.com.cn'];
+
+/**
+ * True when the connection string's host is an RDS endpoint, decided on the
+ * parsed host name's suffix: a substring test would also fire on the text
+ * anywhere else (a password, a database name, another host's subdomain).
+ */
+export function isRdsConnectionString(connectionString: string): boolean {
+  return connectionHosts(connectionString).some(host =>
+    RDS_HOST_SUFFIXES.some(suffix => host.endsWith(suffix))
+  );
+}
+
+/**
  * Email analysis record for database storage
  */
 export interface EmailAnalysisRecord {
@@ -248,7 +299,7 @@ export class IntelligenceDatabaseService {
     // silently fail open (no verification). Strip it in BOTH the URL and the
     // libpq key=value form — leaving a key=value sslmode intact would bypass
     // the pin without error.
-    if (connectionString.includes('.rds.amazonaws.com')) {
+    if (isRdsConnectionString(connectionString)) {
       config.connectionString = stripSslOverrides(connectionString);
       config.ssl = { ca: rdsCaBundle };
     }

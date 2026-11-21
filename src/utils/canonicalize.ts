@@ -14,6 +14,7 @@ import { domainToUnicode } from 'url';
 import { LinkFact } from '../types';
 import { classifyFileShare } from './file-share';
 import { registrableOf } from './registrable';
+import { asciiWordAt, forwardFinder } from './text.scan';
 
 export { registrableOf };
 
@@ -387,19 +388,12 @@ export function findAnchorMismatchDetails(
   if (!html) return [];
 
   const flags: Array<{ kind: AnchorMismatchKind; flag: string }> = [];
-  const anchorPattern = /<a\s[^>]*?href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]{0,500}?)<\/a>/gi;
   const senderRegistrable = options.senderDomain ? registrableOf(options.senderDomain) : null;
 
-  let match: RegExpExecArray | null;
-  let count = 0;
-  while ((match = anchorPattern.exec(html)) !== null && count < 50) {
-    count++;
-    const href = canonicalizeUrl(match[1].replace(/&amp;/gi, '&')).canonical;
-    // Tags dropped by splitting on them; the text is only pattern-matched,
-    // never rendered
-    const anchorText = match[2]
-      .split(/<[^>]*>/)
-      .join('')
+  for (const anchor of scanAnchors(html, 50)) {
+    const href = canonicalizeUrl(anchor.href.replace(/&amp;/gi, '&')).canonical;
+    // Tags dropped; the text is only pattern-matched, never rendered
+    const anchorText = dropTags(anchor.text)
       .replace(/&nbsp;/gi, ' ')
       .trim();
 
@@ -443,6 +437,119 @@ export function findAnchorMismatchDetails(
   }
 
   return flags;
+}
+
+/** One anchor found by scanAnchors: its quoted href and up to 500 characters of inner HTML */
+interface ScannedAnchor {
+  href: string;
+  text: string;
+}
+
+const SINGLE_WHITESPACE = /\s/;
+
+/**
+ * The anchors that
+ * `/<a\s[^>]*?href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]{0,500}?)<\/a>/gi`
+ * matches, with the same captures, in linear time. That regex retries from
+ * every "<a " and rescans to the next ">" each time, which hostile HTML
+ * ("<a href='x'" repeated with no ">") turns into minutes of backtracking.
+ *
+ * For one "<a" + whitespace, the candidates are the "href" positions before
+ * the first ">"; each is checked deterministically (one quoted value ending
+ * at the next quote of either kind, the tag ending at the next ">", a
+ * closing "</a>" within 500 characters). Every forward search is cached by
+ * forwardFinder, and a tag whose candidates all failed is not rescanned from
+ * a later "<a" inside it: the same candidates would fail again.
+ */
+function scanAnchors(html: string, limit: number): ScannedAnchor[] {
+  const found: ScannedAnchor[] = [];
+  const indexOf = (needle: string): ((from: number) => number) =>
+    forwardFinder(from => html.indexOf(needle, from));
+  // Two finders for ">": tag-start and after-value queries each move only
+  // forward, but interleaved they would not, and the cache would miss
+  const tagEndAfter = indexOf('>');
+  const valueTagEndAfter = indexOf('>');
+  const doubleQuoteAfter = indexOf('"');
+  const singleQuoteAfter = indexOf("'");
+  const closePattern = /<\/a>/gi;
+  const closeAfter = forwardFinder(from => {
+    closePattern.lastIndex = from;
+    const close = closePattern.exec(html);
+    return close ? close.index : -1;
+  });
+  const skipWhitespace = (from: number): number => {
+    let i = from;
+    while (i < html.length && SINGLE_WHITESPACE.test(html[i])) i++;
+    return i;
+  };
+
+  const anchorAt = (hrefAt: number): (ScannedAnchor & { end: number }) | null => {
+    let i = skipWhitespace(hrefAt + 4);
+    if (html[i] !== '=') return null;
+    i = skipWhitespace(i + 1);
+    if (html[i] !== '"' && html[i] !== "'") return null;
+    const valueStart = i + 1;
+    const double = doubleQuoteAfter(valueStart);
+    const single = singleQuoteAfter(valueStart);
+    const valueEnd = double === -1 ? single : single === -1 ? double : Math.min(double, single);
+    if (valueEnd === -1 || valueEnd === valueStart) return null;
+    const tagEnd = valueTagEndAfter(valueEnd + 1);
+    if (tagEnd === -1) return null;
+    const textStart = tagEnd + 1;
+    const close = closeAfter(textStart);
+    if (close === -1 || close - textStart > 500) return null;
+    return {
+      href: html.slice(valueStart, valueEnd),
+      text: html.slice(textStart, close),
+      end: close + 4,
+    };
+  };
+
+  const openPattern = /<a\s/gi;
+  let failedTagEnd = -1;
+  let pos = 0;
+  while (found.length < limit) {
+    openPattern.lastIndex = pos;
+    const open = openPattern.exec(html);
+    if (!open) break;
+    const bodyStart = open.index + 3;
+    pos = open.index + 1;
+    const tagEnd = tagEndAfter(bodyStart);
+    // No ">" left: no later "<a" can complete a match either
+    if (tagEnd === -1) break;
+    if (tagEnd === failedTagEnd) continue;
+    let anchor: (ScannedAnchor & { end: number }) | null = null;
+    for (let at = bodyStart; at < tagEnd && !anchor; at++) {
+      if (asciiWordAt(html, at, 'href')) anchor = anchorAt(at);
+    }
+    if (anchor) {
+      found.push({ href: anchor.href, text: anchor.text });
+      pos = anchor.end;
+    } else {
+      failedTagEnd = tagEnd;
+    }
+  }
+  return found;
+}
+
+/**
+ * The text with every "<...>" removed, as `.split(/<[^>]*>/).join('')`
+ * gives it, by linear scanning: that regex retries from every "<" and is
+ * quadratic on a long run of them.
+ */
+function dropTags(text: string): string {
+  let out = '';
+  let pos = 0;
+  while (pos < text.length) {
+    const open = text.indexOf('<', pos);
+    if (open === -1) break;
+    const close = text.indexOf('>', open + 1);
+    // An unclosed "<" stays, as does everything after it
+    if (close === -1) break;
+    out += text.slice(pos, open);
+    pos = close + 1;
+  }
+  return out + text.slice(pos);
 }
 
 function safePathname(url: string): string {

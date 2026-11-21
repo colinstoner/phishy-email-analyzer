@@ -558,22 +558,36 @@ export function parseEnvValue(configPath: string, value: string): unknown {
   }
 }
 
+/** Keys that reach the prototype chain instead of naming a config value */
+const UNSAFE_PATH_KEYS: ReadonlySet<string> = new Set(['__proto__', 'constructor', 'prototype']);
+
 /**
- * Set a nested value in an object using dot notation path
+ * Set a nested value in an object using dot notation path. Throws on a
+ * `__proto__`, `constructor` or `prototype` segment (every mapped path is
+ * code-defined, so that is a programming error, never input to tolerate).
  */
-function setNestedValue(obj: Record<string, unknown>, path: string, value: unknown): void {
+export function setNestedValue(obj: Record<string, unknown>, path: string, value: unknown): void {
   const keys = path.split('.');
+  // A path segment that names the prototype chain would write onto
+  // Object.prototype (or a constructor) instead of into the config. Checked
+  // segment by segment, right where each one is used as a key.
+  const safeKey = (key: string): string => {
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+      throw new Error(`Refusing config path with a reserved segment: ${path}`);
+    }
+    return key;
+  };
   let current = obj;
 
   for (let i = 0; i < keys.length - 1; i++) {
-    const key = keys[i];
-    if (!(key in current) || typeof current[key] !== 'object') {
+    const key = safeKey(keys[i]);
+    if (!Object.prototype.hasOwnProperty.call(current, key) || typeof current[key] !== 'object') {
       current[key] = {};
     }
     current = current[key] as Record<string, unknown>;
   }
 
-  current[keys[keys.length - 1]] = value;
+  current[safeKey(keys[keys.length - 1])] = value;
 }
 
 /**
@@ -586,6 +600,9 @@ function mergeConfigs(
   const result = { ...base } as Record<string, unknown>;
 
   for (const [key, value] of Object.entries(override)) {
+    // JSON.parse makes "__proto__" an own key; assigning it would swap the
+    // result's prototype rather than set a config value
+    if (UNSAFE_PATH_KEYS.has(key)) continue;
     if (
       value !== null &&
       typeof value === 'object' &&

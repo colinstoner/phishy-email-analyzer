@@ -442,6 +442,22 @@ export interface NameAnalysis {
 }
 
 /**
+ * True when the name ends in "." + whitespace + a 1-8 character alphanumeric
+ * token ("invoice. exe"), the strings /\.\s+[A-Za-z0-9]{1,8}$/ matches,
+ * checked by scanning back from the end: that regex retries at every "."
+ * and backtracks through each whitespace run, quadratic on a hostile name.
+ */
+function spacedFinalExtension(name: string): boolean {
+  let start = name.length;
+  while (start > 0 && /[A-Za-z0-9]/.test(name[start - 1])) start--;
+  const tokenLength = name.length - start;
+  if (tokenLength < 1 || tokenLength > 8) return false;
+  let dot = start;
+  while (dot > 0 && /\s/.test(name[dot - 1])) dot--;
+  return dot < start && dot > 0 && name[dot - 1] === '.';
+}
+
+/**
  * Facts about a file name. The name is the sender's choice and stays
  * CLAIMED; only these computed flags and the final extension (a short
  * alphanumeric token) are stated.
@@ -453,7 +469,7 @@ export function analyzeName(name: string): NameAnalysis {
   if (INVISIBLE.test(normalized)) flags.push('invisible_characters');
   const visible = normalized.replace(/[\p{Cf}\p{Cc}]/gu, '');
   // "invoice.pdf          .exe": whitespace runs hide the real extension
-  if (/\s{4,}/.test(visible) || /\.\s+[A-Za-z0-9]{1,8}$/.test(visible) || /\s+$/.test(name ?? '')) {
+  if (/\s{4,}/.test(visible) || spacedFinalExtension(visible) || /\s$/.test(name ?? '')) {
     flags.push('whitespace_padding');
   }
   const base = visible.trim().replace(/^\.+/, '').split(/[\\/]/).pop() ?? '';

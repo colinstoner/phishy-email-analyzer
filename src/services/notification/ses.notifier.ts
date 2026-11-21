@@ -12,6 +12,19 @@ import { normalizeConfidence } from '../ai/provider.interface';
 
 const logger = createLogger('ses-notifier');
 
+/**
+ * One plain address usable as a header value: no whitespace, brackets,
+ * commas, semicolons or quotes, and an "@" with at least one character on
+ * each side. The same strings `/^[^\s<>,;"]+@[^\s<>,;"]+$/` accepted, decided
+ * without that regex's choice of which "@" splits the input, which made it
+ * quadratic on input like "a@a@a@...".
+ */
+export function isPlainAddress(value: string): boolean {
+  if (!/^[^\s<>,;"]+$/.test(value)) return false;
+  const at = value.indexOf('@', 1);
+  return at !== -1 && at < value.length - 1;
+}
+
 export interface SESNotifierConfig {
   region: string;
   senderEmail: string;
@@ -45,9 +58,7 @@ export class SESNotifier {
     this.senderEmail = config.senderEmail;
     // One plain address or nothing: it becomes a header value
     this.replyToEmail =
-      config.replyToEmail && /^[^\s<>,;"]+@[^\s<>,;"]+$/.test(config.replyToEmail)
-        ? config.replyToEmail
-        : undefined;
+      config.replyToEmail && isPlainAddress(config.replyToEmail) ? config.replyToEmail : undefined;
     this.senderName = config.senderName ?? 'Phishy';
     this.securityTeamDistribution = config.securityTeamDistribution ?? [];
     this.configSet = config.configSet;
@@ -177,7 +188,7 @@ export class SESNotifier {
     textBody: string,
     inReplyToSesMessageId?: string
   ): Promise<EmailSendResult> {
-    const to = recipients.filter(address => /^[^\s<>,;"]+@[^\s<>,;"]+$/.test(address));
+    const to = recipients.filter(address => isPlainAddress(address));
     if (to.length === 0) {
       return { success: false, error: 'no valid recipient' };
     }
