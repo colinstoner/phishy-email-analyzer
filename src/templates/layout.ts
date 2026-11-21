@@ -49,9 +49,11 @@ export const COLOR = {
   quiet: '#667085',
   border: '#E4E7EC',
   panel: '#F9FAFB',
-  accent: '#2457C5',
+  // Near-black teal: the brand's ink colour, dark enough that it cannot be
+  // read as the green of a "safe" verdict
+  accent: '#0B2B2A',
   onAccent: '#FFFFFF',
-  onAccentSoft: '#DCE6FF',
+  onAccentSoft: '#C9DCDA',
 };
 
 /** Severity colours: `solid` carries white text, `ink` sits on `soft` */
