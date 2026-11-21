@@ -69,6 +69,7 @@ Try the bundled sample: npx phishy-try examples/sample-phish.eml`);
 
   const emailData = parser.extractEmailData(events[0].msg);
 
+  console.log(`\n${BOLD}Phishy${RESET}  ${DIM}open-source phishing response · local run${RESET}`);
   console.log(`\n${BOLD}=== PARSED (what the Lambda would see) ===${RESET}`);
   console.log(`Subject:    ${emailData.subject}`);
   console.log(`From:       ${emailData.from_email}`);

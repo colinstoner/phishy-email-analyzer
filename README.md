@@ -2,7 +2,9 @@
   <img src="docs/assets/phishy-logo.svg" width="160" alt="Phishy logo: a fish whose body is an envelope">
 </p>
 
-# Phishy Email Analyzer
+# Phishy
+
+**Open-source phishing response for your organization.**
 
 [![CI](https://github.com/colinstoner/phishy-email-analyzer/actions/workflows/ci.yml/badge.svg)](https://github.com/colinstoner/phishy-email-analyzer/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)

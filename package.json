@@ -1,7 +1,7 @@
 {
   "name": "phishy-email-analyzer",
   "version": "3.0.0",
-  "description": "Phishing-report desk on AWS Lambda: employees forward suspicious emails, Claude analyzes them, and Phishy replies with a report; optional threat intelligence, campaign response and read-only Microsoft Graph lookups",
+  "description": "Open-source phishing response for your organization: employees report a suspicious email, Claude analyzes it and replies in plain language; optional threat intelligence, campaign response and read-only Microsoft Graph lookups, on AWS Lambda",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
