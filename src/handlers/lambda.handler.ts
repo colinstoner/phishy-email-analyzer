@@ -5,6 +5,7 @@
 
 import { Context, SESEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { loadConfig, PhishyConfig } from '../config';
+import { securityTeamCommandSenders } from '../config/security-team';
 import { EmailParserService } from '../services/email/parser.service';
 import { S3Service } from '../services/storage/s3.service';
 import { SESNotifier } from '../services/notification/ses.notifier';
@@ -333,7 +334,10 @@ async function initializeServices(): Promise<{
         mailer: sesNotifier,
         config: config.campaignResponse,
         safeDomains: config.email.safeDomains,
+        // Recipients of incident email: the distribution only
         securityTeam: config.notification.securityTeamDistribution,
+        // Approvers: the distribution plus the configured members
+        approvers: securityTeamCommandSenders(config),
         distributionList: config.campaignAlerts?.distributionList,
         commandsEnabled: !!(config.commands?.enabled && intelligenceDb),
         legacyAlert: (match: CampaignMatch): Promise<boolean> => alerts.sendLegacyAlert(match),
@@ -365,12 +369,14 @@ async function initializeServices(): Promise<{
     commandService = new EmailCommandService(
       intelligenceDb,
       sesNotifier,
-      config.notification.securityTeamDistribution,
+      // Authorized senders: the distribution plus the configured members.
+      // Never a recipient list (command replies go to the sender).
+      securityTeamCommandSenders(config),
       config.agentic?.enabled ? primaryProvider : undefined,
       campaignResponse
     );
     logger.info('Email command service initialized', {
-      authorizedSenders: config.notification.securityTeamDistribution.length,
+      authorizedSenders: securityTeamCommandSenders(config).length,
       aiCommandParsing: !!config.agentic?.enabled,
     });
   }
@@ -528,7 +534,9 @@ async function processEmailEvent(
   try {
     ownReport = await isOwnReportTraffic(emailData, msg, {
       senderEmail: config.notification.senderEmail,
-      securityTeam: config.notification.securityTeamDistribution,
+      // Classification ("is this the team's own correspondence"): the same
+      // set the command channel authorizes
+      securityTeam: securityTeamCommandSenders(config),
       ...(db
         ? {
             sentReport: async (id: string): Promise<boolean> =>

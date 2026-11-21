@@ -16,6 +16,7 @@ import {
   safeValidateConfig,
 } from './schema';
 import { createLogger } from '../utils/logger';
+import { partitionSecurityTeamMembers } from './security-team';
 
 const logger = createLogger('config');
 
@@ -53,6 +54,7 @@ export const ENV_MAPPINGS: Readonly<Record<string, string>> = {
   SENDER_EMAIL: 'notification.senderEmail',
   REPLY_TO_EMAIL: 'notification.replyToEmail',
   SECURITY_TEAM_DISTRIBUTION: 'notification.securityTeamDistribution',
+  SECURITY_TEAM_MEMBERS: 'notification.securityTeamMembers',
   SAFE_SENDER_SECURITY: 'notification.safeSenderSecurity',
   SES_CONFIG_SET: 'notification.sesConfigSet',
 
@@ -193,6 +195,22 @@ export async function loadConfig(): Promise<PhishyConfig> {
     throw new Error(`Invalid configuration: ${validation.errors?.message}`);
   }
 
+  // Command and approval authority only for member addresses on a safe
+  // domain: a typo must not authorize an outside address. The count only,
+  // never the addresses.
+  const notification = validation.data!.notification;
+  const members = partitionSecurityTeamMembers(
+    notification.securityTeamMembers,
+    validation.data!.email.safeDomains
+  );
+  if (members.ignored > 0) {
+    logger.warn(
+      `notification.securityTeamMembers (SECURITY_TEAM_MEMBERS): ${members.ignored} address(es) ` +
+        'not on a safe domain (email.safeDomains) ignored; they cannot issue commands or approvals'
+    );
+  }
+  notification.securityTeamMembers = members.accepted;
+
   logger.info('Configuration loaded successfully', {
     provider: validation.data!.ai.provider,
     safeDomains: validation.data!.email.safeDomains.length,
@@ -312,6 +330,7 @@ function getDefaultConfig(): PartialPhishyConfig {
       senderEmail: 'noreply@example.com',
       senderName: 'Phishy',
       securityTeamDistribution: [],
+      securityTeamMembers: [],
       safeSenderSecurity: [],
     },
     storage: {
@@ -595,6 +614,8 @@ async function streamToString(stream: Readable): Promise<string> {
     stream.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
   });
 }
+
+export { partitionSecurityTeamMembers, securityTeamCommandSenders } from './security-team';
 
 // Re-export types
 export { GraphBrokerConfig, PhishyConfig, PartialPhishyConfig } from './schema';

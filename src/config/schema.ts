@@ -81,7 +81,17 @@ const NotificationConfigSchema = z.object({
    */
   replyToEmail: z.string().email('Valid reply-to email required').optional(),
   senderName: z.string().default('Phishy'),
+  /**
+   * Where Phishy sends security-team email (report Cc, incident emails,
+   * alerts). These addresses may also issue commands and approvals.
+   */
   securityTeamDistribution: z.array(z.string().email()).default([]),
+  /**
+   * Individual people who may issue commands and approvals in addition to the
+   * distribution addresses (still only with SPF or DKIM PASS). Never sent
+   * anything. Addresses outside `email.safeDomains` are ignored.
+   */
+  securityTeamMembers: z.array(z.string().email()).default([]),
   safeSenderSecurity: z.array(z.string().email()).default([]),
   sesConfigSet: z.string().optional(),
 });
@@ -187,7 +197,8 @@ const CampaignResponseConfigSchema = z.object({
  * Email commands configuration schema
  * Lets the security team reply to Phishy's reports (or email Phishy
  * directly) to correct verdicts and trigger actions. Senders must be in
- * notification.securityTeamDistribution AND pass SES SPF/DKIM checks.
+ * notification.securityTeamDistribution or notification.securityTeamMembers
+ * AND pass SES SPF/DKIM checks.
  * Requires the intelligence database and migration 002.
  */
 const CommandsConfigSchema = z.object({

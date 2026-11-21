@@ -79,6 +79,8 @@ function config(fanout: Partial<typeof FANOUT> = {}): FanoutJobDeps['config'] {
       senderEmail: 'phishy@example.com',
       senderName: 'Phishy',
       securityTeamDistribution: SECURITY_TEAM,
+      // A member may issue commands but is never a recipient of an alert
+      securityTeamMembers: ['alice@example.com'],
       safeSenderSecurity: [],
     },
   };

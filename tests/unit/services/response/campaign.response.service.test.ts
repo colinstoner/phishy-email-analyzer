@@ -192,6 +192,7 @@ function setup(
     commandsEnabled?: boolean;
     distributionList?: string;
     removalExecutor?: RemovalExecutor;
+    approvers?: string[];
   } = {}
 ) {
   let now = new Date('2026-11-17T10:00:00.000Z');
@@ -207,6 +208,7 @@ function setup(
     config: config(cfg),
     safeDomains: SAFE,
     securityTeam: TEAM,
+    ...(options.approvers ? { approvers: options.approvers } : {}),
     distributionList: options.distributionList,
     commandsEnabled: options.commandsEnabled ?? true,
     legacyAlert,
@@ -804,6 +806,71 @@ describe('APPROVE WARNING without a reference (bound to the email replied to)', 
     const reply = await service.handleBareWarningApproval(['ses-1'], TEAM[0]);
     expect(reply.body[0]).toContain('is not the one that proposes the warning');
     expect(employeeEmails(sent)).toEqual([]);
+  });
+});
+
+describe('security-team members: approvers who are not on the distribution', () => {
+  const MEMBER = 'alice@example.com';
+  const APPROVERS = [...TEAM, MEMBER];
+
+  it('carries out a full-line approval from a member', async () => {
+    const { service, store } = setup({}, { approvers: APPROVERS });
+    await service.handleCampaignReport(reportInput());
+    const warning = proposed(store, 'send_warning')!;
+
+    const reply = await service.handleApprovals(
+      approve('send_warning', warning.reference),
+      'Alice@Example.com '
+    );
+    expect(reply.heading).toBe('Done: approval carried out');
+    expect(store.actions.find(a => a.id === warning.id)).toMatchObject({
+      status: 'completed',
+      approvedBy: MEMBER,
+    });
+  });
+
+  it('carries out a bare APPROVE WARNING reply from a member', async () => {
+    const { service, store } = setup({}, { approvers: APPROVERS });
+    await service.handleCampaignReport(reportInput());
+    const warning = proposed(store, 'send_warning')!;
+
+    const reply = await service.handleBareWarningApproval(['ses-1'], MEMBER);
+    expect(reply.heading).toBe('Done: approval carried out');
+    expect(store.actions.find(a => a.id === warning.id)).toMatchObject({
+      status: 'completed',
+      approvedBy: MEMBER,
+    });
+  });
+
+  it('never emails a member: the incident email goes to the distribution only', async () => {
+    const { service, sent } = setup({}, { approvers: APPROVERS });
+    await service.handleCampaignReport(reportInput());
+    expect(sent).toHaveLength(1);
+    expect(sent[0].to).toBe('security@example.com');
+    expect(sent[0].cc).toEqual(['soc@example.com']);
+    expect(JSON.stringify(sent)).not.toContain(MEMBER);
+  });
+
+  it('still refuses an address on neither list, exactly as before', async () => {
+    const { service, sent, store } = setup({}, { approvers: APPROVERS });
+    await service.handleCampaignReport(reportInput());
+    const warning = proposed(store, 'send_warning')!;
+    const full = await service.handleApprovals(
+      approve('send_warning', warning.reference),
+      'mallory@example.com'
+    );
+    expect(full.body).toEqual(['You are not on the security team.']);
+    const bare = await service.handleBareWarningApproval(['ses-1'], 'mallory@example.com');
+    expect(bare.body[0]).toBe('You are not on the security team.');
+    expect(employeeEmails(sent)).toEqual([]);
+  });
+
+  it('without approvers, only the distribution may approve (unchanged)', async () => {
+    const { service, store } = setup();
+    await service.handleCampaignReport(reportInput());
+    const reply = await service.handleBareWarningApproval(['ses-1'], MEMBER);
+    expect(reply.body[0]).toBe('You are not on the security team.');
+    expect(proposed(store, 'send_warning')).toBeDefined();
   });
 });
 
