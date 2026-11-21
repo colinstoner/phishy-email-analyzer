@@ -27,9 +27,9 @@ export function extractEmailAddress(input: string): string | null {
   if (!input) return null;
 
   // Try to extract from angle brackets first
-  const bracketMatch = input.match(/<([^>]+)>/);
-  if (bracketMatch?.[1] && isValidEmail(bracketMatch[1])) {
-    return bracketMatch[1].trim().toLowerCase();
+  const bracketed = firstBracketed(input);
+  if (bracketed && isValidEmail(bracketed)) {
+    return bracketed.trim().toLowerCase();
   }
 
   // Check if the whole string is an email
@@ -38,6 +38,23 @@ export function extractEmailAddress(input: string): string | null {
     return trimmed.toLowerCase();
   }
 
+  return null;
+}
+
+/**
+ * The text inside the first "<...>" pair, as `/<([^>]+)>/` would capture it,
+ * found by linear scanning: that regex retries from every "<" and runs in
+ * quadratic time on hostile input such as a long run of "<".
+ */
+function firstBracketed(input: string): string | null {
+  let open = input.indexOf('<');
+  while (open !== -1) {
+    const close = input.indexOf('>', open + 1);
+    // No ">" after this "<" means none after any later "<" either
+    if (close === -1) return null;
+    if (close > open + 1) return input.slice(open + 1, close);
+    open = input.indexOf('<', open + 1);
+  }
   return null;
 }
 
@@ -248,7 +265,11 @@ export function sanitizeForLogging(value: string, maxLength = 100): string {
  */
 export function containsHtml(content: string): boolean {
   if (!content) return false;
-  return /<[a-z][\s\S]*>/i.test(content);
+  // Same answer as /<[a-z][\s\S]*>/i (a "<" and a letter, with a ">"
+  // anywhere after them) without that regex's quadratic backtracking: the
+  // earliest "<letter>" has the most room for a ">" after it.
+  const open = content.search(/<[a-z]/i);
+  return open !== -1 && content.lastIndexOf('>') >= open + 2;
 }
 
 /**

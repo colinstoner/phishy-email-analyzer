@@ -5,6 +5,8 @@
 
 import {
   IntelligenceDatabaseService,
+  connectionHosts,
+  isRdsConnectionString,
   stripSslOverrides,
 } from '../../../../src/services/intelligence/database.service';
 
@@ -71,6 +73,67 @@ describe('stripSslOverrides (TLS CA pin must not be silently bypassed)', () => {
   it('leaves a clean connection string intact', () => {
     const clean = 'postgresql://u:p@db.abc.us-west-2.example.com:5432/phishy';
     expect(stripSslOverrides(clean)).toBe(clean);
+  });
+});
+
+describe('isRdsConnectionString (CA pin decided on the parsed host, not a substring)', () => {
+  const RDS_HOST = 'phishy-db.abc123example.us-east-1.rds.amazonaws.com';
+
+  it('recognizes an RDS host in URL form, any case, with or without a port', () => {
+    expect(isRdsConnectionString(`postgresql://u:p@${RDS_HOST}:5432/phishy`)).toBe(true);
+    expect(isRdsConnectionString(`postgres://u:p@${RDS_HOST.toUpperCase()}/phishy`)).toBe(true);
+  });
+
+  it('recognizes an RDS host in libpq key=value form, quoted or not', () => {
+    expect(isRdsConnectionString(`host=${RDS_HOST} port=5432 dbname=phishy`)).toBe(true);
+    expect(isRdsConnectionString(`dbname=phishy host = '${RDS_HOST}'`)).toBe(true);
+  });
+
+  it('recognizes an RDS host in a multi-host URL that WHATWG URL rejects', () => {
+    expect(
+      isRdsConnectionString(`postgresql://u:p@${RDS_HOST}:5432,replica.example.com:5432/phishy`)
+    ).toBe(true);
+  });
+
+  it('ignores the suffix anywhere but the host name', () => {
+    // In the password, the database name, a query value, or mid-host
+    expect(
+      isRdsConnectionString('postgresql://u:x.rds.amazonaws.com@db.example.com:5432/phishy')
+    ).toBe(false);
+    expect(isRdsConnectionString('postgresql://u:p@db.example.com/x.rds.amazonaws.com')).toBe(
+      false
+    );
+    expect(
+      isRdsConnectionString(
+        'postgresql://u:p@db.example.com/phishy?application_name=.rds.amazonaws.com'
+      )
+    ).toBe(false);
+    expect(isRdsConnectionString('postgresql://u:p@x.rds.amazonaws.com.example.com/phishy')).toBe(
+      false
+    );
+    expect(isRdsConnectionString('host=db.example.com dbname=x.rds.amazonaws.com')).toBe(false);
+  });
+
+  it('lists the hosts it found', () => {
+    expect(connectionHosts(`postgresql://u:p@${RDS_HOST}:5432/phishy`)).toEqual([RDS_HOST]);
+    expect(connectionHosts('postgresql://u:p@a.example.com:1,b.example.com:2/db')).toEqual([
+      'a.example.com',
+      'b.example.com',
+    ]);
+    expect(connectionHosts('dbname=phishy')).toEqual([]);
+  });
+
+  it('pins the RDS CA only for an RDS host', () => {
+    const { Pool } = jest.requireMock('pg') as { Pool: jest.Mock };
+    Pool.mockClear();
+    new IntelligenceDatabaseService(`postgresql://u:p@${RDS_HOST}:5432/phishy?sslmode=disable`);
+    const rdsConfig = Pool.mock.calls[0][0];
+    expect(rdsConfig.ssl).toBeDefined();
+    expect(rdsConfig.connectionString).not.toMatch(/sslmode/i);
+
+    Pool.mockClear();
+    new IntelligenceDatabaseService('postgresql://u:x.rds.amazonaws.com@db.example.com/phishy');
+    expect(Pool.mock.calls[0][0].ssl).toBeUndefined();
   });
 });
 

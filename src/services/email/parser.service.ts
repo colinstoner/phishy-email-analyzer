@@ -33,6 +33,7 @@ import {
 } from '../../utils/canonicalize';
 import { claimedSenderDomain } from '../../utils/addressing';
 import { detectUserReport } from './user.report';
+import { blockAfterMarker, hasInlineFromLine, outlookHeaderBlock } from './forwarded.blocks';
 import {
   AttachmentAnalysisSettings,
   AttachmentAnalyzer,
@@ -843,33 +844,18 @@ export class EmailParserService {
 
     if (!emailText) return forwardedHeaders;
 
-    // Look for forwarded message markers
-    const forwardedPatterns = [
-      /---------- Forwarded message ---------\s*\n([\s\S]*?)(?:\n\n|\r\n\r\n|$)/i,
-      /-------- Original Message --------\s*\n([\s\S]*?)(?:\n\n|\r\n\r\n|$)/i,
-      /Begin forwarded message:\s*\n([\s\S]*?)(?:\n\n|\r\n\r\n|$)/i,
-      // Outlook style: no marker line — match through the end of the Subject
-      // line so its value is part of the captured block. Outlook for Windows
-      // and the web write "Sent:", Outlook for Mac writes "Date:".
-      /From:.*\r?\n(?:Sent|Date):.*\r?\nTo:.*\r?\n(?:Cc:.*\r?\n)?Subject:.*/i,
-    ];
+    // Look for forwarded message markers, then Outlook's block with no
+    // marker line. Linear scans: the body is hostile (forwarded.blocks.ts)
+    let headerBlock =
+      blockAfterMarker(emailText, /---------- Forwarded message ---------/gi) ??
+      blockAfterMarker(emailText, /-------- Original Message --------/gi) ??
+      blockAfterMarker(emailText, /Begin forwarded message:/gi) ??
+      outlookHeaderBlock(emailText) ??
+      '';
 
-    let headerBlock = '';
-
-    for (const pattern of forwardedPatterns) {
-      const match = emailText.match(pattern);
-      if (match) {
-        headerBlock = match[1] || match[0];
-        break;
-      }
-    }
-
-    if (!headerBlock) {
+    if (!headerBlock && hasInlineFromLine(emailText)) {
       // Try to extract inline headers at the start of forwarded content
-      const inlineMatch = emailText.match(/^From:\s*(.+?)(?:\r?\n|$)/im);
-      if (inlineMatch) {
-        headerBlock = emailText.substring(0, 500); // Take first 500 chars
-      }
+      headerBlock = emailText.substring(0, 500); // Take first 500 chars
     }
 
     if (!headerBlock) return forwardedHeaders;
