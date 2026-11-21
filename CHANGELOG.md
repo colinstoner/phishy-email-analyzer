@@ -11,6 +11,7 @@ Everything below is new or changed relative to v3.0.0. Every new layer is off by
 
 ### Added
 
+- **A project logo** (`docs/assets/phishy-logo.svg`), shown at the top of the README.
 - **Security-team members who may issue commands** (`notification.securityTeamMembers` / `SECURITY_TEAM_MEMBERS`, SAM `SecurityTeamMembers`; default empty). When `SECURITY_TEAM_DISTRIBUTION` is a list address, a team member replying from their own mailbox was not on it and could not record a verdict or approve an action. Addresses listed here may now do both, with the same checks as the distribution addresses: exact address match and SES SPF or DKIM `PASS`. Members are never sent anything: report Cc, incident emails and alerts still go only to the distribution, and the answer to a command goes to its sender. A member address outside `email.safeDomains` is ignored, with a startup warning that gives only the count. The combined set (`securityTeamCommandSenders`) is used for command and approval authorization and for recognizing the team's own incident-thread replies (`own.report.ts`).
 - **Microsoft Graph foundation** (`src/services/graph/`; `graph.enabled` / `PHISHY_GRAPH_ENABLED`, off by default; changes nothing on its own).
   - App-only authentication with a certificate-signed JWT assertion (PS256, `x5t#S256`; no client secret, no new dependency), an in-memory token cache with one shared in-flight request. Settings `PHISHY_GRAPH_TENANT_ID`, `PHISHY_GRAPH_READ_CLIENT_ID`, `PHISHY_GRAPH_READ_CERTIFICATE` (Secrets Manager ARN or inline PEM).

@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="191.5 192 640 640" role="img" aria-labelledby="t">
+  <title id="t">Phishy</title>
+  <!-- tail -->
+  <polygon fill="#0E756E" points="228,374 359,468 359,554 267,512"/>
+  <polygon fill="#0A6461" points="267,512 359,554 228,650"/>
+  <!-- body: an envelope whose right edge curves into the head -->
+  <path fill="#0A6461" d="M359,393 L511.5,545.5 L646,411 A224,224 0 0 0 666,650 L359,650 Z"/>
+  <polygon fill="#0E756E" points="359,650 476,510 511.5,545.5 547,510 666,650"/>
+  <!-- envelope flap -->
+  <polygon fill="#F97560" points="362,374 659,374 510.5,523"/>
+  <!-- head -->
+  <path fill="#FFFFFF" d="M668,385 L792,512 L662,646 A224,224 0 0 1 646,411 Z"/>
+  <path fill="none" stroke="#0E756E" stroke-width="15" stroke-linecap="butt" stroke-linejoin="miter" d="M667,384 L791,512 L661,646"/>
+  <circle fill="#0E756E" cx="690" cy="480" r="20"/>
+</svg>

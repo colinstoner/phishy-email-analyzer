@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/phishy-logo.svg" width="160" alt="Phishy logo: a fish whose body is an envelope">
+</p>
+
 # Phishy Email Analyzer
 
 [![CI](https://github.com/colinstoner/phishy-email-analyzer/actions/workflows/ci.yml/badge.svg)](https://github.com/colinstoner/phishy-email-analyzer/actions/workflows/ci.yml)
