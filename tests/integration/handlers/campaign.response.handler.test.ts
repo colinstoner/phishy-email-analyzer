@@ -9,6 +9,9 @@
  *   copy says how to reply with a verdict.
  * - An incident email reply that fails authentication is not analyzed as a
  *   phishing report.
+ * - notification.securityTeamMembers: a member who is not on the distribution
+ *   may record a verdict and approve a warning (with SPF/DKIM PASS only), is
+ *   never sent security email, and a member off the safe domains is ignored.
  *
  * Everything external is mocked. Invented example.com data only.
  */
@@ -20,6 +23,10 @@ const mockProcessDetection = jest.fn();
 const mockTrackDetection = jest.fn();
 const mockHandleCampaignReport = jest.fn();
 const mockResponseCtor = jest.fn();
+const mockHandleApprovals = jest.fn();
+const mockHandleBareWarningApproval = jest.fn();
+const mockSendEmail = jest.fn();
+const mockNotifierCtor = jest.fn();
 let mockConfig: Record<string, unknown> = {};
 
 const mockDb = {
@@ -32,6 +39,9 @@ const mockDb = {
   setReportMessageId: jest.fn().mockResolvedValue(undefined),
   upsertIndicator: jest.fn().mockResolvedValue('id'),
   runQuery: jest.fn().mockResolvedValue({ rows: [] }),
+  findAnalysisIdByReportMessageId: jest.fn().mockResolvedValue(null),
+  recordFeedback: jest.fn().mockResolvedValue(undefined),
+  applyFeedbackToIndicators: jest.fn().mockResolvedValue(2),
 };
 
 jest.mock('../../../src/config', () => ({
@@ -57,8 +67,9 @@ jest.mock('../../../src/services/response/campaign.response.service', () => ({
     mockResponseCtor(deps);
     return {
       handleCampaignReport: mockHandleCampaignReport,
-      handleApprovals: jest.fn(),
-      onVerdict: jest.fn(),
+      handleApprovals: mockHandleApprovals,
+      handleBareWarningApproval: mockHandleBareWarningApproval,
+      onVerdict: jest.fn().mockResolvedValue(undefined),
     };
   }),
 }));
@@ -75,11 +86,14 @@ jest.mock('../../../src/services/ai/bedrock.provider', () => ({
 }));
 
 jest.mock('../../../src/services/notification/ses.notifier', () => ({
-  SESNotifier: jest.fn().mockImplementation(() => ({
-    sendAnalysisReport: mockSendAnalysisReport,
-    sendEmail: jest.fn().mockResolvedValue({ success: true }),
-    sendThreadedEmail: jest.fn().mockResolvedValue({ success: true }),
-  })),
+  SESNotifier: jest.fn().mockImplementation((options: unknown) => {
+    mockNotifierCtor(options);
+    return {
+      sendAnalysisReport: mockSendAnalysisReport,
+      sendEmail: mockSendEmail,
+      sendThreadedEmail: jest.fn().mockResolvedValue({ success: true }),
+    };
+  }),
 }));
 
 jest.mock('../../../src/services/storage/s3.service', () => ({
@@ -137,13 +151,15 @@ function event(
   subject: string,
   body: string,
   from = 'employee@example.com',
-  auth = 'PASS'
+  auth = 'PASS',
+  inReplyTo?: string
 ): SESEvent {
   sequence += 1;
   const raw = [
     `From: Employee <${from}>`,
     'To: phishy@example.com',
     `Subject: ${subject}`,
+    ...(inReplyTo ? [`In-Reply-To: ${inReplyTo}`] : []),
     'Content-Type: text/plain; charset=utf-8',
     '',
     body,
@@ -160,7 +176,10 @@ function event(
             messageId: `ses-campaign-${sequence}`,
             timestamp: '2026-11-17T09:21:00.000Z',
             destination: ['phishy@example.com'],
-            headers: [{ name: 'From', value: `Employee <${from}>` }],
+            headers: [
+              { name: 'From', value: `Employee <${from}>` },
+              ...(inReplyTo ? [{ name: 'In-Reply-To', value: inReplyTo }] : []),
+            ],
             commonHeaders: { from: [`Employee <${from}>`], subject },
           },
           receipt: {
@@ -283,9 +302,19 @@ beforeEach(() => {
     mockTrackDetection,
     mockHandleCampaignReport,
     mockResponseCtor,
+    mockHandleApprovals,
+    mockHandleBareWarningApproval,
+    mockSendEmail,
+    mockNotifierCtor,
   ]) {
     mock.mockReset();
   }
+  mockSendEmail.mockResolvedValue({ success: true });
+  mockHandleApprovals.mockResolvedValue({ heading: 'Done: approval carried out', body: [] });
+  mockHandleBareWarningApproval.mockResolvedValue({
+    heading: 'Done: approval carried out',
+    body: [],
+  });
   mockAnalyzeEmail.mockResolvedValue(PHISH);
   mockSendAnalysisReport.mockResolvedValue({ success: true, messageId: 'out-1' });
   mockLookup.mockResolvedValue(SECTION);
@@ -466,5 +495,162 @@ describe('campaign response on', () => {
       {} as Context
     );
     expect(mockAnalyzeEmail).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('security-team members (notification.securityTeamMembers)', () => {
+  const on = {
+    enabled: true,
+    audience: 'recipients',
+    employeeWarning: 'approve',
+    distributionWarning: 'auto',
+    approvalTtlHours: 4,
+    maxWarningsPerCampaign: 100,
+    maxRemovalMailboxes: 500,
+    maxRemovalMessages: 1000,
+    updateIntervalMinutes: 30,
+    alreadyClickedInstructions: 'Call the service desk.',
+    timeZone: 'UTC',
+  };
+  const MEMBER = 'alice@example.com';
+  const OUTSIDE_MEMBER = 'mallory@outside.test';
+  const ANALYSIS_ID = '3f2b8a1c-0d4e-4f6a-9b2c-7e8d1a5f3c9b';
+  const INCIDENT_SUBJECT =
+    'Re: [Phishy incident PHY-AAAA-BBBB-CCCC-DDDD] Active campaign: "Invoice"';
+  const INCIDENT_MESSAGE = '<ses-incident-1@email.amazonses.com>';
+
+  /**
+   * The handler's config is mocked (loadConfig is bypassed), so the outside
+   * member reaching the handler here also proves the safe-domain filter
+   * applies at use, not only at load.
+   */
+  function withMembers(): Record<string, unknown> {
+    const base = config(on);
+    return {
+      ...base,
+      notification: {
+        ...(base.notification as Record<string, unknown>),
+        securityTeamMembers: [MEMBER, OUTSIDE_MEMBER],
+      },
+    };
+  }
+
+  function verdictReply(from: string, auth: string): SESEvent {
+    return event(
+      'Re: Phishing Analysis: Invoice 2291 overdue',
+      ['Confirmed phishing.', '', `Analysis ID: ${ANALYSIS_ID}`].join(CRLF),
+      from,
+      auth
+    );
+  }
+
+  beforeEach(() => {
+    mockDb.recordFeedback.mockClear();
+    mockDb.applyFeedbackToIndicators.mockClear();
+  });
+
+  it('lets a member who is not on the distribution record a verdict, and replies to that member', async () => {
+    mockConfig = withMembers();
+    await loadHandler()(verdictReply(MEMBER, 'PASS'), {} as Context);
+
+    expect(mockDb.recordFeedback).toHaveBeenCalledWith(
+      expect.objectContaining({
+        analysisId: ANALYSIS_ID,
+        verdict: 'confirmed_phishing',
+        submittedBy: MEMBER,
+      })
+    );
+    expect(mockSendEmail).toHaveBeenCalledTimes(1);
+    expect(mockSendEmail.mock.calls[0][0]).toBe(MEMBER);
+    expect(mockAnalyzeEmail).not.toHaveBeenCalled();
+  });
+
+  it('refuses a member verdict without SPF/DKIM PASS', async () => {
+    mockConfig = withMembers();
+    await loadHandler()(verdictReply(MEMBER, 'FAIL'), {} as Context);
+    expect(mockDb.recordFeedback).not.toHaveBeenCalled();
+    expect(mockSendEmail).not.toHaveBeenCalled();
+  });
+
+  it('lets a member approve a warning with the full line', async () => {
+    mockConfig = withMembers();
+    await loadHandler()(
+      event(INCIDENT_SUBJECT, 'APPROVE WARNING PHY-AAAA-BBBB-CCCC-DDDD', MEMBER, 'PASS'),
+      {} as Context
+    );
+    expect(mockHandleApprovals).toHaveBeenCalledTimes(1);
+    expect(mockHandleApprovals.mock.calls[0][0]).toEqual([
+      { verb: 'WARNING', reference: 'PHY-AAAA-BBBB-CCCC-DDDD' },
+    ]);
+    expect(mockHandleApprovals.mock.calls[0][1]).toBe(MEMBER);
+    expect(mockSendEmail.mock.calls[0][0]).toBe(MEMBER);
+    expect(mockAnalyzeEmail).not.toHaveBeenCalled();
+  });
+
+  it('lets a member approve with a bare APPROVE WARNING reply to the incident email', async () => {
+    mockConfig = withMembers();
+    await loadHandler()(
+      event(INCIDENT_SUBJECT, 'APPROVE WARNING', MEMBER, 'PASS', INCIDENT_MESSAGE),
+      {} as Context
+    );
+    expect(mockHandleBareWarningApproval).toHaveBeenCalledWith(['ses-incident-1'], MEMBER);
+    expect(mockSendEmail.mock.calls[0][0]).toBe(MEMBER);
+  });
+
+  it('acts on no member approval without SPF/DKIM PASS, and does not analyze it either', async () => {
+    mockConfig = withMembers();
+    for (const body of ['APPROVE WARNING PHY-AAAA-BBBB-CCCC-DDDD', 'APPROVE WARNING']) {
+      await loadHandler()(
+        event(INCIDENT_SUBJECT, body, MEMBER, 'FAIL', INCIDENT_MESSAGE),
+        {} as Context
+      );
+    }
+    expect(mockHandleApprovals).not.toHaveBeenCalled();
+    expect(mockHandleBareWarningApproval).not.toHaveBeenCalled();
+    // The team's own incident-thread correspondence is skipped, not analyzed
+    expect(mockAnalyzeEmail).not.toHaveBeenCalled();
+  });
+
+  it('refuses an address on neither list exactly as before', async () => {
+    mockConfig = withMembers();
+    await loadHandler()(verdictReply('employee@example.com', 'PASS'), {} as Context);
+    await loadHandler()(
+      event(INCIDENT_SUBJECT, 'APPROVE WARNING PHY-AAAA-BBBB-CCCC-DDDD', 'employee@example.com'),
+      {} as Context
+    );
+    expect(mockDb.recordFeedback).not.toHaveBeenCalled();
+    expect(mockHandleApprovals).not.toHaveBeenCalled();
+    expect(mockSendEmail).not.toHaveBeenCalled();
+  });
+
+  it('ignores a member off the safe domains, even with SPF/DKIM PASS', async () => {
+    mockConfig = withMembers();
+    await loadHandler()(verdictReply(OUTSIDE_MEMBER, 'PASS'), {} as Context);
+    await loadHandler()(
+      event(INCIDENT_SUBJECT, 'APPROVE WARNING PHY-AAAA-BBBB-CCCC-DDDD', OUTSIDE_MEMBER),
+      {} as Context
+    );
+    expect(mockDb.recordFeedback).not.toHaveBeenCalled();
+    expect(mockHandleApprovals).not.toHaveBeenCalled();
+    expect(mockSendEmail).not.toHaveBeenCalled();
+    const approvers = mockResponseCtor.mock.calls[0][0].approvers as string[];
+    expect(approvers).toContain(MEMBER);
+    expect(approvers).not.toContain(OUTSIDE_MEMBER);
+  });
+
+  it('sends members no security email: report Cc and incident recipients stay the distribution', async () => {
+    mockConfig = withMembers();
+    await loadHandler()(forward(), {} as Context);
+
+    expect(mockSendAnalysisReport).toHaveBeenCalled();
+    expect(JSON.stringify(mockSendAnalysisReport.mock.calls)).not.toContain(MEMBER);
+    expect(mockNotifierCtor.mock.calls[0][0].securityTeamDistribution).toEqual([
+      'security@example.com',
+      'soc@example.com',
+    ]);
+    const deps = mockResponseCtor.mock.calls[0][0];
+    expect(deps.securityTeam).toEqual(['security@example.com', 'soc@example.com']);
+    expect(deps.approvers).toEqual(['security@example.com', 'soc@example.com', MEMBER]);
+    expect(mockSendEmail).not.toHaveBeenCalled();
   });
 });

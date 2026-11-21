@@ -28,7 +28,16 @@ Parameters:
       true (the command channel works by reply) and no Reply-To otherwise.
   SecurityTeamDistribution:
     Type: String
-    Description: Comma-separated security-team address(es) (e.g. security@example.com). CC'd on reports, sent incident emails and fan-out alerts, and the only senders whose replies count as commands.
+    Description: Comma-separated security-team address(es) (e.g. security@example.com). CC'd on reports, sent incident emails and fan-out alerts. Replies from these addresses count as commands (as do replies from SecurityTeamMembers).
+  SecurityTeamMembers:
+    Type: String
+    Default: ''
+    Description: >
+      Optional. Comma-separated addresses of individual security-team members
+      (e.g. alice@example.com) whose replies also count as commands and
+      approvals, so they can act from their own mailboxes when
+      SecurityTeamDistribution is a list address. They are never sent
+      anything. Addresses outside SafeDomains are ignored.
   SafeDomains:
     Type: String
     Description: Comma-separated domains allowed to submit emails for analysis (e.g. example.com). Reports are only ever sent to addresses on these domains.
@@ -122,8 +131,8 @@ Parameters:
     AllowedValues: ['true', 'false']
     Default: 'false'
     Description: >
-      Email command channel: members of SecurityTeamDistribution whose mail
-      passes SPF or DKIM can reply to Phishy's reports to record a verdict or
+      Email command channel: SecurityTeamDistribution and SecurityTeamMembers
+      addresses whose mail passes SPF or DKIM can reply to Phishy's reports to record a verdict or
       approve a response action. Needs the intelligence database with
       migrations/002_analysis_feedback.sql applied.
   AttachmentAnalysisEnabled:
@@ -304,6 +313,7 @@ Conditions:
     - !Not [!Equals [!Ref BedrockModelId, '']]
   HasSafeSenders: !Not [!Equals [!Ref SafeSenders, '']]
   HasSafeSenderSecurity: !Not [!Equals [!Ref SafeSenderSecurity, '']]
+  HasSecurityTeamMembers: !Not [!Equals [!Ref SecurityTeamMembers, '']]
   HasProfile: !Not [!Equals [!Ref ProfileS3Uri, '']]
   HasCampaignAlertDistribution: !Not [!Equals [!Ref CampaignAlertDistribution, '']]
   UseCampaignResponse: !And
@@ -431,6 +441,7 @@ Resources:
             - !Ref ReplyToEmail
             - !If [UseEmailCommands, !Ref RecipientEmail, !Ref AWS::NoValue]
           SECURITY_TEAM_DISTRIBUTION: !Ref SecurityTeamDistribution
+          SECURITY_TEAM_MEMBERS: !If [HasSecurityTeamMembers, !Ref SecurityTeamMembers, !Ref AWS::NoValue]
           SAFE_DOMAINS: !Ref SafeDomains
           PHISHY_AWS_REGION: !Ref AWS::Region
           DELETE_EMAILS_AFTER_PROCESSING: !Ref DeleteEmailsAfterProcessing

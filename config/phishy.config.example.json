@@ -27,6 +27,7 @@
     "replyToEmail": "phishy@example.com",
     "senderName": "Phishy Security",
     "securityTeamDistribution": ["security-team@example.com"],
+    "securityTeamMembers": ["alice@example.com"],
     "safeSenderSecurity": ["security-team@example.com"],
     "sesConfigSet": "phishy-config-set"
   },

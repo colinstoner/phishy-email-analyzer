@@ -107,7 +107,14 @@ export interface CampaignResponseDeps {
   mailer: IncidentMailer;
   config: CampaignResponseConfig;
   safeDomains: string[];
+  /** Recipients of incident email (`notification.securityTeamDistribution`) */
   securityTeam: string[];
+  /**
+   * Addresses whose approvals count: the distribution plus the configured
+   * members (`securityTeamCommandSenders`). Never emailed. Defaults to
+   * `securityTeam` when not given.
+   */
+  approvers?: string[];
   distributionList?: string;
   /** The command channel is on, so approvals can arrive */
   commandsEnabled: boolean;
@@ -1415,7 +1422,8 @@ export class CampaignResponseService {
 
   private isSecurityTeam(address: string): boolean {
     const sender = address.trim().toLowerCase();
-    return this.deps.securityTeam.some(member => member.trim().toLowerCase() === sender);
+    const approvers = this.deps.approvers ?? this.deps.securityTeam;
+    return approvers.some(member => member.trim().toLowerCase() === sender);
   }
 
   /**

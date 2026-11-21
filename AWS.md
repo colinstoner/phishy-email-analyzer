@@ -39,7 +39,8 @@ If you deploy with SAM, you can skip to Section 9 (production access) and Sectio
 | `RecipientEmail` | - | The address employees forward to. Its domain must be verified in SES with MX records pointing to SES |
 | `SenderEmail` | - | The SES-verified address reports are sent from |
 | `ReplyToEmail` | empty | `Reply-To` on Phishy's emails. Empty: `RecipientEmail` when `EmailCommandsEnabled` is true, none otherwise |
-| `SecurityTeamDistribution` | - | Security-team address(es), comma-separated: Cc'd on reports, the only senders whose replies count as commands |
+| `SecurityTeamDistribution` | - | Security-team address(es), comma-separated: Cc'd on reports and sent incident emails and alerts. Replies from these addresses count as commands |
+| `SecurityTeamMembers` | empty | Individual people, comma-separated, whose replies also count as commands and approvals (for when `SecurityTeamDistribution` is a list address). Never sent anything; addresses outside `SafeDomains` are ignored |
 | `SafeDomains` | - | Your domain(s), comma-separated. Phishy answers only reports from these domains |
 | `SafeSenders` | empty | Individual addresses that may also report (outside `SafeDomains`) |
 | `SafeSenderSecurity` | empty | Cc'd instead of the security team on reports from `SafeSenders` |
@@ -217,6 +218,7 @@ This writes `dist/lambda/phishy.zip` (one file, `index.js`). Upload it to the fu
    - `SAFE_SENDERS`: Any individual addresses that may also report (comma-separated, optional)
    - `SENDER_EMAIL`: Email address for analysis reports (must be verified)
    - `SECURITY_TEAM_DISTRIBUTION`: Email address(es) for security team, comma-separated (Cc'd on reports)
+   - `SECURITY_TEAM_MEMBERS`: Individual security-team members who may also issue commands and approvals, comma-separated (optional; never emailed; must be on `SAFE_DOMAINS`)
    - `S3_BUCKET_NAME`: The name of the S3 bucket where SES stores emails (must match the bucket configured in SES rules)
    - `PHISHY_AI_PROVIDER`: `bedrock` (default in the SAM template) or `anthropic`; with `anthropic`, also `ANTHROPIC_API_KEY`
    - `PHISHY_AWS_REGION`: Your AWS region (optional; defaults to the function's region)

@@ -15,7 +15,8 @@ ANTHROPIC_API_KEY=sk-ant-...
 S3_BUCKET_NAME=my-phishy-emails              # bucket SES stores raw email in
 SENDER_EMAIL=phishy@example.com              # SES-verified From address for reports
 SAFE_DOMAINS=example.com                     # your organization's domain(s): who may report
-SECURITY_TEAM_DISTRIBUTION=security@example.com  # Cc'd on reports; the only senders allowed to issue commands
+SECURITY_TEAM_DISTRIBUTION=security@example.com  # Cc'd on reports; may issue commands
+SECURITY_TEAM_MEMBERS=alice@example.com          # optional: individuals who may also issue commands (never emailed)
 ```
 
 `SAFE_DOMAINS` matters: Phishy only answers reports from an address on one of these domains (or listed in `SAFE_SENDERS`), and only ever sends a report to such an address. Its built-in default is `example.com`, so without it nothing your employees forward is analyzed.
@@ -32,7 +33,7 @@ When the same setting is defined in more than one place, the highest wins:
 
 There is no local configuration file in the deployed function: `config/phishy.config.json` is only a convenient place to keep a file before uploading it to S3 (it is gitignored). A Secrets Manager ARN in `PHISHY_DB_CONNECTION` is resolved after the sources are merged; one in `PHISHY_GRAPH_READ_CERTIFICATE` on the first Graph call.
 
-Environment variables are converted according to the setting they map to: for an on/off setting `true` / `false` (any case) become booleans; for a numeric setting a plain decimal such as `30` or `2.5` becomes a number (whole-number settings still reject `2.5`); the settings that are lists (`SAFE_DOMAINS`, `SAFE_SENDERS`, `SECURITY_TEAM_DISTRIBUTION`, `SAFE_SENDER_SECURITY`) are split on commas. Every other variable, including `PHISHY_CAMPAIGN_ALERTS_DISTRIBUTION`, IDs and model names, is kept as the exact string given.
+Environment variables are converted according to the setting they map to: for an on/off setting `true` / `false` (any case) become booleans; for a numeric setting a plain decimal such as `30` or `2.5` becomes a number (whole-number settings still reject `2.5`); the settings that are lists (`SAFE_DOMAINS`, `SAFE_SENDERS`, `SECURITY_TEAM_DISTRIBUTION`, `SECURITY_TEAM_MEMBERS`, `SAFE_SENDER_SECURITY`) are split on commas. Every other variable, including `PHISHY_CAMPAIGN_ALERTS_DISTRIBUTION`, IDs and model names, is kept as the exact string given.
 
 The SAM template has no parameter for a configuration file. To use one with it, add `PHISHY_CONFIG_S3` to the function's environment in `template.yaml`; an object under `profiles/` in the stack's email bucket is already readable by the function's role.
 
@@ -116,7 +117,8 @@ Refusals in the `reasoning_extraction` category are not retried: they mean the p
 |----------|---------|-------------|
 | `SENDER_EMAIL` | - | From address for everything Phishy sends; must be verified in SES. Required |
 | `REPLY_TO_EMAIL` | - | `Reply-To` for everything Phishy sends. Set it to the address Phishy receives mail at when `SENDER_EMAIL` is a different address (a no-reply sender): the command channel works by reply. The SAM template sets it to `RecipientEmail` when `EmailCommandsEnabled` is true |
-| `SECURITY_TEAM_DISTRIBUTION` | - | Comma-separated security-team addresses: Cc'd on reports, sent security-only emails (incident emails, fan-out alerts, silent Report-button reports), and the only senders whose replies count as commands |
+| `SECURITY_TEAM_DISTRIBUTION` | - | Comma-separated security-team addresses: Cc'd on reports and sent security-only emails (incident emails, fan-out alerts, silent Report-button reports). Replies from these addresses count as commands |
+| `SECURITY_TEAM_MEMBERS` | - | Optional. Comma-separated addresses of individual people who may also issue commands and approvals, for when `SECURITY_TEAM_DISTRIBUTION` is a list address. They are never sent anything. Addresses outside `SAFE_DOMAINS` are ignored (a startup warning gives the count). See [who can issue commands](#who-can-issue-commands) |
 | `SAFE_SENDER_SECURITY` | - | Comma-separated addresses Cc'd instead of the security team on reports from `SAFE_SENDERS` addresses |
 | `SES_CONFIG_SET` | - | Optional SES configuration set for outbound mail |
 
@@ -210,7 +212,16 @@ v1 commands — anywhere in the reply text:
 
 Replying again with the other verdict corrects a mistake — the latest answer wins.
 
-**Authorization is two-factor:** the sender must be in `SECURITY_TEAM_DISTRIBUTION` *and* the inbound mail must pass SES SPF or DKIM verification, so a spoofed From header cannot issue commands. Regular employees' replies are never treated as commands.
+**Authorization is two-factor:** the sender must be one of the security team's addresses (below) *and* the inbound mail must pass SES SPF or DKIM verification, so a spoofed From header cannot issue commands. Regular employees' replies are never treated as commands.
+
+#### Who can issue commands
+
+A reply counts as a command or an approval only when its From address exactly matches (ignoring case and surrounding spaces) one of:
+
+- an address in `SECURITY_TEAM_DISTRIBUTION`, or
+- an address in `SECURITY_TEAM_MEMBERS` whose domain is one of `SAFE_DOMAINS` (or a subdomain of one); any other member address is ignored, so a typo cannot authorize an outside address.
+
+and the message passes SES SPF or DKIM. Most organizations set `SECURITY_TEAM_DISTRIBUTION` to one list address such as `security@example.com`; a reply from a team member's own mailbox comes from that person's address, not the list's, so it is not a command unless the person is in `SECURITY_TEAM_MEMBERS`. Listing people there changes only who may act: Phishy's security email still goes only to `SECURITY_TEAM_DISTRIBUTION`, and its answer to a command goes to the person who sent it.
 
 Requires the intelligence database and `migrations/002_analysis_feedback.sql`.
 
@@ -654,7 +665,8 @@ For more complex setups, use a JSON configuration file. Upload it to S3 and set 
     "senderEmail": "phishy@example.com",
     "replyToEmail": "phishy@example.com",
     "senderName": "Phishy Security",
-    "securityTeamDistribution": ["security@example.com", "soc@example.com"]
+    "securityTeamDistribution": ["security@example.com", "soc@example.com"],
+    "securityTeamMembers": ["alice@example.com", "bob@example.com"]
   },
   "storage": {
     "s3Bucket": "phishy-emails",

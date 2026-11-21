@@ -4,9 +4,11 @@
  * report (or mail referencing an Analysis ID) from an authorized sender are
  * parsed for intent, executed, and answered with the completed actions.
  *
- * Authorization is two-factor: the sender must be in the security team
- * distribution list AND the inbound message must pass SES SPF or DKIM
- * verification, so a spoofed From header is not enough to issue commands.
+ * Authorization is two-factor: the sender must be one of the security
+ * team's addresses (the distribution addresses or the configured member
+ * addresses: `securityTeamCommandSenders`) AND the inbound message must pass
+ * SES SPF or DKIM verification, so a spoofed From header is not enough to
+ * issue commands.
  *
  * v1 command set: verdict corrections ("confirmed phishing" /
  * "false positive"). The channel is designed to grow — safelist changes,
@@ -67,6 +69,7 @@ export class EmailCommandService {
   constructor(
     private db: IntelligenceDatabaseService,
     private notifier: SESNotifier,
+    /** Authorized senders (distribution plus members); never used as recipients */
     private securityTeam: string[],
     /** When provided, free-text replies that keyword parsing misses are interpreted by the model */
     private aiParser?: AIProvider,

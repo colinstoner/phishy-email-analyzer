@@ -24,6 +24,7 @@ const PLAUSIBLE: Record<string, string> = {
   SENDER_EMAIL: 'phishy@example.com',
   REPLY_TO_EMAIL: 'phishy-inbox@example.com',
   SECURITY_TEAM_DISTRIBUTION: 'secops@example.com,analyst@example.com',
+  SECURITY_TEAM_MEMBERS: 'alice@example.com,bob@example.org',
   SAFE_SENDER_SECURITY: 'secops@example.com',
   SES_CONFIG_SET: 'phishy-config-set',
   S3_BUCKET_NAME: 'phishy-emails-example',
@@ -95,6 +96,7 @@ const LIST_VARS = [
   'SAFE_DOMAINS',
   'SAFE_SENDERS',
   'SECURITY_TEAM_DISTRIBUTION',
+  'SECURITY_TEAM_MEMBERS',
   'SAFE_SENDER_SECURITY',
 ];
 
@@ -148,6 +150,10 @@ describe('ENV_MAPPINGS', () => {
     expect(config.notification.securityTeamDistribution).toEqual([
       'secops@example.com',
       'analyst@example.com',
+    ]);
+    expect(config.notification.securityTeamMembers).toEqual([
+      'alice@example.com',
+      'bob@example.org',
     ]);
     expect(config.notification.safeSenderSecurity).toEqual(['secops@example.com']);
     expect(config.graph?.tenantId).toBe(TENANT_ID);

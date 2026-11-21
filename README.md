@@ -70,7 +70,7 @@ Each is off by default and switched on with its own setting ([feature-flag table
 - **Verdict commands**: reply to a report with "confirmed phishing" or "false positive". Phishy records the ruling, adjusts the indicators from that email, applies it to the whole campaign and replies with what it did.
 - **Approvals** (campaign response): each incident email lists proposed actions, each with its exact reply line, `APPROVE WARNING <reference>` or `APPROVE REMOVAL <reference>`. A reply whose own text is just `APPROVE WARNING` approves the warning that email proposed. Removal is a **dry run** today: Phishy replies with what it would remove and changes no mailbox.
 
-Commands and approvals are accepted only from addresses in `SECURITY_TEAM_DISTRIBUTION` whose mail passes SES SPF or DKIM checks.
+Commands and approvals are accepted only from addresses in `SECURITY_TEAM_DISTRIBUTION` or `SECURITY_TEAM_MEMBERS` (optional: individual team members on your safe domains, never emailed) whose mail passes SES SPF or DKIM checks.
 
 ## Safety design, briefly
 
