@@ -25,7 +25,8 @@ export class CampaignAlertService {
   constructor(db: IntelligenceDatabaseService, config: CampaignAlertConfig) {
     this.db = db;
     this.config = config;
-    this.sesClient = new SESClient({ region: config.region ?? 'us-west-2' });
+    // No region configured: the SDK resolves it from the environment
+    this.sesClient = new SESClient({ region: config.region });
   }
 
   /**
