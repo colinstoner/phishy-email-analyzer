@@ -112,8 +112,11 @@ describe('blast radius identifiers for campaign response', () => {
       mailboxId: ALICE,
       messageIds: ['AAMkAGI2-alice-1=', 'AAMkAGI2-alice-2='],
       receivedAt: '2026-11-16T08:03:00.000Z',
+      // What a live removal checks each copy against, deduplicated
+      internetMessageIds: ['<m1@mail.example.org>'],
     });
     expect(byAddress.get('bob@example.com')?.messageIds).toHaveLength(5);
+    expect(byAddress.get('carol@example.com')?.internetMessageIds).toBeUndefined();
     // A directory ID that is not a GUID is never carried as a mailbox to act on
     expect(byAddress.get('carol@example.com')?.mailboxId).toBeUndefined();
     expect(byAddress.get('carol@example.com')?.messageIds).toBeUndefined();
@@ -150,6 +153,22 @@ describe('blast radius identifiers for campaign response', () => {
     expect(
       BlastRadiusLookupResultSchema.safeParse(
         withRecipient({ messageIds: Array.from({ length: 6 }, (_, i) => `id${i}`) })
+      ).success
+    ).toBe(false);
+    expect(
+      BlastRadiusLookupResultSchema.safeParse(
+        withRecipient({ internetMessageIds: ['<m1@mail.example.org>'] })
+      ).success
+    ).toBe(true);
+    expect(
+      BlastRadiusLookupResultSchema.safeParse(withRecipient({ internetMessageIds: ['no at sign'] }))
+        .success
+    ).toBe(false);
+    expect(
+      BlastRadiusLookupResultSchema.safeParse(
+        withRecipient({
+          internetMessageIds: Array.from({ length: 6 }, (_, i) => `<m${i}@mail.example.org>`),
+        })
       ).success
     ).toBe(false);
   });

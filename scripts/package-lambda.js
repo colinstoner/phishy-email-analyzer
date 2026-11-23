@@ -7,11 +7,16 @@
  *   npm run package
  *     dist/lambda/phishy.zip        index.js         handler index.handler
  *     dist/lambda/graph-broker.zip  graph-broker.js  handler graph-broker.handler
+ *     dist/lambda/graph-write-broker.zip  graph-write-broker.js
+ *                                   handler graph-write-broker.handler
  *
  *   npm run deploy -- <function-name> [--broker <broker-function-name>]
- *     (or PHISHY_DEPLOY_FUNCTION / PHISHY_DEPLOY_BROKER_FUNCTION)
+ *                     [--write-broker <write-broker-function-name>]
+ *     (or PHISHY_DEPLOY_FUNCTION / PHISHY_DEPLOY_BROKER_FUNCTION /
+ *     PHISHY_DEPLOY_WRITE_BROKER_FUNCTION)
  *     packages, then updates the code of the named function(s). Nothing is
- *     uploaded without a function name.
+ *     uploaded without a function name, and the write broker only when it is
+ *     named explicitly.
  *
  * Keep BUNDLES in step with template.yaml: entry points, Target, External,
  * Loader, Minify. The AWS SDK is external because the Node.js 22 runtime
@@ -28,7 +33,7 @@ const esbuild = require('esbuild');
 const ROOT = path.join(__dirname, '..');
 const OUT_DIR = path.join(ROOT, 'dist', 'lambda');
 
-/** Mirrors template.yaml PhishyFunction and GraphBrokerFunction Metadata */
+/** Mirrors template.yaml PhishyFunction, GraphBrokerFunction and GraphWriteBrokerFunction Metadata */
 const BUNDLES = [
   {
     name: 'phishy',
@@ -40,6 +45,12 @@ const BUNDLES = [
     name: 'graph-broker',
     entryPoint: 'src/graph-broker.ts',
     outfile: 'graph-broker.js',
+    loader: {},
+  },
+  {
+    name: 'graph-write-broker',
+    entryPoint: 'src/graph-write-broker.ts',
+    outfile: 'graph-write-broker.js',
     loader: {},
   },
 ];
@@ -68,13 +79,20 @@ async function buildBundle(bundle) {
 }
 
 function parseArgs(argv) {
-  const args = { deploy: false, functionName: undefined, brokerFunctionName: undefined };
+  const args = {
+    deploy: false,
+    functionName: undefined,
+    brokerFunctionName: undefined,
+    writeBrokerFunctionName: undefined,
+  };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === '--deploy') {
       args.deploy = true;
     } else if (arg === '--broker') {
       args.brokerFunctionName = argv[++i];
+    } else if (arg === '--write-broker') {
+      args.writeBrokerFunctionName = argv[++i];
     } else if (arg === '--function') {
       args.functionName = argv[++i];
     } else if (!arg.startsWith('-') && args.functionName === undefined) {
@@ -85,6 +103,7 @@ function parseArgs(argv) {
   }
   args.functionName ??= process.env.PHISHY_DEPLOY_FUNCTION;
   args.brokerFunctionName ??= process.env.PHISHY_DEPLOY_BROKER_FUNCTION;
+  args.writeBrokerFunctionName ??= process.env.PHISHY_DEPLOY_WRITE_BROKER_FUNCTION;
   return args;
 }
 
@@ -124,6 +143,9 @@ async function main() {
     updateFunctionCode(args.functionName, zips.phishy);
     if (args.brokerFunctionName) {
       updateFunctionCode(args.brokerFunctionName, zips['graph-broker']);
+    }
+    if (args.writeBrokerFunctionName) {
+      updateFunctionCode(args.writeBrokerFunctionName, zips['graph-write-broker']);
     }
   }
 }

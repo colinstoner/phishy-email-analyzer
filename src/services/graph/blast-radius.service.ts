@@ -128,6 +128,13 @@ export interface BlastRadiusRecipient {
    */
   mailboxId?: string;
   messageIds?: string[];
+  /**
+   * The Internet Message-IDs of those copies, as the mailbox reported them
+   * (shape-checked, at most 5). A live removal moves a copy only when its
+   * Internet Message-ID, re-read at removal time, is one of these. Hostile
+   * text (the sender chose it): compared as data, never rendered.
+   */
+  internetMessageIds?: string[];
   /** When the mailbox received the first matching copy (ISO, from the mailbox) */
   receivedAt?: string;
 }
@@ -338,6 +345,8 @@ interface MailboxEntry {
   hit?: MessageSummary;
   /** Graph IDs of every matching copy found (shape-checked, capped) */
   hitIds: string[];
+  /** Internet Message-IDs of those copies (shape-checked, capped) */
+  hitInternetIds: string[];
   copies: number;
   folder?: BlastRadiusFolder;
   response?: BlastRadiusResponse;
@@ -813,6 +822,7 @@ export class BlastRadiusService {
       if (found.length > 0) {
         entry.hit = found[0];
         entry.hitIds = copyIds(found);
+        entry.hitInternetIds = copyInternetIds(found);
         entry.copies = found.length;
       }
     } catch (error) {
@@ -891,6 +901,7 @@ export class BlastRadiusService {
       if (found.length > 0) {
         entry.hit = found[0];
         entry.hitIds = copyIds(found);
+        entry.hitInternetIds = copyInternetIds(found);
         entry.copies = found.length;
         entry.folder = 'recoverable';
       }
@@ -1150,14 +1161,30 @@ function copyIds(found: MessageSummary[]): string[] {
   return ids.slice(0, MAX_REPORTED_COPY_IDS);
 }
 
+/** Internet Message-IDs of the copies found, shape-checked and capped */
+function copyInternetIds(found: MessageSummary[]): string[] {
+  const ids: string[] = [];
+  for (const message of found) {
+    const id = message.internetMessageId?.trim();
+    if (id && MESSAGE_ID_PATTERN.test(id) && !ids.includes(id)) {
+      ids.push(id);
+    }
+  }
+  return ids.slice(0, MAX_REPORTED_COPY_IDS);
+}
+
 /** The identifiers of a mailbox copy a response action may name, when well formed */
 function copyIdentifiers(
   entry: MailboxEntry
-): Pick<BlastRadiusRecipient, 'mailboxId' | 'messageIds' | 'receivedAt'> {
+): Pick<BlastRadiusRecipient, 'mailboxId' | 'messageIds' | 'internetMessageIds' | 'receivedAt'> {
   const received = Date.parse(entry.hit?.receivedDateTime ?? '');
   return {
     ...(DIRECTORY_ID_PATTERN.test(entry.user.id) && entry.hitIds.length > 0
-      ? { mailboxId: entry.user.id, messageIds: entry.hitIds }
+      ? {
+          mailboxId: entry.user.id,
+          messageIds: entry.hitIds,
+          ...(entry.hitInternetIds.length > 0 ? { internetMessageIds: entry.hitInternetIds } : {}),
+        }
       : {}),
     ...(Number.isFinite(received) ? { receivedAt: new Date(received).toISOString() } : {}),
   };
@@ -1169,6 +1196,7 @@ function newEntry(user: DirectoryUser, address: string, messageIds: string[] = [
     address,
     messageIds,
     hitIds: [],
+    hitInternetIds: [],
     checked: false,
     recoverableChecked: false,
     copies: 0,

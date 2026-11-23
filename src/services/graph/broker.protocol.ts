@@ -476,6 +476,10 @@ const BlastRadiusRecipientSchema = z.strictObject({
     .array(z.string().regex(GRAPH_ITEM_ID_PATTERN))
     .max(MAX_REPORTED_COPY_IDS)
     .optional(),
+  internetMessageIds: z
+    .array(z.string().regex(MESSAGE_ID_PATTERN))
+    .max(MAX_REPORTED_COPY_IDS)
+    .optional(),
   receivedAt: IsoInstant.optional(),
 });
 

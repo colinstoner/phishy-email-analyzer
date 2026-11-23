@@ -137,6 +137,33 @@ What the stack adds when the scan is enabled (and nothing at all when it is not)
 
 No other permission is needed: the main function already invokes the broker, reads the database and sends email, and the broker already reads message trace. Each scan is one more broker invocation of a few seconds; all scans together spend at most 20 message-trace requests per 5 minutes (counted in the database, separately from the on-report sender-relationship check), so a shorter interval means smaller scans, not more requests. To change the scan's other settings (`PHISHY_GRAPH_FANOUT_SCAN_*` in [docs/CONFIGURATION.md](docs/CONFIGURATION.md#scheduled-fan-out-scan-optional)), add them to the main function's environment. After deploying, watch `FanoutScans` by `Outcome` (`migration_missing` or `no_database` mean the scan is not running) and `FanoutScanIncomplete`.
 
+### Optional: the mailbox write tier (live campaign removal)
+
+By default an approved campaign removal is a dry run and nothing in the stack can change a mailbox. The write tier is a third function, the **Graph write broker**, that moves approved copies to Deleted Items. A stack that supplies none of the parameters below is exactly what it was without them: no new resources and no changed ones. Design and threat model: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#the-mailbox-write-tier).
+
+Before deploying, create a **second** Entra app registration with `Mail.ReadWrite` (application, admin consent) and its own certificate, and store that certificate as a **new** Secrets Manager secret, as described in [docs/CONFIGURATION.md](docs/CONFIGURATION.md#mailbox-write-tier-optional).
+
+| Parameter | Default | |
+|---|---|---|
+| `GraphWriteClientId` | - | Application (client) ID of the write app registration. With `GraphWriteCertificateSecretArn`, deploys the write broker |
+| `GraphWriteCertificateSecretArn` | - | ARN of the write app's certificate secret (a different secret from `GraphCertificateSecretArn`) |
+| `GraphWriteEnabled` | `false` | The write broker's own kill switch. While `false` it refuses every request |
+| `GraphWriteAllowedMailboxIds` | - | Optional comma-separated Entra object IDs: the only mailboxes it may change |
+| `GraphWriteBrokerReservedConcurrency` | `2` | Most write broker instances at once; `0` reserves nothing |
+| `CampaignRemovalMode` | `dry_run` | `live` points the main function at the write broker. Needs `CampaignResponseEnabled` and the write broker |
+
+The deploy is rejected if only one of the two write parameters is given, if `GraphTenantId` is missing, if the write client ID equals `GraphReadClientId`, if the write secret equals `GraphCertificateSecretArn`, or if `CampaignRemovalMode=live` lacks campaign response or the write broker.
+
+What the stack adds:
+
+- **`GraphWriteBrokerFunction`** (with the two write parameters) — built from `src/graph-write-broker.ts` (handler `graph-write-broker.handler`), Node.js 22, 256 MB, 100-second timeout, outside the VPC, no trigger of any kind. Its environment holds the kill switch, the tenant ID, the write client ID, the write secret's ARN and the allowlist, and nothing else.
+- **`GraphWriteBrokerRole`** — its own role, in full: logs to its own log group and `secretsmanager:GetSecretValue` on the **write** secret only. It cannot read the read secret, the database secret, S3 or SES.
+- **`GraphWriteBrokerLogGroup`** — 365-day retention: each call's line (action ID and counts) is the write tier's own record of what it changed.
+- **On the main function**, only with `CampaignRemovalMode=live` and campaign response on: `PHISHY_CAMPAIGN_RESPONSE_REMOVAL_MODE=live`, `PHISHY_GRAPH_WRITE_BROKER_FUNCTION`, and `lambda:InvokeFunction` on the write broker. It is never given the write client ID or the write secret, and its role cannot read that secret. The read broker's role is unchanged.
+- The **Lambda interface endpoint** is created for live removal as for Graph (it is normally already there).
+
+Roll it out in steps: deploy with `GraphWriteEnabled=false` and `CampaignRemovalMode=live` (an approval then replies that the write broker refused, proving the path); then `GraphWriteEnabled=true` with `GraphWriteAllowedMailboxIds` set to one test mailbox; then clear the allowlist. `npm run deploy -- <function> --write-broker <write-broker-function>` updates its code outside SAM. Cost: only what it runs (a few seconds of 256 MB per approved removal) and the second secret (about USD 0.40 a month). Alarm on `CampaignRemovalErrors` and on `GraphBrokerCalls` with `Operation=remove_messages` and an `Outcome` other than `ok`.
+
 ## Option B: Manual Console Setup
 
 ### 1. Domain Verification in SES

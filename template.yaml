@@ -95,7 +95,8 @@ Parameters:
     Description: >
       Campaign response: one incident email per campaign to the security team,
       a targeted warning to the people who received the email, and actions the
-      security team approves by reply (mailbox removal is a dry run). Needs
+      security team approves by reply (mailbox removal is a dry run unless
+      CampaignRemovalMode is live). Needs
       CampaignAlertsEnabled, the intelligence database with
       migrations/006_campaign_response.sql applied manually, and
       EmailCommandsEnabled for approvals to be received.
@@ -269,6 +270,60 @@ Parameters:
       lookups beyond it are skipped and analysis proceeds without them. Set to
       0 to reserve nothing (required if the account's concurrency quota is too
       small to reserve from). Used only when GraphEnabled is true.
+  # The mailbox write tier (optional; nothing below is created unless both
+  # GraphWriteClientId and GraphWriteCertificateSecretArn are supplied)
+  GraphWriteClientId:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    Description: >
+      Optional. Application (client) ID of a SEPARATE Entra app registration
+      for the mailbox write tier (Mail.ReadWrite, application, certificate
+      only), never the read app's. With GraphWriteCertificateSecretArn it
+      deploys a third function, the Graph write broker, which only the
+      campaign-response removal uses. Leave empty to deploy no write tier.
+  GraphWriteCertificateSecretArn:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+$'
+    Description: >
+      Optional. ARN of the Secrets Manager secret holding the WRITE app's
+      private key and certificate (a different secret from
+      GraphCertificateSecretArn). Only the write broker's role can read it.
+  GraphWriteEnabled:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Default: 'false'
+    Description: >
+      The write broker's own kill switch. While false (the default) it refuses
+      every request, even when the main function is set to live removal. Used
+      only when the write broker is deployed.
+  GraphWriteAllowedMailboxIds:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(,[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})*$'
+    Description: >
+      Optional. Comma-separated Entra object IDs of the only mailboxes the
+      write broker may change (for example a single test mailbox in staging);
+      any other mailbox is refused. Empty: no allowlist.
+  GraphWriteBrokerReservedConcurrency:
+    Type: Number
+    Default: 2
+    MinValue: 0
+    MaxValue: 10
+    Description: >
+      Most write broker instances that can run at once (0 reserves nothing).
+      Used only when the write broker is deployed.
+  CampaignRemovalMode:
+    Type: String
+    AllowedValues: [dry_run, live]
+    Default: dry_run
+    Description: >
+      How an approved campaign removal is carried out: dry_run (reported, no
+      mailbox changed) or live (the write broker moves the approved copies to
+      Deleted Items). live needs CampaignResponseEnabled and the write broker;
+      the write broker's GraphWriteEnabled must also be true for anything to
+      move. A removal always needs the exact APPROVE REMOVAL reply.
 
 Rules:
   GraphSettingsPresent:
@@ -294,6 +349,28 @@ Rules:
         AssertDescription: GraphFanoutScanEnabled needs GraphEnabled=true
       - Assert: !Not [!Equals [!Ref IntelligenceDbSecretArn, '']]
         AssertDescription: GraphFanoutScanEnabled needs the intelligence database (IntelligenceDbSecretArn) for its state
+  GraphWriteSettingsPresent:
+    RuleCondition: !Or
+      - !Not [!Equals [!Ref GraphWriteClientId, '']]
+      - !Not [!Equals [!Ref GraphWriteCertificateSecretArn, '']]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref GraphWriteClientId, '']]
+        AssertDescription: GraphWriteClientId is required with GraphWriteCertificateSecretArn
+      - Assert: !Not [!Equals [!Ref GraphWriteCertificateSecretArn, '']]
+        AssertDescription: GraphWriteCertificateSecretArn is required with GraphWriteClientId
+      - Assert: !Not [!Equals [!Ref GraphTenantId, '']]
+        AssertDescription: GraphTenantId is required for the write broker
+      - Assert: !Not [!Equals [!Ref GraphWriteClientId, !Ref GraphReadClientId]]
+        AssertDescription: The write app registration must be a different app from the read one
+      - Assert: !Not [!Equals [!Ref GraphWriteCertificateSecretArn, !Ref GraphCertificateSecretArn]]
+        AssertDescription: The write certificate must be a different secret from the read one
+  LiveRemovalRequirements:
+    RuleCondition: !Equals [!Ref CampaignRemovalMode, live]
+    Assertions:
+      - Assert: !Equals [!Ref CampaignResponseEnabled, 'true']
+        AssertDescription: CampaignRemovalMode=live needs CampaignResponseEnabled=true
+      - Assert: !Not [!Equals [!Ref GraphWriteClientId, '']]
+        AssertDescription: CampaignRemovalMode=live needs the write broker (GraphWriteClientId, GraphWriteCertificateSecretArn)
 
 Conditions:
   UseAnthropic: !Equals [!Ref AIProvider, anthropic]
@@ -361,9 +438,27 @@ Conditions:
   ReserveGraphBrokerConcurrency: !And
     - !Condition UseGraph
     - !Not [!Equals [!Ref GraphBrokerReservedConcurrency, 0]]
+  # The write tier: deployed only when its own app registration and secret
+  # are supplied. The rule above rejects one without the other.
+  UseGraphWrite: !And
+    - !Not [!Equals [!Ref GraphWriteClientId, '']]
+    - !Not [!Equals [!Ref GraphWriteCertificateSecretArn, '']]
+  HasGraphWriteAllowlist: !And
+    - !Condition UseGraphWrite
+    - !Not [!Equals [!Ref GraphWriteAllowedMailboxIds, '']]
+  ReserveGraphWriteBrokerConcurrency: !And
+    - !Condition UseGraphWrite
+    - !Not [!Equals [!Ref GraphWriteBrokerReservedConcurrency, 0]]
+  # Only then is the main function told to use it, and allowed to invoke it
+  UseLiveRemoval: !And
+    - !Condition UseGraphWrite
+    - !Condition UseCampaignResponse
+    - !Equals [!Ref CampaignRemovalMode, live]
   CreateLambdaEndpoint: !And
     - !Condition CreateEndpoints
-    - !Condition UseGraph
+    - !Or
+      - !Condition UseGraph
+      - !Condition UseLiveRemoval
 
 Resources:
   EmailBucket:
@@ -468,6 +563,10 @@ Resources:
           PHISHY_GRAPH_BLAST_RADIUS_ENABLED: !If [UseGraphBlastRadius, 'true', !Ref AWS::NoValue]
           PHISHY_GRAPH_SENDER_HISTORY_ENABLED: !If [UseGraphSenderHistory, 'true', !Ref AWS::NoValue]
           PHISHY_GRAPH_FANOUT_SCAN_ENABLED: !If [UseGraphFanoutScan, 'true', !Ref AWS::NoValue]
+          # Live removal: this function only invokes the write broker. It is
+          # given no write client ID, no write secret and no access to it.
+          PHISHY_CAMPAIGN_RESPONSE_REMOVAL_MODE: !If [UseLiveRemoval, live, !Ref AWS::NoValue]
+          PHISHY_GRAPH_WRITE_BROKER_FUNCTION: !If [UseLiveRemoval, !Ref GraphWriteBrokerFunction, !Ref AWS::NoValue]
       VpcConfig: !If
         - UseIntelligence
         - SecurityGroupIds:
@@ -521,6 +620,15 @@ Resources:
                 Action:
                   - lambda:InvokeFunction
                 Resource: !GetAtt GraphBrokerFunction.Arn
+          - !Ref AWS::NoValue
+        - !If
+          - UseLiveRemoval
+          - Statement:
+              - Sid: InvokeGraphWriteBroker
+                Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !GetAtt GraphWriteBrokerFunction.Arn
           - !Ref AWS::NoValue
 
   # The Graph broker: the only function that talks to Microsoft Graph and the
@@ -613,6 +721,88 @@ Resources:
                 Action:
                   - secretsmanager:GetSecretValue
                 Resource: !Ref GraphCertificateSecretArn
+
+  # The Graph write broker (the mailbox write tier): the only function that
+  # can change a mailbox, and the only one that can read the WRITE
+  # certificate. Deployed only with GraphWriteClientId and
+  # GraphWriteCertificateSecretArn. Outside the VPC, no trigger (no function
+  # URL, API or event source); the main function invokes it directly, and
+  # only when CampaignRemovalMode is live. One operation, remove_messages:
+  # move approved copies to Deleted Items. Its own kill switch
+  # (GraphWriteEnabled, default false) and allowlist are in its own
+  # environment. See docs/ARCHITECTURE.md, "The mailbox write tier".
+  GraphWriteBrokerFunction:
+    Type: AWS::Serverless::Function
+    Condition: UseGraphWrite
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: false
+        Target: es2022
+        EntryPoints:
+          - src/graph-write-broker.ts
+        External:
+          - '@aws-sdk/*'
+    Properties:
+      Handler: graph-write-broker.handler
+      Runtime: nodejs22.x
+      Architectures: [x86_64]
+      MemorySize: 256
+      # One call works for at most 80s (the protocol's budget bound); the
+      # main function stops waiting a few seconds after that
+      Timeout: 100
+      ReservedConcurrentExecutions: !If
+        - ReserveGraphWriteBrokerConcurrency
+        - !Ref GraphWriteBrokerReservedConcurrency
+        - !Ref AWS::NoValue
+      Role: !GetAtt GraphWriteBrokerRole.Arn
+      LoggingConfig:
+        LogGroup: !Ref GraphWriteBrokerLogGroup
+      Environment:
+        Variables:
+          PHISHY_GRAPH_WRITE_ENABLED: !Ref GraphWriteEnabled
+          PHISHY_GRAPH_TENANT_ID: !Ref GraphTenantId
+          PHISHY_GRAPH_WRITE_CLIENT_ID: !Ref GraphWriteClientId
+          # The ARN, not the certificate: fetched on the first request
+          PHISHY_GRAPH_WRITE_CERTIFICATE: !Ref GraphWriteCertificateSecretArn
+          PHISHY_GRAPH_WRITE_ALLOWED_MAILBOX_IDS: !If [HasGraphWriteAllowlist, !Ref GraphWriteAllowedMailboxIds, !Ref AWS::NoValue]
+
+  GraphWriteBrokerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: UseGraphWrite
+    Properties:
+      RetentionInDays: 365
+
+  # Least privilege, stated in full: write to its own log group and read the
+  # one WRITE certificate secret. Not the read secret, not the database
+  # secret, no S3, SES, Bedrock, Lambda or VPC access.
+  GraphWriteBrokerRole:
+    Type: AWS::IAM::Role
+    Condition: UseGraphWrite
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: graph-write-broker
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: WriteOwnLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt GraphWriteBrokerLogGroup.Arn
+              - Sid: ReadGraphWriteCertificate
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref GraphWriteCertificateSecretArn
 
   LambdaSecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -775,6 +965,10 @@ Outputs:
     Condition: UseGraph
     Description: Graph broker function ARN (invoked only by the Phishy function)
     Value: !GetAtt GraphBrokerFunction.Arn
+  GraphWriteBrokerFunctionArn:
+    Condition: UseGraphWrite
+    Description: Graph write broker function ARN (the mailbox write tier; invoked only by the Phishy function in live removal mode)
+    Value: !GetAtt GraphWriteBrokerFunction.Arn
   EmailBucketName:
     Description: Bucket where SES stores raw emails
     Value: !Ref EmailBucket

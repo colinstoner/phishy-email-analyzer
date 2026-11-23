@@ -161,6 +161,22 @@ const CampaignResponseConfigSchema = z.object({
   /** Most mailboxes and messages one removal action may name */
   maxRemovalMailboxes: z.number().int().min(1).max(5000).default(500),
   maxRemovalMessages: z.number().int().min(1).max(10000).default(1000),
+  /**
+   * How an approved removal is carried out. `dry_run` (the default): it is
+   * re-checked and reported, and no mailbox is changed. `live`: the approved
+   * copies are moved to Deleted Items by the separate Graph write broker
+   * (`writeBrokerFunctionName`), which holds its own credential and has its
+   * own kill switch. `live` without a usable function name runs the dry run
+   * and logs why. Either way a removal needs the exact `APPROVE REMOVAL <ref>`
+   * reply; it is never automatic.
+   */
+  removal: z
+    .object({
+      mode: z.enum(['dry_run', 'live']).default('dry_run'),
+      /** Name or ARN of the Graph write broker function (used only in `live` mode) */
+      writeBrokerFunctionName: z.string().max(170).optional(),
+    })
+    .optional(),
   /** Shortest gap between incident updates to the security team */
   updateIntervalMinutes: z.number().int().min(1).max(1440).default(30),
   /**
@@ -298,9 +314,12 @@ const CampaignCacheConfigSchema = z.object({
  * Microsoft Graph configuration schema
  * Optional, app-only access to the organization's own Microsoft 365 tenant.
  * One tenant; each kind of access has its own app registration, authenticated
- * with a certificate (never a client secret). Only the `read` registration
- * exists today — a `write` registration, when added, is a sibling key with
- * its own clientId and certificate so the two can never share a token.
+ * with a certificate (never a client secret). This schema holds only the
+ * `read` registration. The write registration is not a key here at all: it
+ * belongs to the Graph write broker alone, which loads it from its own
+ * environment (`GraphWriteBrokerConfigSchema`), so neither the main function
+ * nor the read broker can hold it. A `graph.write` key in this configuration
+ * is not part of the schema and is dropped.
  *
  * Formats are enforced only when enabled, so stray or empty values cannot
  * break a deployment that has Graph switched off.
@@ -511,6 +530,70 @@ export const GraphBrokerConfigSchema = z.object({
 });
 
 /**
+ * The Graph write broker's own configuration (the mailbox write tier). It
+ * is read from that function's environment only, never from the shared S3
+ * configuration file, so nothing the main function's configuration says can
+ * turn it on or widen it. Off by default: with `enabled` false every request
+ * is refused before a credential is loaded.
+ *
+ * - `tenantId`, `clientId`, `certificate`: the write app registration (its
+ *   own client ID and certificate, never the read one's; certificate only,
+ *   never a client secret). Required when enabled.
+ * - `allowedMailboxIds`: when set, the only mailboxes (Entra object IDs) the
+ *   broker will change; any other is refused as `not_allowed`. How a staging
+ *   deployment is limited to one test mailbox.
+ */
+export const GraphWriteBrokerConfigSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    tenantId: z.string().optional(),
+    clientId: z.string().optional(),
+    certificate: z.string().optional(),
+    allowedMailboxIds: z
+      .array(z.string().regex(GRAPH_GUID, 'allowedMailboxIds entries must be Entra object GUIDs'))
+      .max(1000)
+      .optional(),
+    logLevel: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
+  })
+  .superRefine((data, ctx) => {
+    if (!data.enabled) {
+      return;
+    }
+    if (
+      !data.tenantId ||
+      (!GRAPH_GUID.test(data.tenantId) && !GRAPH_TENANT_DOMAIN.test(data.tenantId))
+    ) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['tenantId'],
+        message:
+          'a directory (tenant) GUID or domain name is required when the write broker is enabled',
+      });
+    }
+    if (!data.clientId || !GRAPH_GUID.test(data.clientId)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['clientId'],
+        message:
+          'the write app registration client GUID is required when the write broker is enabled',
+      });
+    }
+    if (!data.certificate?.trim()) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['certificate'],
+        message:
+          'the write certificate (Secrets Manager ARN) is required when the write broker is enabled',
+      });
+    }
+  });
+
+/** A Lambda function name or ARN, as the main function may address a broker */
+export function isLambdaFunctionReference(value: string | undefined): value is string {
+  return value !== undefined && LAMBDA_FUNCTION_REFERENCE.test(value);
+}
+
+/**
  * Complete Phishy configuration schema
  */
 export const PhishyConfigSchema = z.object({
@@ -553,6 +636,7 @@ export type ScoringConfig = z.infer<typeof ScoringConfigSchema>;
 export type AttachmentAnalysisConfig = z.infer<typeof AttachmentAnalysisConfigSchema>;
 export type GraphConfig = z.infer<typeof GraphConfigSchema>;
 export type GraphBrokerConfig = z.infer<typeof GraphBrokerConfigSchema>;
+export type GraphWriteBrokerConfig = z.infer<typeof GraphWriteBrokerConfigSchema>;
 export type GraphCredentialConfig = z.infer<typeof GraphCredentialConfigSchema>;
 export type GraphBlastRadiusConfig = z.infer<typeof GraphBlastRadiusConfigSchema>;
 export type ReportButtonConfig = z.infer<typeof ReportButtonConfigSchema>;

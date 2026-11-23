@@ -586,8 +586,15 @@ export function emitFanoutScanMetric(metric: FanoutScanMetric): void {
  * What happened in campaign response. Each name is its own metric:
  * - `CampaignWarningsSent`: employee warnings sent
  *   (dimension `Audience`: `recipients` or `distribution`)
- * - `CampaignRemovalNoticesSent`: removal notices sent (only after a real,
- *   non-dry-run removal, so never until the write tier exists)
+ * - `CampaignRemovalNoticesSent`: removal notices sent (only after a live
+ *   removal moved at least one copy; never after a dry run)
+ * - `CampaignMessagesRemoved`: copies a live removal moved to Deleted Items
+ * - `CampaignRemovalErrors`: copies a live removal failed on, or whose
+ *   outcome is unknown (the write broker did not answer)
+ * - `CampaignRemovalRefused`: copies the write broker refused (dimension
+ *   `Reason`: `mismatch` or `not_allowed`); nothing was changed
+ * - `CampaignRemovalNotAttempted`: copies a live removal did not attempt
+ *   (time, throttling, a refusal, or no recorded Internet Message-ID)
  * - `CampaignWarningsSkipped`: recipients not emailed (dimension `Reason`)
  * - `CampaignWarningSendFailures`: SES refused or failed a send
  * - `CampaignIncidentsOpened` (dimension `Trigger`), `CampaignIncidentUpdates`
@@ -607,7 +614,11 @@ export type CampaignResponseMetricName =
   | 'ResponseActionApprovals'
   | 'ResponseActionApprovalsRejected'
   | 'ResponseActionsExpired'
-  | 'ResponseActionsDryRun';
+  | 'ResponseActionsDryRun'
+  | 'CampaignMessagesRemoved'
+  | 'CampaignRemovalErrors'
+  | 'CampaignRemovalRefused'
+  | 'CampaignRemovalNotAttempted';
 
 /**
  * Emit one campaign-response count. Dimension values are fixed words chosen

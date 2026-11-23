@@ -84,6 +84,13 @@ export interface RemovalMailbox {
   mailboxId: string;
   /** Graph message IDs Phishy's blast-radius lookup matched for this campaign */
   messageIds: string[];
+  /**
+   * The Internet Message-IDs of those copies, as the same lookup read them.
+   * A live removal moves a copy only when its Internet Message-ID, re-read
+   * at removal time, is one of these; a mailbox without them (a scope
+   * proposed before they were recorded) is not sent to the write tier.
+   */
+  internetMessageIds?: string[];
   folder: BlastRadiusFolder;
   isRead?: boolean;
 }
@@ -146,6 +153,21 @@ export interface ActionResult {
   notSentForTime?: number;
   /** Removal dry run: what it would do */
   wouldRemove?: RemovalCounts;
+  /**
+   * A live removal: per-message outcomes by count (moved, already in Deleted
+   * Items, not found, refused as mismatch or outside the write broker's
+   * allowlist, errors, not attempted, unknown). Recorded in the audit row.
+   */
+  removalOutcome?: {
+    moved: number;
+    alreadyDeleted: number;
+    notFound: number;
+    mismatch: number;
+    notAllowed: number;
+    error: number;
+    notAttempted: number;
+    unknown: number;
+  };
   /**
    * A real (non-dry-run) removal: the mailboxes a copy was actually moved
    * out of, as the executor reports them. Only the future write tier sets

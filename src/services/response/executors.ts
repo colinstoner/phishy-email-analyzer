@@ -8,18 +8,18 @@
  *   (nobody sees another address), through SES, to safe-domain addresses
  *   only. It also sends the removal notice (below), the same way.
  * - `DryRunRemovalExecutor` for "remove remaining copies": it records what
- *   a removal WOULD do and changes nothing. No Graph write exists anywhere
- *   in Phishy.
+ *   a removal WOULD do and changes nothing. The default.
  *
- * The seam for a real removal (not built): a `RemovalExecutor` with
- * `changesMailboxes: true`, in its own module, that sends the approved
- * scope — mailbox IDs and Graph message IDs, never a search — to a second,
- * separate broker function holding its own certificate and `Mail.ReadWrite`.
- * The main function and the read broker never hold that credential.
- * `createRemovalExecutor` is where it would be chosen. It must return
- * `dryRun: false` and list in `removed` each mailbox a copy was actually
- * moved out of: only those mailboxes get the removal notice. Until that
- * tier exists, no removal notice is ever sent.
+ * The live removal is `LiveRemovalExecutor` (`live.removal.executor.ts`),
+ * with `changesMailboxes: true`: it sends the approved, re-checked scope —
+ * mailbox IDs, Graph message IDs and the recorded Internet Message-IDs,
+ * never a search — to the Graph write broker, a separate function holding
+ * its own certificate and `Mail.ReadWrite`. The main function and the read
+ * broker never hold that credential. `createRemovalExecutor` chooses it
+ * only when `campaignResponse.removal.mode` is `live` and a write broker
+ * function is configured. It returns `dryRun: false` and lists in `removed`
+ * each mailbox a copy was actually moved out of: only those mailboxes get
+ * the removal notice.
  */
 
 import { EmailSendResult } from '../../types';
@@ -41,6 +41,10 @@ import {
   WarningScope,
 } from './response.types';
 import { isSafeRecipient, recheckRemoval } from './scope';
+import type { CampaignResponseConfig } from '../../config/schema';
+import { isLambdaFunctionReference } from '../../config/schema';
+import { GraphWriteBrokerClient, LambdaInvoker } from '../graph-write/write.broker.client';
+import { LiveRemovalExecutor } from './live.removal.executor';
 
 const logger = createLogger('campaign-response');
 
@@ -238,6 +242,12 @@ export class SesWarningExecutor {
   }
 }
 
+/** What else a removal executor may be told about the invocation it runs in */
+export interface RemovalExecutionOptions {
+  /** The main function's remaining Lambda time, when known */
+  getRemainingMs?: () => number | undefined;
+}
+
 /** What a removal executor is given: the approved, re-checked scope */
 export interface RemovalExecutor {
   readonly name: string;
@@ -251,7 +261,8 @@ export interface RemovalExecutor {
   execute(
     action: ResponseAction,
     approved: RemovalScope,
-    currentReach: IncidentReach
+    currentReach: IncidentReach,
+    options?: RemovalExecutionOptions
   ): Promise<ActionResult>;
 }
 
@@ -296,10 +307,34 @@ export class DryRunRemovalExecutor implements RemovalExecutor {
 }
 
 /**
- * The removal executor for this deployment. Always the dry run: the write
- * tier (a separate broker function with its own certificate and
- * `Mail.ReadWrite`) is not built.
+ * The removal executor for this deployment. The dry run unless
+ * `campaignResponse.removal.mode` is `live` AND a usable write broker
+ * function name is configured; `live` without one fails closed to the dry
+ * run, with a log line that says what to set. The write broker has its own
+ * kill switch as well, so `live` here alone moves nothing.
  */
-export function createRemovalExecutor(): RemovalExecutor {
-  return new DryRunRemovalExecutor();
+export function createRemovalExecutor(
+  removal?: CampaignResponseConfig['removal'],
+  lambda?: LambdaInvoker
+): RemovalExecutor {
+  if (removal?.mode !== 'live') {
+    return new DryRunRemovalExecutor();
+  }
+  if (!isLambdaFunctionReference(removal.writeBrokerFunctionName)) {
+    logger.warn(
+      'campaignResponse.removal.mode is live but no valid Graph write broker function is configured ' +
+        '(campaignResponse.removal.writeBrokerFunctionName / PHISHY_GRAPH_WRITE_BROKER_FUNCTION); ' +
+        'approved removals run as a dry run and change no mailbox'
+    );
+    return new DryRunRemovalExecutor();
+  }
+  logger.info(
+    'Campaign removal is live: approved removals are carried out by the Graph write broker'
+  );
+  return new LiveRemovalExecutor({
+    client: new GraphWriteBrokerClient({
+      functionName: removal.writeBrokerFunctionName,
+      ...(lambda ? { lambda } : {}),
+    }),
+  });
 }

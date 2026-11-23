@@ -17,10 +17,11 @@
  *    warned; the distribution list gets its broadcast as before
  *    (`distributionWarning: auto`) unless the operator changes that;
  * 3. "remove remaining copies" is proposed with a scope of exact message IDs
- *    per mailbox; approving it runs a DRY RUN only (no Graph write exists).
- *    A removal executor that really changes mailboxes (the future write
- *    tier) would report each mailbox it removed a copy from, and each of
- *    those people would get the removal notice; with the dry run, nobody does;
+ *    per mailbox; approving it runs a DRY RUN by default. With
+ *    `campaignResponse.removal.mode: live` (and the separate Graph write
+ *    broker deployed and enabled) it moves the approved copies to Deleted
+ *    Items; the executor reports each mailbox it removed a copy from, and
+ *    each of those people gets the removal notice; with the dry run, nobody does;
  * 4. later reports and wider reach update the incident in the same thread,
  *    rate-limited.
  *
@@ -58,10 +59,10 @@ import {
 } from '../../templates/campaign.response.html';
 import { displayTime } from './display';
 import {
-  DryRunRemovalExecutor,
   RemovalExecutor,
   SesWarningExecutor,
   WarningMailer,
+  createRemovalExecutor,
 } from './executors';
 import { generateReference } from './reference';
 import { RESPONSE_MIGRATION, ResponseStore, ResponseStoreUnavailableError } from './response.store';
@@ -323,8 +324,26 @@ function distributionDone(actions: ResponseAction[], except?: string): boolean {
   );
 }
 
-function actionTitle(type: ResponseActionType): string {
-  return type === 'send_warning' ? 'targeted warning' : 'removal of remaining copies (dry run)';
+/**
+ * A live removal that left nothing to do: every copy was moved or found
+ * moved, gone or refused. One that left copies not attempted, failed or of
+ * unknown outcome (out of time, throttled, the write broker switched off)
+ * may be proposed again with the same scope.
+ */
+function removalFinished(action: ResponseAction): boolean {
+  const outcome = action.result?.removalOutcome;
+  return (
+    action.status === 'completed' &&
+    (!outcome || outcome.notAttempted + outcome.error + outcome.unknown === 0)
+  );
+}
+
+function actionTitle(type: ResponseActionType, liveRemoval = false): string {
+  return type === 'send_warning'
+    ? 'targeted warning'
+    : liveRemoval
+      ? 'removal of remaining copies (moves them to Deleted Items)'
+      : 'removal of remaining copies (dry run)';
 }
 
 export class CampaignResponseService {
@@ -339,7 +358,8 @@ export class CampaignResponseService {
     this.now = deps.now ?? ((): Date => new Date());
     this.newReference = deps.newReference ?? ((): string => generateReference());
     this.warningExecutor = new SesWarningExecutor(deps.mailer);
-    this.removalExecutor = deps.removalExecutor ?? new DryRunRemovalExecutor();
+    // The dry run unless the operator chose `live` and named a write broker
+    this.removalExecutor = deps.removalExecutor ?? createRemovalExecutor(deps.config.removal);
   }
 
   private get config(): CampaignResponseConfig {
@@ -834,10 +854,13 @@ export class CampaignResponseService {
       if (
         type === 'remove_messages' &&
         existing.some(
-          a => a.type === type && a.status === 'dry_run_completed' && a.scopeHash === hash
+          a =>
+            a.type === type &&
+            (a.status === 'dry_run_completed' || removalFinished(a)) &&
+            a.scopeHash === hash
         )
       ) {
-        return undefined; // that exact scope was already dry-run
+        return undefined; // that exact scope was already dry-run, or fully carried out
       }
       for (const cancelled of await this.store.cancelProposed(incident.id, type)) {
         await this.store.appendAudit({
@@ -1293,6 +1316,7 @@ export class CampaignResponseService {
       ...(content.idleReason ? { idleReason: content.idleReason } : {}),
       commandsEnabled: this.deps.commandsEnabled,
       timeZone: this.config.timeZone,
+      liveRemoval: this.removalExecutor.changesMailboxes,
     });
     let result: EmailSendResult;
     try {
@@ -1681,18 +1705,24 @@ export class CampaignResponseService {
       type: approved.type,
     });
 
-    const heading = `Approved: ${actionTitle(approved.type)} for incident ${incident.reference} (${approved.reference}).`;
+    const heading = `Approved: ${actionTitle(approved.type, this.removalExecutor.changesMailboxes)} for incident ${incident.reference} (${approved.reference}).`;
     if (approved.scope.kind === 'send_warning') {
       const scope = this.recheckWarning(approved, await this.store.listActions(incident.id));
       const summary = await this.runWarning(incident, approved, scope, getRemainingMs);
       return { acted: true, body: [heading, ...summary] };
     }
 
-    // remove_messages: the dry run, against the incident's latest reach
+    // remove_messages: the dry run (or, when live, the write broker),
+    // against the incident's latest reach; the scope is never widened
     try {
-      const executed = await this.removalExecutor.execute(approved, approved.scope, incident.reach);
+      const executed = await this.removalExecutor.execute(
+        approved,
+        approved.scope,
+        incident.reach,
+        { getRemainingMs }
+      );
       // Only a real removal that reports what it changed sends notices; the
-      // dry run (the only executor today) never does
+      // dry run never does
       const result = executed.dryRun
         ? executed
         : await this.sendRemovalNotices(
@@ -1715,6 +1745,7 @@ export class CampaignResponseService {
         detail: {
           executor: result.executor,
           ...(result.wouldRemove ?? {}),
+          ...(result.removalOutcome ?? {}),
           ...(result.dryRun
             ? {}
             : {
@@ -1730,6 +1761,21 @@ export class CampaignResponseService {
       logger.error('Removal dry run failed', {
         error: error instanceof Error ? error.message : String(error),
       });
+      if (this.removalExecutor.changesMailboxes) {
+        // The live executor does not throw; if it ever did, its effect is unknown
+        await this.store.finishAction(approved.id, 'failed', {
+          executor: this.removalExecutor.name,
+          dryRun: false,
+          summary: ['The removal could not be completed; some copies may have been moved.'],
+        });
+        return {
+          acted: false,
+          body: [
+            heading,
+            'The removal could not be completed. Some copies may have been moved to Deleted Items; no removal notice was sent. See the logs.',
+          ],
+        };
+      }
       await this.store.finishAction(approved.id, 'failed', {
         executor: this.removalExecutor.name,
         dryRun: true,

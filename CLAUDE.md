@@ -27,7 +27,7 @@ All six must pass before a commit. CI (Node 22) runs build, lint, format:check a
 4. **`originalForwarder` decides who receives reports** — every source for it must yield an extractable address on a safe domain.
 5. **Bounding must be adversarial.** Any truncation or budget must survive padding attacks (head+tail, domain-diverse selection) and be disclosed to the model as an elision fact.
 6. **Microsoft Graph access is code-driven, never model-driven.** Fixed endpoints on the organization's own tenant; every request is built by code from parsed, escaped values (`graphPath`, `odataFilter` in `services/graph/`). The model never authors a URL, filter or query, and Graph is not an agentic tool. Content read from any mailbox other than the reporter's is metadata-only toward the model and logs. Reads and writes use separate app registrations, each with a certificate (never a client secret). Any write to the tenant requires security-team approval through the authenticated command channel (invariant 2).
-7. **No Graph write code without the documented write-tier design.** Today there is none: the removal executor is a dry run. A write tier is a separate broker function with its own app registration and certificate that the main function and the read broker never hold, taking exactly the approved scope's mailbox and message IDs (ARCHITECTURE.md, "The write-tier seam"). Never add a write operation to the read broker, the Graph client or the main function.
+7. **Mailbox writes exist only in the Graph write broker, and only as one operation.** The write broker (`src/handlers/graph.write.broker.handler.ts`, `src/services/graph-write/`) is a separate function with its own app registration and certificate, which the main function and the read broker never hold (not in their config, environment or IAM). Its one operation, `remove_messages`, takes exactly the approved, re-checked scope's mailbox IDs, message IDs and recorded Internet Message-IDs, re-reads each message and moves it to Deleted Items only if its Internet Message-ID matches; there is no delete, permanent delete, send, create or other write, and `GraphWriteClient` makes only its three documented requests. Never add a write to the read broker, `GraphClient` or the main function, and never widen the write client or the operation; a new write is a new typed operation, designed and documented first (ARCHITECTURE.md, "The mailbox write tier"). It stays off by default at every level (not deployed; its own `PHISHY_GRAPH_WRITE_ENABLED` kill switch and optional allowlist, read from its own environment only; `campaignResponse.removal.mode: dry_run`), and a removal always needs the exact approval of invariant 8: it is never automatic.
 8. **Approvals are exact-form and never model-interpreted.** Only a line that is exactly `APPROVE WARNING|REMOVAL <ref>` (or the bare `APPROVE WARNING`, bound through `In-Reply-To` to the one incident email that proposed it) approves anything (`services/commands/response.commands.ts`). In Phishy's emails the command always follows "Reply with this line:" on the same line, so a quoted copy never approves. References are unguessable, per action, expire, and the approved scope is re-checked and never widened.
 9. **Campaign warnings go only to in-scope recipients on safe domains.** Recipients come from Phishy's own blast-radius lookup, never from the email's content; every address must pass `isSafeRecipient` when the scope is computed and again before each send; nobody whose copy was not delivered is warned; reporters are not warned; the per-campaign cap holds. Campaign-response emails carry no link from the attack (`displayText` defangs and escapes).
 
@@ -51,6 +51,9 @@ src/
   handlers/scheduled.handler.ts     scheduled tasks (fan-out scan); strict event in scheduled.event.ts
   handlers/graph.broker.handler.ts  second function (outside the VPC): typed Graph read operations
   graph-broker.ts                   bundle entry point of the Graph broker function
+  handlers/graph.write.broker.handler.ts  third function (outside the VPC, optional): the mailbox
+                                    write tier, one operation (move approved copies to Deleted Items)
+  graph-write-broker.ts             bundle entry point of the Graph write broker function
   services/email/parser.service.ts  trust boundary: events → labeled email facts
   services/ai/prompt.builder.ts     provenance-labeled, nonce-fenced prompt
   services/ai/agentic/              tool loop + the four bounded tools
@@ -59,9 +62,11 @@ src/
   services/intelligence/            PostgreSQL intel, campaigns, verdict cache, checklist score
   services/graph/                   optional Graph reads: cert auth, constrained client, original lookup,
                                     blast radius, sender history, fan-out scan, broker protocol/client
+  services/graph-write/             the write tier: protocol, three-request client, remove_messages,
+                                    the main function's invoke client (holds no credential)
   services/hunting/                 fan-out scan job and its database state (migration 005)
   services/response/                campaign response: incidents, scopes, approvals, executors
-                                    (warning; removal is dry run only), audit
+                                    (warning; removal: dry run by default, live via the write broker), audit
   templates/                        every email Phishy sends; layout.ts holds the shared blocks
   utils/canonicalize.ts             hostile-text normalization + URL unwrapping
   config/                           Zod schema + env mappings + loading chain
@@ -75,4 +80,4 @@ docs/                               ARCHITECTURE, CONFIGURATION, DATABASE, INJEC
 
 ## Roadmap context
 
-Last release: v3.0.0. `CHANGELOG.md` [Unreleased] holds what exists but has not shipped in a release: the Graph broker and reads (original lookup, blast radius, sender history), the scheduled fan-out scan, campaign response with approvals, attachment analysis, checklist scoring (experimental; weights not calibrated) and the injection eval. Designed but not built (ARCHITECTURE.md): the mailbox write tier (so no removal or removal notice happens), response actions on fan-out alerts (`FanoutScanStore.findWave` is the seam), fetching original attachments, and sending attachments to the model as images. Issue and PR templates, Dependabot, CodeQL and README screenshots exist.
+Last release: v3.0.0. `CHANGELOG.md` [Unreleased] holds what exists but has not shipped in a release: the Graph broker and reads (original lookup, blast radius, sender history), the scheduled fan-out scan, campaign response with approvals, the mailbox write tier (live removal to Deleted Items through the separate write broker; off by default, dry run otherwise), attachment analysis, checklist scoring (experimental; weights not calibrated) and the injection eval. Designed but not built (ARCHITECTURE.md): response actions on fan-out alerts (`FanoutScanStore.findWave` is the seam), fetching original attachments, and sending attachments to the model as images. Issue and PR templates, Dependabot, CodeQL and README screenshots exist.

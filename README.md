@@ -74,7 +74,7 @@ Each is off by default and switched on with its own setting ([feature-flag table
 
 - **Reports** arrive in the security team's inbox as a Cc (or, for malicious verdicts with blast radius on, as their own copy listing who else received the email).
 - **Verdict commands**: reply to a report with "confirmed phishing" or "false positive". Phishy records the ruling, adjusts the indicators from that email, applies it to the whole campaign and replies with what it did.
-- **Approvals** (campaign response): each incident email lists proposed actions, each with its exact reply line, `APPROVE WARNING <reference>` or `APPROVE REMOVAL <reference>`. A reply whose own text is just `APPROVE WARNING` approves the warning that email proposed. Removal is a **dry run** today: Phishy replies with what it would remove and changes no mailbox.
+- **Approvals** (campaign response): each incident email lists proposed actions, each with its exact reply line, `APPROVE WARNING <reference>` or `APPROVE REMOVAL <reference>`. A reply whose own text is just `APPROVE WARNING` approves the warning that email proposed. Removal is a **dry run** by default: Phishy replies with what it would remove and changes no mailbox. With the optional mailbox write tier, an approved removal moves the copies to Deleted Items.
 
 Commands and approvals are accepted only from addresses in `SECURITY_TEAM_DISTRIBUTION` or `SECURITY_TEAM_MEMBERS` (optional: individual team members on your safe domains, never emailed) whose mail passes SES SPF or DKIM checks.
 
@@ -82,7 +82,7 @@ Commands and approvals are accepted only from addresses in `SECURITY_TEAM_DISTRI
 
 - **The suspicious email is hostile data everywhere.** It reaches the model only inside a nonce-fenced section labelled as the sender's claims; Phishy's own computed facts are labelled separately; email content is kept out of info-level logs. An [injection eval](docs/INJECTION_EVAL.md) measures how well that holds, and its dry run runs in CI.
 - **Code decides, the model advises.** Agentic tools touch only Phishy's own data or pure computation, never the network. Graph access is code-driven, fixed-endpoint and read-only; in the SAM deployment a separate broker function holds the Graph certificate and the function that parses email holds none.
-- **Reads and writes are separated.** There is no Graph write code. A future mailbox write tier is designed as its own function with its own app registration.
+- **Reads and writes are separated.** The only Graph write, moving approved copies to Deleted Items, lives in an optional third function with its own app registration and certificate, its own kill switch (off by default) and one typed operation; the main function and the read broker never hold that credential.
 - **Approvals are exact-form and never model-interpreted**, use unguessable per-action references that expire, and never widen the approved scope. Warnings go only to in-scope recipients on your safe domains, never to addresses taken from the email.
 
 The full trust model is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).

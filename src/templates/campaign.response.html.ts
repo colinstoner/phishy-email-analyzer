@@ -446,6 +446,11 @@ export interface IncidentEmailContext {
   changes?: string[];
   commandsEnabled: boolean;
   timeZone: string;
+  /**
+   * Approving a removal moves the copies to Deleted Items (the live removal
+   * executor is configured) rather than running the dry run
+   */
+  liveRemoval?: boolean;
 }
 
 /**
@@ -687,7 +692,10 @@ export function approvalLine(action: ResponseAction): string {
   return `APPROVE ${action.type === 'send_warning' ? 'WARNING' : 'REMOVAL'} ${action.reference}`;
 }
 
-function describeProposal(action: ResponseAction): {
+function describeProposal(
+  action: ResponseAction,
+  liveRemoval = false
+): {
   title: string;
   does: string;
   notIncluded?: string;
@@ -728,6 +736,13 @@ function describeProposal(action: ResponseAction): {
       ? `${s.overMessageCap} over the message cap (${scope.limits.maxMessages})`
       : '',
   ].filter(Boolean);
+  if (liveRemoval) {
+    return {
+      title: 'Remove remaining copies from mailboxes',
+      does: `moves the ${scope.messageCount} copy(ies) in ${scope.mailboxes.length} mailbox(es) that the blast-radius lookup matched for this incident (exact message IDs, never a search) to each person's Deleted Items, after re-checking that each is still the same message. Nothing is permanently deleted, and each person whose copy is moved gets a short notice.`,
+      ...(left.length ? { notIncluded: left.join(', ') } : {}),
+    };
+  }
   return {
     title: 'Remove remaining copies from mailboxes (dry run)',
     does: `re-checks the ${scope.messageCount} copy(ies) in ${scope.mailboxes.length} mailbox(es) that the blast-radius lookup matched for this incident (exact message IDs, never a search) and replies with what a removal would do. No mailbox is changed: the mailbox write tier is not installed.`,
@@ -753,7 +768,7 @@ function proposals(context: IncidentEmailContext): Proposals {
     intro = `Reply to this email with the line shown, on a line of its own. Each approval is good until ${displayTime(expiry.toISOString(), context.timeZone) ?? expiry.toISOString()} and applies to this incident only.${context.proposed.some(a => a.type === 'send_warning') ? ' For the warning only, a reply to this email with just the two words "approve warning" also works.' : ''}`;
   }
   const items: Proposals['items'] = context.proposed.map(action => {
-    const { title, does, notIncluded } = describeProposal(action);
+    const { title, does, notIncluded } = describeProposal(action, context.liveRemoval === true);
     return {
       title,
       reply: approvalLine(action),
