@@ -10,16 +10,20 @@ import {
   RemoveMessagesResultSchema,
   reconcileRemovalResult,
 } from '../../../../src/services/graph-write/write.protocol';
-import { ACTION_ID, IMID, MAILBOX_ID } from '../../../mocks/graph.write.fake';
+import { ACTION_ID, IMID, MAILBOX_ID, expectation } from '../../../mocks/graph.write.fake';
 
 const mailbox = (n: number, ids = ['AAMkAG-1']) => ({
   mailboxId: MAILBOX_ID(n),
-  messageIds: ids,
-  expectedInternetMessageIds: [IMID(1)],
+  messages: ids.map(id => expectation(id, IMID(1))),
+});
+/** One mailbox whose single message has `extra` merged into its expectation */
+const withMessage = (extra: Record<string, unknown>) => ({
+  mailboxId: MAILBOX_ID(1),
+  messages: [{ ...expectation('AAMkAG-1', IMID(1)), ...extra }],
 });
 
 const request = (params: Record<string, unknown> = {}) => ({
-  version: 1,
+  version: 2,
   operation: 'remove_messages',
   params: { actionId: ACTION_ID, mailboxes: [mailbox(1)], budgetMs: 30_000, ...params },
 });
@@ -30,7 +34,7 @@ describe('GraphWriteRequestSchema', () => {
   });
 
   it.each([
-    ['another version', { ...request(), version: 2 }],
+    ['another version', { ...request(), version: 1 }],
     ['another operation', { ...request(), operation: 'delete_messages' }],
     ['a read operation', { ...request(), operation: 'blast_radius_lookup' }],
     ['an unknown top-level field', { ...request(), path: '/users' }],
@@ -43,12 +47,53 @@ describe('GraphWriteRequestSchema', () => {
     ['a path in a message ID', request({ mailboxes: [mailbox(1, ['../../me'])] })],
     ['a URL in a message ID', request({ mailboxes: [mailbox(1, ['https://example.com/x'])] })],
     [
-      'no expected Internet Message-ID',
-      request({ mailboxes: [{ ...mailbox(1), expectedInternetMessageIds: [] }] }),
+      'the version 1 shape',
+      request({
+        mailboxes: [
+          { mailboxId: MAILBOX_ID(1), messageIds: ['a'], expectedInternetMessageIds: [IMID(1)] },
+        ],
+      }),
     ],
     [
-      'a malformed expected ID',
-      request({ mailboxes: [{ ...mailbox(1), expectedInternetMessageIds: ['not an id'] }] }),
+      'a message without its expected Message-ID',
+      request({ mailboxes: [withMessage({ expectedInternetMessageId: undefined })] }),
+    ],
+    [
+      'a malformed expected Message-ID',
+      request({ mailboxes: [withMessage({ expectedInternetMessageId: 'not an id' })] }),
+    ],
+    [
+      'a subject in place of its hash',
+      request({ mailboxes: [withMessage({ expectedSubjectSha256: 'Invoice 2291 overdue' })] }),
+    ],
+    ['a subject field', request({ mailboxes: [withMessage({ subject: 'Invoice 2291 overdue' })] })],
+    [
+      'an upper-case sender',
+      request({ mailboxes: [withMessage({ expectedSenderAddress: 'Billing@Example.test' })] }),
+    ],
+    [
+      'a display name for a sender',
+      request({ mailboxes: [withMessage({ expectedSenderAddress: 'Accounts <a@example.test>' })] }),
+    ],
+    [
+      'an inverted window',
+      request({
+        mailboxes: [
+          withMessage({ receivedFrom: '2026-11-17T15:00:00Z', receivedTo: '2026-11-17T03:00:00Z' }),
+        ],
+      }),
+    ],
+    [
+      'a window wider than six days',
+      request({
+        mailboxes: [
+          withMessage({ receivedFrom: '2026-11-10T00:00:00Z', receivedTo: '2026-11-17T00:00:00Z' }),
+        ],
+      }),
+    ],
+    [
+      'a mailbox with no messages',
+      request({ mailboxes: [{ mailboxId: MAILBOX_ID(1), messages: [] }] }),
     ],
     ['no mailboxes', request({ mailboxes: [] })],
     [
@@ -139,10 +184,7 @@ describe('the response', () => {
 describe('reconcileRemovalResult', () => {
   it('keeps only what was asked, once each, and marks what is missing unknown', () => {
     const asked = {
-      mailboxes: [
-        { mailboxId: MAILBOX_ID(1), messageIds: ['a', 'b'], expectedInternetMessageIds: [IMID(1)] },
-        { mailboxId: MAILBOX_ID(2), messageIds: ['c'], expectedInternetMessageIds: [IMID(1)] },
-      ],
+      mailboxes: [mailbox(1, ['a', 'b']), mailbox(2, ['c'])],
     };
     const reconciled = reconcileRemovalResult(asked, {
       mailboxes: [

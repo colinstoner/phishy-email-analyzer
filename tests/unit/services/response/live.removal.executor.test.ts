@@ -1,10 +1,11 @@
 /**
- * The live removal executor and its selection, and the live removal through
- * CampaignResponseService: what is sent to the write broker (never wider than
- * the approved, re-checked scope), how its answers become the approver's
- * summary, the audit row and the removal notices, and that a removal is
- * never automatic. The write broker is a stub (no Lambda, no Graph).
- * Invented example.com data only.
+ * The live removal: its eligibility rules (an anchor Phishy read itself,
+ * and only copies provably the same email), the executor (what is sent to
+ * the write broker: never wider than the approved, re-checked scope; each
+ * copy with its own expected values), and the whole path through
+ * CampaignResponseService (mode bound to the proposal, notices only for
+ * moved copies, never automatic, fan-out incidents dry run only). The write
+ * broker is a stub (no Lambda, no Graph). Invented example.com data only.
  */
 
 import { CampaignResponseService } from '../../../../src/services/response/campaign.response.service';
@@ -13,6 +14,10 @@ import {
   createRemovalExecutor,
 } from '../../../../src/services/response/executors';
 import { LiveRemovalExecutor } from '../../../../src/services/response/live.removal.executor';
+import {
+  anchorFromReport,
+  computeLiveRemovalScope,
+} from '../../../../src/services/response/removal.eligibility';
 import type {
   GraphWriteCallResult,
   LambdaInvoker,
@@ -24,23 +29,62 @@ import type {
 import type {
   BlastRadiusRecipient,
   BlastRadiusReport,
+  CopyDetail,
 } from '../../../../src/services/graph/blast-radius.service';
+import { subjectKeyHash } from '../../../../src/services/graph/subject.key';
 import type { CampaignResponseConfig } from '../../../../src/config/schema';
 import { DEFAULT_ALREADY_CLICKED_INSTRUCTIONS } from '../../../../src/config/schema';
 import type {
   IncidentReach,
+  RemovalAnchor,
   RemovalScope,
   ResponseAction,
 } from '../../../../src/services/response/response.types';
-import { computeRemovalScope, mergeReach } from '../../../../src/services/response/scope';
+import { mergeReach } from '../../../../src/services/response/scope';
 import type { ApprovalCommand } from '../../../../src/services/commands/response.commands';
+import type { ExtractedEmailData } from '../../../../src/types';
 import { FakeResponseStore } from './fake.store';
 
 const MAILBOX = (n: number): string => `${String(n).padStart(8, '0')}-1111-4111-8111-111111111111`;
 const IMID = '<invoice-2291@mail.examp1e-billing.test>';
+const SENDER = 'billing@examp1e-billing.test';
+const SUBJECT = 'Invoice 2291 overdue';
+const RECEIVED = '2026-11-17T09:14:00.000Z';
 const ACTION_ID = '9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d';
+const REPORTER = 'reporter1@example.com';
+const RULES = { windowHours: 6, sizeTolerancePercent: 1 };
+const LIMITS = { maxMailboxes: 500, maxMessages: 1000 };
 
-function recipient(n: number, extra: Partial<BlastRadiusRecipient> = {}): BlastRadiusRecipient {
+const ANCHOR: RemovalAnchor = {
+  mailboxId: MAILBOX(99),
+  messageId: 'AAMkAG-reporter',
+  internetMessageId: IMID,
+  senderAddress: SENDER,
+  subject: SUBJECT,
+  subjectHash: subjectKeyHash(SUBJECT),
+  receivedAt: RECEIVED,
+  size: 20_000,
+};
+
+function detail(messageId: string, extra: Partial<CopyDetail> = {}): CopyDetail {
+  return {
+    messageId,
+    internetMessageId: IMID,
+    senderAddress: SENDER,
+    subjectHash: subjectKeyHash(SUBJECT),
+    receivedAt: RECEIVED,
+    size: 20_000,
+    ...extra,
+  };
+}
+
+/** A recipient holding one copy of the anchor's email, unless `extra` says otherwise */
+function recipient(
+  n: number,
+  extra: Partial<BlastRadiusRecipient> = {},
+  copy: Partial<CopyDetail> = {}
+): BlastRadiusRecipient {
+  const id = `AAMkAG-${n}`;
   return {
     address: `person${n}@example.com`,
     mailbox: 'found',
@@ -48,9 +92,25 @@ function recipient(n: number, extra: Partial<BlastRadiusRecipient> = {}): BlastR
     isRead: false,
     response: 'none',
     mailboxId: MAILBOX(n),
-    messageIds: [`AAMkAG-${n}`],
-    internetMessageIds: [IMID],
-    receivedAt: '2026-11-17T09:14:00.000Z',
+    messageIds: [id],
+    copyDetails: [detail(id, copy)],
+    receivedAt: RECEIVED,
+    ...extra,
+  };
+}
+
+/** The reporter's own row: holds the anchor's copy, which the reporter forwarded */
+function reporterRow(extra: Partial<BlastRadiusRecipient> = {}): BlastRadiusRecipient {
+  return {
+    address: REPORTER,
+    mailbox: 'found',
+    folder: 'inbox',
+    isRead: true,
+    response: 'forwarded',
+    mailboxId: MAILBOX(99),
+    messageIds: ['AAMkAG-reporter'],
+    copyDetails: [detail('AAMkAG-reporter')],
+    receivedAt: RECEIVED,
     ...extra,
   };
 }
@@ -59,15 +119,37 @@ function report(recipients: BlastRadiusRecipient[]): BlastRadiusReport {
   return {
     status: 'complete',
     route: 'trace',
-    matchedBy: 'messageId',
+    matchedBy: 'senderSubject',
     totals: { recipients: recipients.length, read: 0, replied: 0, forwarded: 0 },
     recipients,
     lookedUpAt: '2026-11-17T10:00:00.000Z',
+    reporterAddress: REPORTER,
   };
 }
 
 function reachOf(recipients: BlastRadiusRecipient[]): IncidentReach {
   return mergeReach(undefined, report(recipients), true);
+}
+
+/** What the original-message lookup stored for the reporter's copy */
+function retrieved(
+  identity: Partial<NonNullable<ExtractedEmailData['retrievedOriginal']>['identity']> = {}
+): Pick<ExtractedEmailData, 'retrievedOriginal'> {
+  return {
+    retrievedOriginal: {
+      location: 'mailbox',
+      receivedAt: RECEIVED,
+      headers: [],
+      headersTruncated: false,
+      identity: {
+        messageId: 'AAMkAG-reporter',
+        internetMessageId: IMID,
+        senderAddress: SENDER,
+        subject: SUBJECT,
+        ...identity,
+      },
+    },
+  };
 }
 
 function action(scope: RemovalScope): ResponseAction {
@@ -86,6 +168,30 @@ function action(scope: RemovalScope): ResponseAction {
   };
 }
 
+const okResult = (
+  params: RemoveMessagesParams,
+  decide: (m: string, id: string) => MessageOutcome['outcome']
+) => ({
+  ok: true as const,
+  result: {
+    mailboxes: params.mailboxes.map(m => ({
+      mailboxId: m.mailboxId,
+      messages: m.messages.map(x => ({
+        messageId: x.messageId,
+        outcome: decide(m.mailboxId, x.messageId),
+      })),
+    })),
+    bounds: {
+      maxMailboxes: 50,
+      maxMessagesPerMailbox: 5,
+      maxMessages: 100,
+      budgetMs: params.budgetMs,
+      concurrency: 4,
+    },
+    durationMs: 5,
+  },
+});
+
 /** A stub write broker: decides each message's outcome, records every request */
 function stubBroker(
   decide: (mailboxId: string, messageId: string) => MessageOutcome['outcome'] = () => 'moved',
@@ -97,33 +203,192 @@ function stubBroker(
     client: {
       removeMessages: jest.fn(async (params: RemoveMessagesParams, timeoutMs: number) => {
         calls.push({ params, timeoutMs });
-        if (failure) {
-          return failure;
-        }
-        return {
-          ok: true as const,
-          result: {
-            mailboxes: params.mailboxes.map(m => ({
-              mailboxId: m.mailboxId,
-              messages: m.messageIds.map(id => ({
-                messageId: id,
-                outcome: decide(m.mailboxId, id),
-              })),
-            })),
-            bounds: {
-              maxMailboxes: 50,
-              maxMessagesPerMailbox: 5,
-              maxMessages: 100,
-              budgetMs: params.budgetMs,
-              concurrency: 4,
-            },
-            durationMs: 5,
-          },
-        };
+        return failure ?? okResult(params, decide);
       }),
     },
   };
 }
+
+// ── The anchor ─────────────────────────────────────────────────────────────
+
+describe('anchorFromReport', () => {
+  it('accepts the reporter-mailbox original the reporter forwarded, as Exchange stored it', () => {
+    const found = anchorFromReport(retrieved(), report([reporterRow(), recipient(1)]));
+    expect(found).toEqual({
+      anchor: { ...ANCHOR, receivedAt: RECEIVED },
+    });
+  });
+
+  it.each([
+    [
+      'a Report-button submission',
+      { ...retrieved(), userReport: { reportedAs: 'phishing' } },
+      report([reporterRow()]),
+      'report_button',
+    ],
+    ['no original-message lookup result', {}, report([reporterRow()]), 'no_original'],
+    [
+      'an original with no stored Message-ID',
+      retrieved({ internetMessageId: undefined }),
+      report([reporterRow()]),
+      'incomplete_identity',
+    ],
+    [
+      'an original with no stored sender',
+      retrieved({ senderAddress: undefined }),
+      report([reporterRow()]),
+      'incomplete_identity',
+    ],
+    ['no blast-radius lookup', retrieved(), undefined, 'no_blast_radius'],
+    [
+      'a failed blast-radius lookup',
+      retrieved(),
+      { ...report([reporterRow()]), status: 'unavailable' as const },
+      'no_blast_radius',
+    ],
+    ['no reporter row', retrieved(), report([recipient(1)]), 'reporter_copy_not_found'],
+    [
+      'a reporter row holding another message',
+      retrieved(),
+      report([
+        reporterRow({ messageIds: ['AAMkAG-other'], copyDetails: [detail('AAMkAG-other')] }),
+      ]),
+      'reporter_copy_not_found',
+    ],
+    [
+      'a reporter copy whose stored subject differs',
+      retrieved(),
+      report([
+        reporterRow({
+          copyDetails: [
+            detail('AAMkAG-reporter', { subjectHash: subjectKeyHash('Something else') }),
+          ],
+        }),
+      ]),
+      'reporter_copy_differs',
+    ],
+    [
+      'a reporter copy the reporter did not forward',
+      retrieved(),
+      report([reporterRow({ response: 'none' })]),
+      'not_forwarded_by_reporter',
+    ],
+  ] as const)('gives no anchor for %s', (_label, emailData, blast, reason) => {
+    expect(anchorFromReport(emailData as never, blast as BlastRadiusReport | undefined)).toEqual({
+      rejected: reason,
+    });
+  });
+});
+
+// ── Eligibility ─────────────────────────────────────────────────────────────
+
+describe('computeLiveRemovalScope', () => {
+  it('names only copies provably the anchor email, each with its own check, and counts the rest', () => {
+    const reach = reachOf([
+      reporterRow(),
+      recipient(1), // the anchor's own Message-ID
+      recipient(2, {}, { internetMessageId: '<other-2@mail.examp1e-billing.test>', size: 20_150 }), // size within 1%
+      recipient(3, {}, { internetMessageId: '<other-3@mail.examp1e-billing.test>', size: 21_000 }), // 5% off
+      recipient(4, {}, { senderAddress: 'billing@example.org' }), // another sender
+      recipient(5, {}, { subjectHash: subjectKeyHash('Invoice 2291 overdue - reminder') }), // contains, not equal
+      recipient(6, {}, { receivedAt: '2026-11-17T16:00:00.000Z' }), // outside 6 h
+      recipient(7, {}, { internetMessageId: '<other-7@x.test>', size: undefined }), // no size
+      recipient(8, { copyDetails: undefined }), // no details at all
+      recipient(9, { mailboxId: undefined }), // no identifiers
+      recipient(10, {}, { subjectHash: subjectKeyHash('  INVOICE   2291 overdue ') }), // same after normalization
+    ]);
+    const scope = computeLiveRemovalScope(reach, LIMITS, ANCHOR, RULES);
+    expect(scope.mode).toBe('live');
+    expect(scope.mailboxes.map(m => m.address)).toEqual([
+      REPORTER,
+      'person1@example.com',
+      'person2@example.com',
+      'person10@example.com',
+    ]);
+    expect(scope.mailboxes[2].verify).toEqual([
+      {
+        messageId: 'AAMkAG-2',
+        internetMessageId: '<other-2@mail.examp1e-billing.test>',
+        senderAddress: SENDER,
+        subjectHash: subjectKeyHash(SUBJECT),
+        receivedFrom: '2026-11-17T03:14:00.000Z',
+        receivedTo: '2026-11-17T15:14:00.000Z',
+      },
+    ]);
+    expect(scope.live).toMatchObject({
+      distinctMessages: 2,
+      sameMessageIdAsAnchor: 3,
+      matchedOnSize: 1,
+      excluded: 6,
+      windowHours: 6,
+      sizeTolerancePercent: 1,
+    });
+    expect(scope.skipped.noIdentifiers).toBe(1);
+    // The reach itself is unchanged: warnings still see everyone
+    expect(reach.recipients).toHaveLength(11);
+  });
+
+  it('admits only the anchor Message-ID when the size band is 0 or the anchor size is unknown', () => {
+    const reach = reachOf([
+      recipient(1),
+      recipient(2, {}, { internetMessageId: '<other-2@x.test>', size: 20_000 }),
+    ]);
+    expect(
+      computeLiveRemovalScope(reach, LIMITS, ANCHOR, { ...RULES, sizeTolerancePercent: 0 })
+        .messageCount
+    ).toBe(1);
+    expect(
+      computeLiveRemovalScope(reach, LIMITS, { ...ANCHOR, size: undefined }, RULES).messageCount
+    ).toBe(1);
+  });
+
+  it('a planted forwarded-header block cannot aim a live removal at another sender or subject', () => {
+    // The forward's text claims a different sender and subject (as a block
+    // planted in the attacker's body would), and blast radius matched by
+    // those claims: legitimate mail from that sender is in the reach. The
+    // live scope is decided by the anchor Phishy read itself, never by the
+    // claims, so none of that mail is named.
+    const legit = (n: number): BlastRadiusRecipient =>
+      recipient(
+        n,
+        {},
+        {
+          internetMessageId: `<payroll-${n}@hr.example.com>`,
+          senderAddress: 'hr@example.com',
+          subjectHash: subjectKeyHash('Payroll for November'),
+          size: 20_000,
+        }
+      );
+    const reach = reachOf([legit(1), legit(2), legit(3)]);
+    const scope = computeLiveRemovalScope(reach, LIMITS, ANCHOR, RULES);
+    expect(scope.mailboxes).toEqual([]);
+    expect(scope.live?.excluded).toBe(3);
+    // And the anchor itself is not taken from the forward's text: a report
+    // whose lookup found a message the reporter did not forward gives none
+    const decoy = anchorFromReport(
+      retrieved({
+        senderAddress: 'hr@example.com',
+        subject: 'Payroll for November',
+        internetMessageId: '<payroll-9@hr.example.com>',
+      }),
+      report([
+        reporterRow({
+          response: 'none',
+          copyDetails: [
+            detail('AAMkAG-reporter', {
+              internetMessageId: '<payroll-9@hr.example.com>',
+              senderAddress: 'hr@example.com',
+              subjectHash: subjectKeyHash('Payroll for November'),
+            }),
+          ],
+        }),
+      ])
+    );
+    expect(decoy).toEqual({ rejected: 'not_forwarded_by_reporter' });
+  });
+});
+
+// ── Selection ───────────────────────────────────────────────────────────────
 
 describe('createRemovalExecutor', () => {
   it('is the dry run by default and for dry_run', () => {
@@ -156,14 +421,21 @@ describe('createRemovalExecutor', () => {
   });
 });
 
+// ── The executor ────────────────────────────────────────────────────────────
+
+const liveScope = (recipients: BlastRadiusRecipient[]): RemovalScope =>
+  computeLiveRemovalScope(reachOf(recipients), LIMITS, ANCHOR, RULES);
+
 describe('LiveRemovalExecutor', () => {
-  it('sends exactly the approved, re-checked copies with their recorded Internet Message-IDs', async () => {
-    const approvedReach = reachOf([recipient(1), recipient(2), recipient(3)]);
-    const scope = computeRemovalScope(approvedReach, { maxMailboxes: 500, maxMessages: 1000 });
-    // Since approval: person2's copy is gone, person4 newly holds one, person1 has a new copy too
+  it('sends exactly the approved, re-checked copies, each with its own expected values', async () => {
+    const scope = liveScope([recipient(1), recipient(2), recipient(3)]);
+    // Since approval: person2's copy is gone, person4 newly holds one, person1 a second
     const current = reachOf([
-      recipient(1, { messageIds: ['AAMkAG-1', 'AAMkAG-1-new'] }),
-      recipient(2, { mailbox: 'not_found', messageIds: undefined }),
+      recipient(1, {
+        messageIds: ['AAMkAG-1', 'AAMkAG-1-new'],
+        copyDetails: [detail('AAMkAG-1'), detail('AAMkAG-1-new')],
+      }),
+      recipient(2, { mailbox: 'not_found', messageIds: undefined, copyDetails: undefined }),
       recipient(3),
       recipient(4),
     ]);
@@ -175,16 +447,26 @@ describe('LiveRemovalExecutor', () => {
     );
 
     expect(broker.calls).toHaveLength(1);
+    const expected = (id: string) => ({
+      messageId: id,
+      expectedInternetMessageId: IMID,
+      expectedSenderAddress: SENDER,
+      expectedSubjectSha256: subjectKeyHash(SUBJECT),
+      receivedFrom: '2026-11-17T03:14:00.000Z',
+      receivedTo: '2026-11-17T15:14:00.000Z',
+    });
     expect(broker.calls[0].params).toEqual({
       actionId: ACTION_ID,
       mailboxes: [
-        { mailboxId: MAILBOX(1), messageIds: ['AAMkAG-1'], expectedInternetMessageIds: [IMID] },
-        { mailboxId: MAILBOX(3), messageIds: ['AAMkAG-3'], expectedInternetMessageIds: [IMID] },
+        { mailboxId: MAILBOX(1), messages: [expected('AAMkAG-1')] },
+        { mailboxId: MAILBOX(3), messages: [expected('AAMkAG-3')] },
       ],
       budgetMs: expect.any(Number),
     });
-    // No address is ever sent
-    expect(JSON.stringify(broker.calls[0].params)).not.toContain('@example.com');
+    // No address and no email text is ever sent
+    const sent = JSON.stringify(broker.calls[0].params);
+    expect(sent).not.toContain('@example.com');
+    expect(sent).not.toContain('Invoice');
     expect(result.dryRun).toBe(false);
     expect(result.removed).toEqual([
       { mailboxId: MAILBOX(1), messages: 1 },
@@ -193,12 +475,12 @@ describe('LiveRemovalExecutor', () => {
     expect(result.removalOutcome).toMatchObject({ moved: 2, notAttempted: 0, unknown: 0 });
     const text = result.summary.join('\n');
     expect(text).toContain('2 message(s) moved to Deleted Items in 2 mailbox(es)');
-    expect(text).toContain('newer copy(ies) were found that the approved scope does not name');
+    // The new copy in mailbox 1 and person4's are the same email, not approved
+    expect(text).toContain('2 newer copy(ies) of the same email were found');
   });
 
   it('lists only moved copies in removed, and reports every outcome by count', async () => {
-    const reach = reachOf([1, 2, 3, 4, 5, 6].map(n => recipient(n)));
-    const scope = computeRemovalScope(reach, { maxMailboxes: 500, maxMessages: 1000 });
+    const scope = liveScope([1, 2, 3, 4, 5, 6].map(n => recipient(n)));
     const outcomes: Record<string, MessageOutcome['outcome']> = {
       [MAILBOX(1)]: 'moved',
       [MAILBOX(2)]: 'already_deleted',
@@ -208,6 +490,7 @@ describe('LiveRemovalExecutor', () => {
       [MAILBOX(6)]: 'not_allowed',
     };
     const broker = stubBroker(mailboxId => outcomes[mailboxId]);
+    const reach = reachOf([1, 2, 3, 4, 5, 6].map(n => recipient(n)));
     const result = await new LiveRemovalExecutor({ client: broker.client }).execute(
       action(scope),
       scope,
@@ -225,65 +508,63 @@ describe('LiveRemovalExecutor', () => {
       unknown: 0,
     });
     const text = result.summary.join('\n');
-    expect(text).toContain('Mailboxes with errors or an unknown outcome: person5@example[.]com.');
-    expect(text).toContain('refused, not the approved message');
+    expect(text).toContain('Mailboxes with errors: person5@example[.]com.');
+    expect(text).toContain('no longer provably the approved email');
   });
 
-  it('does not send mailboxes whose scope recorded no Internet Message-ID', async () => {
-    const reach = reachOf([recipient(1, { internetMessageIds: undefined }), recipient(2)]);
-    const scope = computeRemovalScope(reach, { maxMailboxes: 500, maxMessages: 1000 });
+  it('never sends a copy that has no recorded check (a dry-run scope)', async () => {
+    const reach = reachOf([recipient(1)]);
+    const dryScope: RemovalScope = {
+      kind: 'remove_messages',
+      mailboxes: [
+        {
+          address: 'person1@example.com',
+          mailboxId: MAILBOX(1),
+          messageIds: ['AAMkAG-1'],
+          folder: 'inbox',
+        },
+      ],
+      messageCount: 1,
+      limits: LIMITS,
+      skipped: { noIdentifiers: 0, alreadyPurged: 0, overMailboxCap: 0, overMessageCap: 0 },
+    };
     const broker = stubBroker();
     const result = await new LiveRemovalExecutor({ client: broker.client }).execute(
-      action(scope),
-      scope,
+      action(dryScope),
+      dryScope,
       reach
     );
-    expect(broker.calls[0].params.mailboxes.map(m => m.mailboxId)).toEqual([MAILBOX(2)]);
-    expect(result.removalOutcome).toMatchObject({ moved: 1, notAttempted: 1 });
-    expect(result.summary.join('\n')).toContain('did not record their Internet Message-ID');
+    expect(broker.calls).toEqual([]);
+    expect(result.removalOutcome).toMatchObject({ notAttempted: 1, moved: 0 });
+    expect(result.summary.join('\n')).toContain('recorded no check for them');
   });
 
   it('splits a large scope into calls within the protocol bounds, and stops when time runs out', async () => {
-    const reach = reachOf(
-      Array.from({ length: 120 }, (_, i) =>
-        recipient(i + 1, { messageIds: [`A-${i}-1`, `A-${i}-2`] })
-      )
+    const recipients = Array.from({ length: 120 }, (_, i) =>
+      recipient(i + 1, {
+        messageIds: [`A-${i}-1`, `A-${i}-2`],
+        copyDetails: [detail(`A-${i}-1`), detail(`A-${i}-2`)],
+      })
     );
-    const scope = computeRemovalScope(reach, { maxMailboxes: 500, maxMessages: 1000 });
+    const scope = liveScope(recipients);
     const broker = stubBroker();
     let remaining = 180_000;
     broker.client.removeMessages.mockImplementation(async (params: RemoveMessagesParams) => {
       broker.calls.push({ params, timeoutMs: 0 });
       remaining -= 80_000;
-      return {
-        ok: true as const,
-        result: {
-          mailboxes: params.mailboxes.map(m => ({
-            mailboxId: m.mailboxId,
-            messages: m.messageIds.map(id => ({ messageId: id, outcome: 'moved' as const })),
-          })),
-          bounds: {
-            maxMailboxes: 50,
-            maxMessagesPerMailbox: 5,
-            maxMessages: 100,
-            budgetMs: 1,
-            concurrency: 4,
-          },
-          durationMs: 1,
-        },
-      };
+      return okResult(params, () => 'moved');
     });
     const result = await new LiveRemovalExecutor({ client: broker.client }).execute(
       action(scope),
       scope,
-      reach,
+      reachOf(recipients),
       { getRemainingMs: () => remaining }
     );
     for (const call of broker.calls) {
       expect(call.params.mailboxes.length).toBeLessThanOrEqual(50);
-      expect(
-        call.params.mailboxes.reduce((n, m) => n + m.messageIds.length, 0)
-      ).toBeLessThanOrEqual(100);
+      expect(call.params.mailboxes.reduce((n, m) => n + m.messages.length, 0)).toBeLessThanOrEqual(
+        100
+      );
     }
     // 240 messages = 3 calls of 100/100/40; time allows only two
     expect(broker.calls).toHaveLength(2);
@@ -293,36 +574,65 @@ describe('LiveRemovalExecutor', () => {
     );
   });
 
-  it('treats an unanswered call as unknown and tells nobody their copy was removed', async () => {
-    const reach = reachOf([recipient(1), recipient(2)]);
-    const scope = computeRemovalScope(reach, { maxMailboxes: 500, maxMessages: 1000 });
-    const broker = stubBroker(undefined, { ok: false, failure: 'timeout' });
-    const result = await new LiveRemovalExecutor({ client: broker.client }).execute(
+  it('waits long enough for a cold write broker: its budget is well inside the wait', async () => {
+    const scope = liveScope([recipient(1)]);
+    const broker = stubBroker();
+    await new LiveRemovalExecutor({ client: broker.client }).execute(
       action(scope),
       scope,
-      reach
+      reachOf([recipient(1)]),
+      {
+        getRemainingMs: () => 170_000,
+      }
     );
-    expect(result.removed).toEqual([]);
-    expect(result.removalOutcome).toMatchObject({ unknown: 2, moved: 0 });
-    expect(result.summary.join('\n')).toContain('outcome unknown');
+    const [{ params, timeoutMs }] = broker.calls;
+    expect(timeoutMs - params.budgetMs).toBeGreaterThanOrEqual(10_000);
   });
 
-  it('stops sending after a refusal and says why', async () => {
+  it.each([
+    ['a timeout', { ok: false, failure: 'timeout' }],
+    ['a crash', { ok: false, failure: 'function_error' }],
+    ['an internal_error refusal', { ok: false, failure: 'refused', refusal: 'internal_error' }],
+    ['an unknown invoke error', { ok: false, failure: 'invoke_error' }],
+  ] as const)(
+    'treats %s as unknown, notifies nobody, and says how to check',
+    async (_label, failure) => {
+      const reach = reachOf([recipient(1), recipient(2)]);
+      const scope = liveScope([recipient(1), recipient(2)]);
+      const broker = stubBroker(undefined, failure as GraphWriteCallResult);
+      const result = await new LiveRemovalExecutor({ client: broker.client }).execute(
+        action(scope),
+        scope,
+        reach
+      );
+      expect(result.removed).toEqual([]);
+      expect(result.removalOutcome).toMatchObject({ unknown: 2, moved: 0 });
+      const text = result.summary.join('\n');
+      expect(text).toContain('Those people were NOT sent a removal notice');
+      expect(text).toContain("write broker's log");
+      expect(text).toContain('person1@example[.]com');
+    }
+  );
+
+  it.each([
+    ['Lambda rejecting the invoke', { ok: false, failure: 'invoke_rejected' }],
+    ['the kill switch', { ok: false, failure: 'refused', refusal: 'write_disabled' }],
+  ] as const)('reports %s as not attempted, never unknown', async (_label, failure) => {
     const reach = reachOf(Array.from({ length: 60 }, (_, i) => recipient(i + 1)));
-    const scope = computeRemovalScope(reach, { maxMailboxes: 500, maxMessages: 1000 });
-    const broker = stubBroker(undefined, {
-      ok: false,
-      failure: 'refused',
-      refusal: 'write_disabled',
-    });
+    const scope = liveScope(Array.from({ length: 60 }, (_, i) => recipient(i + 1)));
+    const broker = stubBroker(undefined, failure as GraphWriteCallResult);
     const result = await new LiveRemovalExecutor({ client: broker.client }).execute(
       action(scope),
       scope,
       reach
     );
-    expect(broker.calls).toHaveLength(1);
     expect(result.removalOutcome).toMatchObject({ notAttempted: 60, unknown: 0 });
-    expect(result.summary.join('\n')).toContain('kill switch (PHISHY_GRAPH_WRITE_ENABLED) is off');
+    if (failure.failure === 'refused') {
+      expect(broker.calls).toHaveLength(1);
+      expect(result.summary.join('\n')).toContain(
+        'kill switch (PHISHY_GRAPH_WRITE_ENABLED) is off'
+      );
+    }
   });
 });
 
@@ -348,13 +658,18 @@ function serviceConfig(overrides: Partial<CampaignResponseConfig> = {}): Campaig
   };
 }
 
-function liveService(
-  decide: (mailboxId: string, messageId: string) => MessageOutcome['outcome'],
-  cfg: Partial<CampaignResponseConfig> = {},
-  failure?: GraphWriteCallResult
+function service(
+  options: {
+    decide?: (mailboxId: string, messageId: string) => MessageOutcome['outcome'];
+    cfg?: Partial<CampaignResponseConfig>;
+    failure?: GraphWriteCallResult;
+    live?: boolean;
+    store?: FakeResponseStore;
+    clock?: { now: Date };
+  } = {}
 ) {
-  let now = new Date('2026-11-17T10:00:00.000Z');
-  const store = new FakeResponseStore(() => now);
+  const clock = options.clock ?? { now: new Date('2026-11-17T10:00:00.000Z') };
+  const store = options.store ?? new FakeResponseStore(() => clock.now);
   const sent: Array<{ to: string; subject: string; text: string }> = [];
   let n = 0;
   const mailer = {
@@ -371,30 +686,35 @@ function liveService(
       }
     ),
   };
-  const broker = stubBroker(decide, failure);
-  const service = new CampaignResponseService({
+  const broker = stubBroker(options.decide ?? (() => 'moved'), options.failure);
+  let r = 0;
+  const svc = new CampaignResponseService({
     store: store.asStore(),
     mailer,
-    config: serviceConfig(cfg),
+    config: serviceConfig(options.cfg),
     safeDomains: ['example.com'],
     securityTeam: TEAM,
     commandsEnabled: true,
     legacyAlert: jest.fn().mockResolvedValue(true),
     markCampaignAlerted: jest.fn().mockResolvedValue(undefined),
-    removalExecutor: new LiveRemovalExecutor({ client: broker.client }),
-    now: () => now,
-    newReference: (() => {
-      let r = 0;
-      return () => `PHY-AAAA-BBBB-CCCC-DDD${'2345679'[r++ % 7]}`;
-    })(),
+    ...(options.live === false
+      ? {}
+      : { removalExecutor: new LiveRemovalExecutor({ client: broker.client }) }),
+    now: () => clock.now,
+    newReference: () =>
+      `PHY-AAAA-BBBB-CCCC-D${'234567'[r % 6]}${'ABCDEFGHJK'[Math.floor(r++ / 6) % 10]}2`,
   });
   const advance = (ms: number): void => {
-    now = new Date(now.getTime() + ms);
+    clock.now = new Date(clock.now.getTime() + ms);
   };
-  return { service, store, sent, broker, advance };
+  return { service: svc, store, sent, broker, advance, clock, mailer };
 }
 
-function campaignReport(recipients: BlastRadiusRecipient[]) {
+function campaignReport(
+  recipients: BlastRadiusRecipient[],
+  emailData: Partial<ExtractedEmailData> = retrieved(),
+  verdict = 'phishing'
+) {
   return {
     match: {
       campaignId: 'campaign-1',
@@ -410,78 +730,192 @@ function campaignReport(recipients: BlastRadiusRecipient[]) {
       senderDomain: 'example.com',
       subjectPattern: 'fwd invoice # overdue',
       detectionCount: 3,
-      uniqueRecipients: ['reporter1@example.com', 'reporter2@example.com'],
+      uniqueRecipients: [REPORTER, 'reporter2@example.com'],
       riskLevel: 'critical',
       sampleIndicators: [],
       firstSeenAt: new Date('2026-11-17T09:21:00.000Z'),
       lastSeenAt: new Date('2026-11-17T09:40:00.000Z'),
       isActive: true,
     },
-    risk: {
-      verdict: 'phishing' as const,
-      riskScore: 92,
-      riskLevel: 'critical' as const,
-      reasons: ['Lookalike sender domain'],
-    },
+    risk: { verdict, riskScore: 92, riskLevel: 'critical', reasons: ['Lookalike sender domain'] },
     analysis: { summary: 'Fake invoice reminder', indicators: ['Lookalike sender domain'] },
-    emailData: { subject: 'Fwd: Invoice 2291 overdue', forwardedHeaders: {} },
-    blastRadius: report(recipients),
+    emailData: { subject: 'Fwd: Invoice 2291 overdue', forwardedHeaders: {}, ...emailData },
+    blastRadius: report([reporterRow(), ...recipients]),
     blastRadiusEnabled: true,
-  };
+  } as never;
 }
 
 const approveLine = (reference: string): ApprovalCommand[] => [{ verb: 'REMOVAL', reference }];
+const removals = (store: FakeResponseStore) =>
+  store.actions.filter(a => a.type === 'remove_messages');
 
 describe('a live removal through CampaignResponseService', () => {
-  it('says in the incident email that approving moves copies, and never runs it automatically', async () => {
-    const { service, store, sent, broker } = liveService(() => 'moved', {
-      employeeWarning: 'auto',
-      distributionWarning: 'auto',
+  it('proposes a live removal stating its basis, and never runs it automatically', async () => {
+    const {
+      service: svc,
+      store,
+      sent,
+      broker,
+    } = service({
+      cfg: { employeeWarning: 'auto', distributionWarning: 'auto' },
     });
-    await service.handleCampaignReport(campaignReport([recipient(1), recipient(2)]) as never);
-    const removal = store.actions.find(a => a.type === 'remove_messages')!;
-    // Proposed for approval, whatever the other actions' modes are
+    await svc.handleCampaignReport(
+      campaignReport([
+        recipient(1),
+        recipient(
+          2,
+          {},
+          { internetMessageId: '<other-2@mail.examp1e-billing.test>', size: 20_100 }
+        ),
+        recipient(3, {}, { senderAddress: 'billing@example.org' }),
+      ])
+    );
+    const removal = removals(store)[0];
+    expect(removal.scope).toMatchObject({ mode: 'live' });
     expect(removal.status).toBe('proposed');
     expect(removal.authorization).toBe('approve');
     expect(broker.calls).toEqual([]);
-    const incidentEmail = sent.find(e => e.to === TEAM[0])!;
-    expect(incidentEmail.text).toContain('Remove remaining copies from mailboxes');
-    expect(incidentEmail.text).toContain("to each person's Deleted Items");
-    expect(incidentEmail.text).not.toContain('(dry run)');
-    expect(incidentEmail.text).toContain(`APPROVE REMOVAL ${removal.reference}`);
-    // A later report does not run it either
-    await service.handleCampaignReport(
-      campaignReport([recipient(1), recipient(2), recipient(3)]) as never
+    const text = sent.find(e => e.to === TEAM[0])!.text;
+    expect(text).toContain('Remove remaining copies from mailboxes');
+    expect(text).not.toContain('(dry run)');
+    expect(text).not.toContain('never a search');
+    expect(text).toContain('Moves 3 copy(ies) in 3 mailbox(es)');
+    expect(text).toContain('They are 2 distinct email(s) by Internet Message-ID');
+    expect(text).toContain('within 1% of it');
+    expect(text).toContain(
+      'from billing@examp1e-billing[.]test with exactly the subject "Invoice 2291 overdue"'
     );
+    expect(text).toContain(
+      '1 copy(ies) matched by the lookup but not provably the same email: not included in removal'
+    );
+    expect(text).toContain(`APPROVE REMOVAL ${removal.reference}`);
+    // A later report does not run it either
+    await svc.handleCampaignReport(campaignReport([recipient(1), recipient(4)]));
     expect(broker.calls).toEqual([]);
+  });
+
+  it('says so when every copy is the reported email itself', async () => {
+    const { service: svc, sent } = service();
+    await svc.handleCampaignReport(campaignReport([recipient(1), recipient(2)]));
+    expect(sent.find(e => e.to === TEAM[0])!.text).toContain(
+      'every copy is the reported email itself (the same Internet Message-ID as the copy the reporter forwarded): the strongest case'
+    );
+  });
+
+  it.each([
+    ['no original-message lookup result', {}, 'no_anchor'],
+    [
+      'a Report-button submission',
+      { ...retrieved(), userReport: { reportedAs: 'phishing' } },
+      'no_anchor',
+    ],
+  ] as const)(
+    'proposes only a dry run, and says why, for %s',
+    async (_label, emailData, reason) => {
+      const { service: svc, store, sent } = service();
+      await svc.handleCampaignReport(campaignReport([recipient(1)], emailData as never));
+      expect(removals(store)[0].scope).toMatchObject({ liveUnavailable: reason });
+      expect(removals(store)[0].scope).not.toHaveProperty('mode');
+      const text = sent.find(e => e.to === TEAM[0])!.text;
+      expect(text).toContain('Remove remaining copies from mailboxes (dry run)');
+      expect(text).toContain('A live removal is not proposed for this incident');
+    }
+  );
+
+  it('runs a dry-run proposal as a dry run even though the deployment is live', async () => {
+    const { service: svc, store, broker } = service();
+    await svc.handleCampaignReport(campaignReport([recipient(1)], {}));
+    const reply = await svc.handleApprovals(approveLine(removals(store)[0].reference), TEAM[0]);
+    expect(broker.calls).toEqual([]);
+    expect(removals(store)[0].status).toBe('dry_run_completed');
+    expect(reply.body.join('\n')).toContain(
+      'This removal was proposed as a dry run, so it ran as a dry run'
+    );
+  });
+
+  it('runs a live proposal as a dry run when the deployment is no longer live', async () => {
+    const clock = { now: new Date('2026-11-17T10:00:00.000Z') };
+    const live = service({ clock });
+    await live.service.handleCampaignReport(campaignReport([recipient(1)]));
+    const reference = removals(live.store)[0].reference;
+    // The operator switches back to dry run; the stored proposal remains
+    const dry = service({ live: false, store: live.store, clock });
+    const reply = await dry.service.handleApprovals(approveLine(reference), TEAM[0]);
+    expect(live.broker.calls).toEqual([]);
+    expect(dry.broker.calls).toEqual([]);
+    expect(removals(live.store)[0].status).toBe('dry_run_completed');
+    expect(reply.body.join('\n')).toContain(
+      'proposed as a live removal, but this deployment is now set to dry run'
+    );
+  });
+
+  it('proposes the live removal after a dry run of the same copies (the mode is part of the scope)', async () => {
+    const { service: svc, store, advance } = service();
+    await svc.handleCampaignReport(campaignReport([recipient(1)], {}));
+    await svc.handleApprovals(approveLine(removals(store)[0].reference), TEAM[0]);
+    advance(31 * 60_000);
+    const later = campaignReport([recipient(1)]);
+    (later as { match: { detectionCount: number; shouldAlert: boolean } }).match.detectionCount = 4;
+    await svc.handleCampaignReport(later);
     expect(
-      store.actions.filter(a => a.type === 'remove_messages').every(a => a.status !== 'completed')
-    ).toBe(true);
+      removals(store).map(a => [a.status, a.scope.kind === 'remove_messages' ? a.scope.mode : 'x'])
+    ).toEqual([
+      ['dry_run_completed', undefined],
+      ['proposed', 'live'],
+    ]);
+  });
+
+  it('a fan-out scan incident proposes only a dry-run removal', async () => {
+    const { service: svc, store, sent } = service();
+    await svc.openIncidentFromFanoutAlert({
+      subject: SUBJECT,
+      senderAddress: SENDER,
+      reach: report([recipient(1), recipient(2)]),
+      reasons: ['One external sender reached 40 internal recipients in 6 minutes'],
+    });
+    expect(removals(store)[0].scope).toMatchObject({ liveUnavailable: 'no_reports' });
+    expect(removals(store)[0].scope).not.toHaveProperty('mode');
+    expect(sent[0].text).toContain('nobody has reported it yet');
+  });
+
+  it('a malicious verdict is required for a live proposal', async () => {
+    const { service: svc, store } = service();
+    await svc.handleCampaignReport(campaignReport([recipient(1)], retrieved(), 'suspicious'));
+    expect(removals(store)[0].scope).toMatchObject({ liveUnavailable: 'not_malicious' });
   });
 
   it('runs only on the exact approval, notices only people whose copy was moved, audits the counts', async () => {
-    const { service, store, sent, broker } = liveService(mailboxId =>
-      mailboxId === MAILBOX(1) ? 'moved' : mailboxId === MAILBOX(2) ? 'mismatch' : 'already_deleted'
-    );
-    await service.handleCampaignReport(
+    const {
+      service: svc,
+      store,
+      sent,
+      broker,
+    } = service({
+      decide: mailboxId =>
+        mailboxId === MAILBOX(1)
+          ? 'moved'
+          : mailboxId === MAILBOX(2)
+            ? 'mismatch'
+            : 'already_deleted',
+    });
+    await svc.handleCampaignReport(
       campaignReport([
         recipient(1),
         recipient(2),
         recipient(3),
         recipient(4, { address: 'outsider@partner.test' }),
-      ]) as never
+      ])
     );
-    const removal = store.actions.find(a => a.type === 'remove_messages')!;
-    const reply = await service.handleApprovals(approveLine(removal.reference), TEAM[0]);
+    const removal = removals(store)[0];
+    const reply = await svc.handleApprovals(approveLine(removal.reference), TEAM[0]);
     expect(broker.calls).toHaveLength(1);
     const text = reply.body.join('\n');
     expect(text).toContain('Approved: removal of remaining copies (moves them to Deleted Items)');
     expect(text).toContain('1 message(s) moved to Deleted Items in 1 mailbox(es)');
     expect(text).toContain('Sent 1 removal notice(s)');
-
-    const notices = sent.filter(e => e.subject.startsWith('Security notice'));
-    expect(notices.map(e => e.to)).toEqual(['person1@example.com']);
-
+    expect(sent.filter(e => e.subject.startsWith('Security notice')).map(e => e.to)).toEqual([
+      'person1@example.com',
+    ]);
     expect(store.actions.find(a => a.id === removal.id)).toMatchObject({
       status: 'completed',
       executor: 'graph_write_removal',
@@ -491,63 +925,114 @@ describe('a live removal through CampaignResponseService', () => {
       executor: 'graph_write_removal',
       moved: 1,
       mismatch: 1,
-      alreadyDeleted: 2,
+      alreadyDeleted: 3, // the reporter's copy and person3's and the outsider's
       removedMailboxes: 1,
       notified: 1,
     });
   });
 
   it('never notifies an address outside the safe domains even when its copy was moved', async () => {
-    const { service, store, sent } = liveService(() => 'moved');
-    await service.handleCampaignReport(
-      campaignReport([recipient(1), recipient(4, { address: 'outsider@partner.test' })]) as never
+    const { service: svc, store, sent } = service();
+    await svc.handleCampaignReport(
+      campaignReport([recipient(1), recipient(4, { address: 'outsider@partner.test' })])
     );
-    const removal = store.actions.find(a => a.type === 'remove_messages')!;
-    await service.handleApprovals(approveLine(removal.reference), TEAM[0]);
-    expect(sent.filter(e => e.subject.startsWith('Security notice')).map(e => e.to)).toEqual([
-      'person1@example.com',
-    ]);
+    await svc.handleApprovals(approveLine(removals(store)[0].reference), TEAM[0]);
+    expect(
+      sent
+        .filter(e => e.subject.startsWith('Security notice'))
+        .map(e => e.to)
+        .sort()
+    ).toEqual(['person1@example.com', REPORTER].sort());
   });
 
-  async function approveThenUpdate(
-    decide: (mailboxId: string, messageId: string) => MessageOutcome['outcome'],
-    failure?: GraphWriteCallResult
-  ) {
-    const ctx = liveService(decide, {}, failure);
+  it('keeps the real result and tells the approver the truth when recording it fails', async () => {
+    const { service: svc, store, sent } = service();
+    await svc.handleCampaignReport(campaignReport([recipient(1)]));
+    const removal = removals(store)[0];
+    const error = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    const realFinish = store.finishAction.bind(store);
+    store.finishAction = jest.fn(async () => {
+      throw new Error('database unavailable');
+    }) as typeof store.finishAction;
+    const reply = await svc.handleApprovals(approveLine(removal.reference), TEAM[0]);
+    store.finishAction = realFinish;
+    const text = reply.body.join('\n');
+    expect(text).toContain('2 message(s) moved to Deleted Items');
+    expect(text).toContain('Sent 2 removal notice(s)');
+    expect(text).toContain('could not record this result');
+    expect(text).not.toContain('no removal notice was sent');
+    expect(sent.filter(e => e.subject.startsWith('Security notice'))).toHaveLength(2);
+    expect(error.mock.calls.map(c => String(c[0])).join('\n')).toContain('"moved":2');
+    error.mockRestore();
+  });
+
+  it('does not count people as notified for an approved removal that never recorded a result', async () => {
+    const { service: svc, store, sent, advance } = service();
+    await svc.handleCampaignReport(campaignReport([recipient(1)]));
+    const first = removals(store)[0];
+    // Stuck: approved an hour ago, no result recorded
+    await store.approveAction(first.id, TEAM[0]);
+    advance(60 * 60_000);
+    const second = await store.createAction({
+      incidentId: store.incidents[0].id,
+      reference: 'PHY-ZZZZ-ZZZZ-ZZZZ-ZZZ2',
+      type: 'remove_messages',
+      authorization: 'approve',
+      scope: first.scope,
+      scopeHash: 'again',
+      expiresAt: new Date(advanceTo(store, 3)),
+    });
+    await svc.handleApprovals(approveLine(second.reference), TEAM[0]);
+    expect(
+      sent
+        .filter(e => e.subject.startsWith('Security notice'))
+        .map(e => e.to)
+        .sort()
+    ).toEqual(['person1@example.com', REPORTER].sort());
+  });
+
+  async function approveThenUpdate(failure?: GraphWriteCallResult) {
+    const ctx = service({ failure });
     const recipients = [recipient(1), recipient(2)];
-    await ctx.service.handleCampaignReport(campaignReport(recipients) as never);
-    const removal = ctx.store.actions.find(a => a.type === 'remove_messages')!;
-    await ctx.service.handleApprovals(approveLine(removal.reference), TEAM[0]);
+    await ctx.service.handleCampaignReport(campaignReport(recipients));
+    await ctx.service.handleApprovals(approveLine(removals(ctx.store)[0].reference), TEAM[0]);
     ctx.advance(31 * 60_000);
     const later = campaignReport(recipients);
-    later.match = { ...later.match, detectionCount: 4, shouldAlert: false };
-    await ctx.service.handleCampaignReport(later as never);
-    return ctx.store.actions.filter(a => a.type === 'remove_messages');
+    (later as { match: { detectionCount: number; shouldAlert: boolean } }).match.detectionCount = 4;
+    (later as { match: { detectionCount: number; shouldAlert: boolean } }).match.shouldAlert =
+      false;
+    await ctx.service.handleCampaignReport(later);
+    return removals(ctx.store);
   }
 
   it('does not propose the same removal again once it has been fully carried out', async () => {
-    const removals = await approveThenUpdate(() => 'moved');
-    expect(removals).toHaveLength(1);
-    expect(removals[0].status).toBe('completed');
+    const all = await approveThenUpdate();
+    expect(all).toHaveLength(1);
+    expect(all[0].status).toBe('completed');
   });
 
   it('proposes the same removal again when the write broker refused it', async () => {
-    const removals = await approveThenUpdate(() => 'moved', {
+    const all = await approveThenUpdate({
       ok: false,
       failure: 'refused',
       refusal: 'write_disabled',
     });
-    expect(removals.map(a => a.status)).toEqual(['completed', 'proposed']);
-    expect(removals[1].scopeHash).toBe(removals[0].scopeHash);
+    expect(all.map(a => a.status)).toEqual(['completed', 'proposed']);
+    expect(all[1].scopeHash).toBe(all[0].scopeHash);
   });
 
   it('refuses a malformed approval and runs nothing', async () => {
-    const { service, store, broker } = liveService(() => 'moved');
-    await service.handleCampaignReport(campaignReport([recipient(1)]) as never);
-    const removal = store.actions.find(a => a.type === 'remove_messages')!;
-    await service.handleApprovals(approveLine(`${removal.reference}X`), TEAM[0]);
-    await service.handleApprovals(approveLine(removal.reference), 'mallory@example.org');
-    await service.handleApprovals([{ verb: 'WARNING', reference: removal.reference }], TEAM[0]);
+    const { service: svc, store, broker } = service();
+    await svc.handleCampaignReport(campaignReport([recipient(1)]));
+    const removal = removals(store)[0];
+    await svc.handleApprovals(approveLine(`${removal.reference}X`), TEAM[0]);
+    await svc.handleApprovals(approveLine(removal.reference), 'mallory@example.org');
+    await svc.handleApprovals([{ verb: 'WARNING', reference: removal.reference }], TEAM[0]);
     expect(broker.calls).toEqual([]);
   });
 });
+
+/** An expiry `hours` after the store's clock (via its latest incident's creation) */
+function advanceTo(store: FakeResponseStore, hours: number): number {
+  return store.incidents[0].createdAt.getTime() + hours * 3_600_000 + 2 * 3_600_000;
+}

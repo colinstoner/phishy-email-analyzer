@@ -42,6 +42,8 @@ import { displaySender, displayText, displayTime } from '../services/response/di
 import type {
   CampaignIncident,
   IncidentSummary,
+  LiveRemovalBasis,
+  LiveUnavailableReason,
   ResponseAction,
   WarningRecipient,
 } from '../services/response/response.types';
@@ -695,7 +697,8 @@ export function approvalLine(action: ResponseAction): string {
 
 function describeProposal(
   action: ResponseAction,
-  liveRemoval = false
+  liveRemoval = false,
+  timeZone = 'UTC'
 ): {
   title: string;
   does: string;
@@ -729,7 +732,9 @@ function describeProposal(
   const s = scope.skipped;
   const left = [
     s.alreadyPurged ? `${s.alreadyPurged} already purged` : '',
-    s.noIdentifiers ? `${s.noIdentifiers} without a usable message ID` : '',
+    s.noIdentifiers
+      ? `${s.noIdentifiers} mailbox(es) where the lookup recorded no message identifiers (these copies cannot be checked and are not included)`
+      : '',
     s.overMailboxCap
       ? `${s.overMailboxCap} over the mailbox cap (${scope.limits.maxMailboxes})`
       : '',
@@ -737,18 +742,69 @@ function describeProposal(
       ? `${s.overMessageCap} over the message cap (${scope.limits.maxMessages})`
       : '',
   ].filter(Boolean);
-  if (liveRemoval) {
+  if (scope.mode === 'live' && scope.live) {
+    const basis = scope.live;
+    const excluded = basis.excluded
+      ? [
+          `${basis.excluded} copy(ies) matched by the lookup but not provably the same email: not included in removal`,
+        ]
+      : [];
+    const all = [...excluded, ...left];
     return {
       title: 'Remove remaining copies from mailboxes',
-      does: `moves the ${scope.messageCount} copy(ies) in ${scope.mailboxes.length} mailbox(es) that the blast-radius lookup matched for this incident (exact message IDs, never a search) to each person's Deleted Items, after re-checking that each is still the same message. Nothing is permanently deleted, and each person whose copy is moved gets a short notice.`,
-      ...(left.length ? { notIncluded: left.join(', ') } : {}),
+      does: liveBasisText(scope.messageCount, scope.mailboxes.length, basis, timeZone),
+      ...(all.length ? { notIncluded: all.join(', ') } : {}),
     };
   }
+  const notLive =
+    liveRemoval && scope.liveUnavailable ? ` ${LIVE_UNAVAILABLE[scope.liveUnavailable]}` : '';
   return {
     title: 'Remove remaining copies from mailboxes (dry run)',
-    does: `re-checks the ${scope.messageCount} copy(ies) in ${scope.mailboxes.length} mailbox(es) that the blast-radius lookup matched for this incident (exact message IDs, never a search) and replies with what a removal would do. No mailbox is changed: removal is set to dry run in this deployment.`,
+    does: `re-checks the ${scope.messageCount} copy(ies) in ${scope.mailboxes.length} mailbox(es) that the blast-radius lookup matched for this incident and replies with what a removal would do. No mailbox is changed: ${
+      liveRemoval ? 'this removal is a dry run.' : 'removal is set to dry run in this deployment.'
+    }${notLive}`,
     ...(left.length ? { notIncluded: left.join(', ') } : {}),
   };
+}
+
+/** Why a live deployment proposes only a dry run for this incident */
+const LIVE_UNAVAILABLE: Record<LiveUnavailableReason, string> = {
+  no_anchor:
+    "A live removal is not proposed for this incident: Phishy has not found the reported email in a reporter's own mailbox and confirmed that the reporter forwarded it (the original-message lookup is off or found nothing, the report came through the Report button, or the reporter's copy could not be matched), so the copies the lookup matched cannot be proven to be the same email.",
+  not_malicious:
+    'A live removal is not proposed for this incident: its verdict is not malicious (phishing, BEC or malware delivery).',
+  no_reports:
+    'A live removal is not proposed for this incident: nobody has reported it yet, so there is no verdict and no reported email to anchor on.',
+};
+
+/**
+ * What a live removal rests on, in the approver's words: how many distinct
+ * emails, that every copy has the reported email's exact sender and subject,
+ * the time span, and how the copies were tied to the reported email.
+ */
+function liveBasisText(
+  copies: number,
+  mailboxes: number,
+  basis: LiveRemovalBasis,
+  timeZone: string
+): string {
+  const sender = displayText(basis.anchor.senderAddress) ?? 'the reported sender';
+  const subject = displayText(basis.anchor.subject, 160) ?? '(no subject)';
+  const first = displayTime(basis.firstReceivedAt, timeZone);
+  const last = displayTime(basis.lastReceivedAt, timeZone);
+  const span =
+    first && last
+      ? first === last
+        ? ` It arrived at ${first}.`
+        : ` They arrived between ${first} and ${last}.`
+      : '';
+  const tie =
+    basis.matchedOnSize === 0
+      ? basis.distinctMessages <= 1
+        ? 'every copy is the reported email itself (the same Internet Message-ID as the copy the reporter forwarded): the strongest case'
+        : `every copy carries the reported email's own Internet Message-ID`
+      : `${basis.sameMessageIdAsAnchor} copy(ies) carry the reported email's own Internet Message-ID and ${basis.matchedOnSize} were included because, with a different Message-ID, their size is within ${basis.sizeTolerancePercent}% of it`;
+  return `moves ${copies} copy(ies) in ${mailboxes} mailbox(es) to each person's Deleted Items. They are ${basis.distinctMessages} distinct email(s) by Internet Message-ID, and ${tie}. Every copy is from ${sender} with exactly the subject "${subject}", and arrived within ${basis.windowHours} hour(s) of the reported copy.${span} The basis is the reported email as Phishy found it in the reporter's own mailbox, which the reporter forwarded; before moving each copy the write broker re-checks its Message-ID, sender, subject and arrival time. A legitimate email from the same sender with the same subject, sent in that window, would also be included: check the sender and subject before approving. Nothing is permanently deleted, and each person whose copy is moved gets a short notice.`;
 }
 
 interface Proposals {
@@ -769,7 +825,11 @@ function proposals(context: IncidentEmailContext): Proposals {
     intro = `Reply to this email with the line shown, on a line of its own. Each approval is good until ${displayTime(expiry.toISOString(), context.timeZone) ?? expiry.toISOString()} and applies to this incident only.${context.proposed.some(a => a.type === 'send_warning') ? ' For the warning only, a reply to this email with just the two words "approve warning" also works.' : ''}`;
   }
   const items: Proposals['items'] = context.proposed.map(action => {
-    const { title, does, notIncluded } = describeProposal(action, context.liveRemoval === true);
+    const { title, does, notIncluded } = describeProposal(
+      action,
+      context.liveRemoval === true,
+      context.timeZone
+    );
     return {
       title,
       reply: approvalLine(action),

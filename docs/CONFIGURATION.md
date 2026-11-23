@@ -447,12 +447,16 @@ Three switches must all be on for anything to move:
 
 `live` without a valid function name logs a warning and runs the dry run. A removal is never automatic, whatever `employeeWarning` says.
 
+**Which incidents get a live removal.** Only one with an **anchor**: the reported email as Phishy's [original-message lookup](#original-message-lookup) found it in the reporter's own mailbox, which blast radius confirms the reporter forwarded. So a live removal needs `PHISHY_GRAPH_ORIGINAL_FETCH_ENABLED` and `PHISHY_GRAPH_BLAST_RADIUS_ENABLED` as well, reports forwarded from an Exchange client (Outlook, Outlook on the web, Outlook mobile), a malicious verdict and at least one report. Report-button submissions, fan-out-scan incidents and reports whose original was not found get a dry-run removal, and the proposal says why. A live removal then names only copies provably the same email as the anchor: same From address, exactly the same subject (after collapsing whitespace and case), arriving within `windowHours` of it, and either the same Internet Message-ID or, with a different one, a message-trace size within `sizeTolerancePercent`. Other copies the lookup matched are listed as "not provably the same email: not included" and still get the warning. A legitimate email from the same sender with the same subject in that window would still be included: read the sender and subject in the proposal before approving. See [ARCHITECTURE.md](ARCHITECTURE.md#the-mailbox-write-tier).
+
 **Main function**
 
 | Variable | Config key | Default | Description |
 |----------|-----------|---------|-------------|
 | `PHISHY_CAMPAIGN_RESPONSE_REMOVAL_MODE` | `campaignResponse.removal.mode` | `dry_run` | `dry_run`: an approved removal is reported, nothing changes. `live`: the write broker moves the approved copies |
 | `PHISHY_GRAPH_WRITE_BROKER_FUNCTION` | `campaignResponse.removal.writeBrokerFunctionName` | - | Name or ARN of the write broker function (used only in `live` mode) |
+| `PHISHY_CAMPAIGN_RESPONSE_REMOVAL_WINDOW_HOURS` | `campaignResponse.removal.windowHours` | `6` | Live only: a copy must have arrived within this many hours of the reported copy (1-72) |
+| `PHISHY_CAMPAIGN_RESPONSE_REMOVAL_SIZE_TOLERANCE_PERCENT` | `campaignResponse.removal.sizeTolerancePercent` | `1` | Live only: a copy with a different Internet Message-ID is included only if its message-trace size is within this percentage of the reported copy's (0-10; `0` = the reported Message-ID only) |
 
 Its execution role needs `lambda:InvokeFunction` on the write broker and nothing else for it: **never** the write client ID, the write certificate or access to the write secret. Any `PHISHY_GRAPH_WRITE_CLIENT_ID` or `PHISHY_GRAPH_WRITE_CERTIFICATE` in its environment (or a `graph.write` key in the configuration file) is ignored, with a warning to remove it. In a VPC without internet access it also needs the Lambda interface endpoint, as for the read broker.
 
@@ -466,10 +470,14 @@ Handler `graph-write-broker.handler` when bundled from `src/graph-write-broker.t
 | `PHISHY_GRAPH_TENANT_ID` | - | Directory (tenant) ID or verified domain. Required when enabled |
 | `PHISHY_GRAPH_WRITE_CLIENT_ID` | - | Application (client) ID of the **write** app registration (not the read one). Required when enabled |
 | `PHISHY_GRAPH_WRITE_CERTIFICATE` | - | Secrets Manager ARN of the **write** app's private key and certificate (same formats as the read certificate). Required when enabled |
-| `PHISHY_GRAPH_WRITE_ALLOWED_MAILBOX_IDS` | - | Optional. Comma-separated Entra object IDs (GUIDs) of the only mailboxes it may change; any other is refused (`not_allowed`). A value that is not a GUID makes the function refuse everything (`misconfigured`). Use it to limit a staging deployment to one test mailbox |
+| `PHISHY_GRAPH_WRITE_ALLOWED_MAILBOX_IDS` | - | Optional. Comma-separated Entra object IDs (GUIDs) of the only mailboxes it may change; any other is refused (`not_allowed`). An entry that is not a GUID, or a value that lists nothing (`""`, `","`), makes the function refuse everything (`misconfigured`). Use it to limit a staging deployment to one test mailbox |
 | `LOG_LEVEL` | `info` | Optional |
 
-Its execution role needs CloudWatch Logs and `secretsmanager:GetSecretValue` on the write secret, and nothing else: not the read secret. Timeout: 100 seconds (one call works for at most 80). Memory: 256 MB. A small reserved concurrency (the template uses 2) bounds how many calls can run at once.
+Its execution role needs CloudWatch Logs and `secretsmanager:GetSecretValue` on the write secret, and nothing else: not the read secret. If the secret is encrypted with a customer-managed KMS key (not the default `aws/secretsmanager` key), the role also needs `kms:Decrypt` on that key; the SAM template does not add it. The function refuses to start if its environment also carries the read app's client ID or certificate and they equal its own.
+
+**Who may invoke it.** Anything in the AWS account allowed `lambda:InvokeFunction` on the write broker can request moves, within its kill switch and allowlist; the write broker cannot check an approval. The template grants that permission only to the main function, and only in live mode, but an administrator, a broad `lambda:*` policy or a CI role has it too. Restrict it: for example an explicit deny on the function for every principal except the main function's role (a permissions boundary or a service control policy), and alert on its invocations (CloudTrail data events for Lambda).
+
+**Deploy order.** The read broker's protocol is strict: a read broker of this version talking to an older main function answers in a shape that function refuses (`malformed`), so blast radius and the original-message lookup are unavailable until the main function is updated. Deploy both together (one SAM stack does), or the main function first. Timeout: 100 seconds (one call works for at most 80). Memory: 256 MB. A small reserved concurrency (the template uses 2) bounds how many calls can run at once.
 
 **Entra setup (a separate app registration)**
 
@@ -481,7 +489,7 @@ Its execution role needs CloudWatch Logs and `secretsmanager:GetSecretValue` on 
 
 **Turning it on, safely.** Deploy the write broker with `PHISHY_GRAPH_WRITE_ENABLED=false` first, then set the main function to `live`: an approval then answers that the write broker refused (`write_disabled`), which proves the path without changing anything. Next, enable it with an allowlist of one test mailbox and approve a removal for a test campaign that reached it. Only then remove the allowlist.
 
-**What the approver is told.** The reply to `APPROVE REMOVAL` gives, by count: moved to Deleted Items, already in Deleted Items, not found, refused because the message was not the approved one (its Internet Message-ID did not match), refused by the allowlist, errors, not attempted (with why: time, throttling, a refusal, or a scope that recorded no Internet Message-ID) and, if the write broker did not answer in time, outcome unknown. Mailboxes with errors are listed. Only people whose copy was actually moved get the removal notice.
+**What the approver is told.** The proposal states what the removal rests on (how many distinct emails, how many copies carry the reported email's own Message-ID and how many were admitted on size, the sender and exact subject, the arrival span) and what it leaves out. The reply to `APPROVE REMOVAL` gives, by count: moved to Deleted Items, already in Deleted Items, not found, refused because the copy was no longer provably the approved email (its Message-ID, sender, subject or arrival time differed), refused by the allowlist, errors, not attempted (with why: time, throttling, a refusal) and, if the write broker did not answer in time, outcome unknown, with which mailboxes those are, that those people were not notified, and how to check. Only people whose copy was actually moved get the removal notice. A removal proposed as a dry run is carried out as a dry run, and one proposed live is carried out as a dry run if the deployment is no longer live; the reply says so.
 
 **Metrics:** `CampaignMessagesRemoved`, `CampaignRemovalErrors`, `CampaignRemovalRefused` (`Reason`: `mismatch` or `not_allowed`), `CampaignRemovalNotAttempted`, `CampaignRemovalNoticesSent`, and `GraphBrokerCalls` with `Operation=remove_messages`. The write broker logs one line per call (`Graph write broker request finished`) with the action ID and the counts, never a mailbox, message or Internet Message-ID.
 

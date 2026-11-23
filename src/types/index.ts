@@ -151,6 +151,22 @@ export interface RetrievedOriginal {
   headers: RetrievedHeader[];
   /** True when the stored copy had more headers than were read */
   headersTruncated: boolean;
+  /**
+   * The message as the reporter's mailbox stored it, from the lookup's own
+   * search (not from the forward's text): its Graph ID in that mailbox, its
+   * Internet Message-ID, From address and subject. Hostile values (the
+   * sender wrote them) used only as data: the anchor a live campaign
+   * removal is checked against. Never rendered into the prompt.
+   */
+  identity?: RetrievedOriginalIdentity;
+}
+
+export interface RetrievedOriginalIdentity {
+  /** Graph message ID in the reporter's mailbox */
+  messageId: string;
+  internetMessageId?: string;
+  senderAddress?: string;
+  subject?: string;
 }
 
 /** A count that may have been cut short by a row cap: `atLeast` means "N or more" */

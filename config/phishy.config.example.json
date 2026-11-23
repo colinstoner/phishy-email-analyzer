@@ -55,7 +55,9 @@
     "maxRemovalMailboxes": 500,
     "maxRemovalMessages": 1000,
     "removal": {
-      "mode": "dry_run"
+      "mode": "dry_run",
+      "windowHours": 6,
+      "sizeTolerancePercent": 1
     },
     "updateIntervalMinutes": 30,
     "reachThreshold": 5,

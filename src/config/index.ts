@@ -90,6 +90,9 @@ export const ENV_MAPPINGS: Readonly<Record<string, string>> = {
   // Approved removals: dry_run (default) or live through the Graph write broker
   PHISHY_CAMPAIGN_RESPONSE_REMOVAL_MODE: 'campaignResponse.removal.mode',
   PHISHY_GRAPH_WRITE_BROKER_FUNCTION: 'campaignResponse.removal.writeBrokerFunctionName',
+  PHISHY_CAMPAIGN_RESPONSE_REMOVAL_WINDOW_HOURS: 'campaignResponse.removal.windowHours',
+  PHISHY_CAMPAIGN_RESPONSE_REMOVAL_SIZE_TOLERANCE_PERCENT:
+    'campaignResponse.removal.sizeTolerancePercent',
 
   // Campaign verdict cache
   PHISHY_CAMPAIGN_CACHE_ENABLED: 'campaignCache.enabled',
@@ -310,14 +313,33 @@ export function loadGraphWriteBrokerConfig(
         .split(',')
         .map(id => id.trim().toLowerCase())
         .filter(id => id.length > 0);
-      if (ids.length > 0) {
-        raw.allowedMailboxIds = ids;
-      }
+      // Present but empty ("", ",", spaces) is a mistake, never "no
+      // allowlist": the schema refuses an empty list, so the broker is
+      // misconfigured and refuses everything
+      raw.allowedMailboxIds = ids;
     } else if (value.trim().length > 0) {
       raw[key] = value.trim();
     }
   }
   const validation = GraphWriteBrokerConfigSchema.safeParse(raw);
+  // The write function is never given the read registration. If it was,
+  // and it names the same app or the same secret, the separation the write
+  // tier rests on is gone: refuse to start (the SAM rule checks the same
+  // thing at deploy time; it cannot see a manual deployment)
+  const sameAs = (name: string, value: unknown): boolean =>
+    typeof value === 'string' &&
+    env[name] !== undefined &&
+    env[name]?.trim().toLowerCase() === value.trim().toLowerCase();
+  if (
+    validation.success &&
+    (sameAs('PHISHY_GRAPH_READ_CLIENT_ID', validation.data.clientId) ||
+      sameAs('PHISHY_GRAPH_READ_CERTIFICATE', validation.data.certificate))
+  ) {
+    logger.error(
+      'Graph write broker configuration names the read app registration or the read certificate; the write tier needs its own'
+    );
+    throw new Error('Invalid Graph write broker configuration');
+  }
   if (!validation.success) {
     const issues = validation.error.issues.map(issue => ({
       path: issue.path.join('.'),

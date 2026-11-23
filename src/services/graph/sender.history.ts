@@ -48,6 +48,7 @@ import {
 import { domainMatches } from '../../utils/validation';
 import { GraphClient } from './graph.client';
 import { IP_SHAPE, MAX_REPORTED_BURST_IPS } from './graph.limits';
+import { subjectGroupKey } from './subject.key';
 import { createGraphReadClient } from './graph.credential';
 import { GraphError } from './graph.errors';
 import { BoundedResult } from './operations.common';
@@ -294,14 +295,8 @@ function emptyTally(): PeriodTally {
   };
 }
 
-/**
- * A subject as a grouping key: trimmed, case-folded, whitespace collapsed.
- * It is hostile text and is used for nothing else — it stays in memory for
- * the length of one computation and is never logged, returned or shown.
- */
-export function subjectGroupKey(subject: string | undefined): string {
-  return (subject ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
-}
+// The subject grouping key lives in subject.key.ts: the write tier uses it too
+export { subjectGroupKey } from './subject.key';
 
 /**
  * The largest set of recipients that received one subject, and how many of

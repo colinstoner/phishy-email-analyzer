@@ -7,6 +7,7 @@
 
 import { BlastRadiusService } from '../../../../src/services/graph';
 import { BlastRadiusLookupResultSchema } from '../../../../src/services/graph/broker.protocol';
+import { subjectKeyHash } from '../../../../src/services/graph/subject.key';
 import { ExtractedEmailData } from '../../../../src/types';
 import {
   FakeResponder,
@@ -112,11 +113,31 @@ describe('blast radius identifiers for campaign response', () => {
       mailboxId: ALICE,
       messageIds: ['AAMkAGI2-alice-1=', 'AAMkAGI2-alice-2='],
       receivedAt: '2026-11-16T08:03:00.000Z',
-      // What a live removal checks each copy against, deduplicated
-      internetMessageIds: ['<m1@mail.example.org>'],
+      // Per copy, in the same order: what a live removal's eligibility reads
+      copyDetails: [
+        {
+          messageId: 'AAMkAGI2-alice-1=',
+          internetMessageId: '<m1@mail.example.org>',
+          senderAddress: 'billing@example.org',
+          subjectHash: subjectKeyHash('Invoice 7731 overdue'),
+          receivedAt: '2026-11-16T08:03:00.000Z',
+        },
+        {
+          messageId: 'AAMkAGI2-alice-2=',
+          internetMessageId: '<m1@mail.example.org>',
+          senderAddress: 'billing@example.org',
+          subjectHash: subjectKeyHash('Invoice 7731 overdue'),
+          receivedAt: '2026-11-16T08:03:00.000Z',
+        },
+      ],
     });
+    // The subject itself is never kept per copy
+    expect(JSON.stringify(byAddress.get('alice@example.com')?.copyDetails)).not.toContain(
+      'Invoice'
+    );
     expect(byAddress.get('bob@example.com')?.messageIds).toHaveLength(5);
-    expect(byAddress.get('carol@example.com')?.internetMessageIds).toBeUndefined();
+    expect(byAddress.get('bob@example.com')?.copyDetails).toHaveLength(5);
+    expect(byAddress.get('carol@example.com')?.copyDetails).toBeUndefined();
     // A directory ID that is not a GUID is never carried as a mailbox to act on
     expect(byAddress.get('carol@example.com')?.mailboxId).toBeUndefined();
     expect(byAddress.get('carol@example.com')?.messageIds).toBeUndefined();
@@ -126,6 +147,44 @@ describe('blast radius identifiers for campaign response', () => {
     expect(
       BlastRadiusLookupResultSchema.safeParse({ report, errors: 0, cached: false }).success
     ).toBe(true);
+  });
+
+  it('records the message-trace size per copy, by the Message-ID that recipient received', async () => {
+    const traced: FakeResponder = (request: RecordedRequest) => {
+      if (decodeURIComponent(request.path) === '/admin/exchange/tracing/messageTraces') {
+        return collection([
+          {
+            recipientAddress: 'alice@example.com',
+            senderAddress: 'billing@example.org',
+            status: 'Delivered',
+            messageId: '<m1@mail.example.org>',
+            size: 20480,
+          },
+          {
+            recipientAddress: 'bob@example.com',
+            senderAddress: 'billing@example.org',
+            status: 'Delivered',
+            messageId: 'm1@mail.example.org',
+            size: -5, // not a size: not kept
+          },
+        ]);
+      }
+      return responder(request);
+    };
+    const graph = fakeGraph([traced]);
+    const service = new BlastRadiusService({
+      client: graph.client,
+      now: (): number => NOW.getTime(),
+      concurrency: 1,
+    });
+    const report = await service.lookup(email);
+    const byAddress = new Map((report.recipients ?? []).map(r => [r.address, r]));
+    expect(byAddress.get('alice@example.com')?.copyDetails?.map(d => d.size)).toEqual([
+      20480, 20480,
+    ]);
+    expect(byAddress.get('bob@example.com')?.copyDetails?.every(d => d.size === undefined)).toBe(
+      true
+    );
   });
 
   it('refuses malformed identifiers from the broker', () => {
@@ -157,17 +216,36 @@ describe('blast radius identifiers for campaign response', () => {
     ).toBe(false);
     expect(
       BlastRadiusLookupResultSchema.safeParse(
-        withRecipient({ internetMessageIds: ['<m1@mail.example.org>'] })
+        withRecipient({
+          copyDetails: [
+            {
+              messageId: 'AAMk=',
+              internetMessageId: '<m1@mail.example.org>',
+              senderAddress: 'billing@example.org',
+              subjectHash: subjectKeyHash('x'),
+              receivedAt: '2026-11-16T08:03:00.000Z',
+              size: 20480,
+            },
+          ],
+        })
       ).success
     ).toBe(true);
-    expect(
-      BlastRadiusLookupResultSchema.safeParse(withRecipient({ internetMessageIds: ['no at sign'] }))
-        .success
-    ).toBe(false);
+    const detail = (extra: Record<string, unknown>) =>
+      withRecipient({ copyDetails: [{ messageId: 'AAMk=', ...extra }] });
+    for (const bad of [
+      { internetMessageId: 'no at sign' },
+      { subjectHash: 'Invoice 7731 overdue' },
+      { senderAddress: 'not an address' },
+      { size: -1 },
+      { receivedAt: 'yesterday' },
+      { subject: 'text is never carried' },
+    ]) {
+      expect(BlastRadiusLookupResultSchema.safeParse(detail(bad)).success).toBe(false);
+    }
     expect(
       BlastRadiusLookupResultSchema.safeParse(
         withRecipient({
-          internetMessageIds: Array.from({ length: 6 }, (_, i) => `<m${i}@mail.example.org>`),
+          copyDetails: Array.from({ length: 6 }, (_, i) => ({ messageId: `id${i}` })),
         })
       ).success
     ).toBe(false);

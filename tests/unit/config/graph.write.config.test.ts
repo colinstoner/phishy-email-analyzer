@@ -158,6 +158,16 @@ describe('loadGraphWriteBrokerConfig', () => {
       'a bad allowlist entry',
       { ...full, PHISHY_GRAPH_WRITE_ALLOWED_MAILBOX_IDS: 'alice@example.com' },
     ],
+    ['an allowlist that lists nothing', { ...full, PHISHY_GRAPH_WRITE_ALLOWED_MAILBOX_IDS: ' , ' }],
+    ['an empty allowlist variable', { ...full, PHISHY_GRAPH_WRITE_ALLOWED_MAILBOX_IDS: '' }],
+    [
+      'the read app registration as the write one',
+      { ...full, PHISHY_GRAPH_READ_CLIENT_ID: WRITE_CLIENT.toUpperCase() },
+    ],
+    [
+      'the read certificate as the write one',
+      { ...full, PHISHY_GRAPH_READ_CERTIFICATE: WRITE_SECRET },
+    ],
   ])('refuses to load when enabled with %s', (_label, env) => {
     const error = jest.spyOn(console, 'error').mockImplementation(() => undefined);
     expect(() => loadGraphWriteBrokerConfig(env as NodeJS.ProcessEnv)).toThrow(

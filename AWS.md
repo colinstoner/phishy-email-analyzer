@@ -152,7 +152,13 @@ Before deploying, create a **second** Entra app registration with `Mail.ReadWrit
 | `GraphWriteBrokerReservedConcurrency` | `2` | Most write broker instances at once; `0` reserves nothing |
 | `CampaignRemovalMode` | `dry_run` | `live` points the main function at the write broker. Needs `CampaignResponseEnabled` and the write broker |
 
-The deploy is rejected if only one of the two write parameters is given, if `GraphTenantId` is missing, if the write client ID equals `GraphReadClientId`, if the write secret equals `GraphCertificateSecretArn`, or if `CampaignRemovalMode=live` lacks campaign response or the write broker.
+The deploy is rejected if only one of the two write parameters is given, if `GraphTenantId` is missing, if the write client ID equals `GraphReadClientId`, if the write secret equals `GraphCertificateSecretArn`, or if `CampaignRemovalMode=live` lacks campaign response or the write broker. The client-ID and secret comparisons are plain text comparisons (a different spelling of the same value, such as an ARN with a different suffix form, is not caught), and the write broker itself cannot repeat them because it is never given the read registration; it only refuses to start if a manual deployment puts the same values in its environment. A live removal also needs `GraphOriginalFetchEnabled` and `GraphBlastRadiusEnabled`: without them no incident has the anchor a live removal requires, and every removal stays a dry run.
+
+Three more things the template cannot do for you:
+
+- **Restrict who may invoke the write broker.** Any principal in the account allowed `lambda:InvokeFunction` on it (administrators, broad `lambda:*` policies, CI roles) can request moves within its kill switch and allowlist. Add an explicit deny for every principal but the main function's role, and alert on its invocations.
+- **A customer-managed KMS key on the write secret** needs `kms:Decrypt` on that key added to `GraphWriteBrokerRole`.
+- **Deploy order.** The read broker's protocol is strict: a new read broker with an old main function makes blast radius and the original-message lookup unavailable (`malformed`). The stack updates both together; with `npm run deploy`, update the main function first.
 
 What the stack adds:
 

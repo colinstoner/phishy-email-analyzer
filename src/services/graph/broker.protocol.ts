@@ -40,6 +40,7 @@ import {
   MAX_SUBJECT_LENGTH,
   MESSAGE_ID_PATTERN,
 } from './graph.limits';
+import { SUBJECT_HASH_PATTERN } from './subject.key';
 
 export const GRAPH_BROKER_VERSION = 1;
 
@@ -237,6 +238,15 @@ export const OriginalMessageLookupResultSchema = z
         receivedAt: IsoInstant.optional(),
         headers: z.array(z.strictObject({ name: z.string(), value: z.string() })),
         headersTruncated: z.boolean(),
+        // The message as the mailbox stored it: the anchor of a live removal
+        identity: z
+          .strictObject({
+            messageId: z.string().regex(GRAPH_ITEM_ID_PATTERN),
+            internetMessageId: z.string().regex(MESSAGE_ID_PATTERN).optional(),
+            senderAddress: MailAddress.optional(),
+            subject: z.string().max(MAX_SUBJECT_LENGTH).optional(),
+          })
+          .optional(),
       })
       .optional(),
   })
@@ -476,8 +486,23 @@ const BlastRadiusRecipientSchema = z.strictObject({
     .array(z.string().regex(GRAPH_ITEM_ID_PATTERN))
     .max(MAX_REPORTED_COPY_IDS)
     .optional(),
-  internetMessageIds: z
-    .array(z.string().regex(MESSAGE_ID_PATTERN))
+  // What the mailbox stored about each copy (a live removal's eligibility)
+  copyDetails: z
+    .array(
+      z.strictObject({
+        messageId: z.string().regex(GRAPH_ITEM_ID_PATTERN),
+        internetMessageId: z.string().regex(MESSAGE_ID_PATTERN).optional(),
+        senderAddress: MailAddress.optional(),
+        subjectHash: z.string().regex(SUBJECT_HASH_PATTERN).optional(),
+        receivedAt: z.iso.datetime().optional(),
+        size: z
+          .number()
+          .int()
+          .min(1)
+          .max(150 * 1024 * 1024)
+          .optional(),
+      })
+    )
     .max(MAX_REPORTED_COPY_IDS)
     .optional(),
   receivedAt: IsoInstant.optional(),

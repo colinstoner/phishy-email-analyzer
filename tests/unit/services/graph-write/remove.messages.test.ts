@@ -14,6 +14,7 @@ import {
   FakeWriteTenant,
   IMID,
   MAILBOX_ID,
+  expectation,
   fakeTokenProvider,
   json,
 } from '../../../mocks/graph.write.fake';
@@ -42,6 +43,11 @@ function harness(options: { maxAttempts?: number } = {}): Harness {
     ...(options.maxAttempts ? { maxAttempts: options.maxAttempts } : {}),
   });
   return { tenant, client, tokens, clock, sleeps };
+}
+
+/** One mailbox, each copy expected to be IMID(1) with the fake's default sender, subject and time */
+function mbox(n: number, ids: string[], imid = IMID(1)): RemoveMessagesParams['mailboxes'][number] {
+  return { mailboxId: MAILBOX_ID(n), messages: ids.map(id => expectation(id, imid)) };
 }
 
 function params(
@@ -83,22 +89,13 @@ describe('remove_messages', () => {
     const box = h.tenant.addMailbox(MAILBOX_ID(1), {
       'AAMkAG-1': { internetMessageId: IMID(1), folderId: 'inbox-folder' },
     });
-    const result = await run(
-      h,
-      params([
-        {
-          mailboxId: MAILBOX_ID(1),
-          messageIds: ['AAMkAG-1'],
-          expectedInternetMessageIds: [IMID(1)],
-        },
-      ])
-    );
+    const result = await run(h, params([mbox(1, ['AAMkAG-1'])]));
     expect(outcomesOf(result)).toEqual([[['AAMkAG-1', 'moved', undefined]]]);
     expect(box.messages.has('AAMkAG-1')).toBe(false);
     expect([...box.messages.values()][0].folderId).toBe(box.deletedItemsId);
     expect(h.tenant.shapes()).toEqual([
       'GET /users/{}/mailFolders/deleteditems?$select=id',
-      'GET /users/{}/messages/{}?$select=internetMessageId,parentFolderId',
+      'GET /users/{}/messages/{}?$select=internetMessageId,parentFolderId,from,subject,receivedDateTime',
       'POST /users/{}/messages/{}/move',
     ]);
     expect(result.stoppedBy).toBeUndefined();
@@ -117,12 +114,7 @@ describe('remove_messages', () => {
       a: { internetMessageId: 'campaign-1@mail.example.com', folderId: 'inbox' },
       b: { internetMessageId: '<CAMPAIGN-1@mail.example.com>', folderId: 'inbox' },
     });
-    const result = await run(
-      h,
-      params([
-        { mailboxId: MAILBOX_ID(1), messageIds: ['a', 'b'], expectedInternetMessageIds: [IMID(1)] },
-      ])
-    );
+    const result = await run(h, params([mbox(1, ['a', 'b'])]));
     expect(outcomesOf(result)).toEqual([
       [
         ['a', 'moved', undefined],
@@ -138,16 +130,7 @@ describe('remove_messages', () => {
       other: { internetMessageId: '<legit-newsletter@news.example.com>', folderId: 'inbox' },
       none: { folderId: 'inbox' },
     });
-    const result = await run(
-      h,
-      params([
-        {
-          mailboxId: MAILBOX_ID(1),
-          messageIds: ['other', 'none'],
-          expectedInternetMessageIds: [IMID(1)],
-        },
-      ])
-    );
+    const result = await run(h, params([mbox(1, ['other', 'none'])]));
     expect(outcomesOf(result)).toEqual([
       [
         ['other', 'mismatch', undefined],
@@ -158,20 +141,65 @@ describe('remove_messages', () => {
     expectOnlyAllowedRequests(h);
   });
 
+  it('refuses unless the sender, the normalized subject and the arrival time all match too', async () => {
+    const h = harness();
+    h.tenant.addMailbox(MAILBOX_ID(1), {
+      ok: { internetMessageId: IMID(1), folderId: 'inbox', subject: '  INVOICE 2291   overdue ' },
+      sender: { internetMessageId: IMID(1), folderId: 'inbox', sender: 'billing@example.org' },
+      senderCase: {
+        internetMessageId: IMID(1),
+        folderId: 'inbox',
+        sender: 'Billing@Examp1e-Billing.test',
+      },
+      subject: {
+        internetMessageId: IMID(1),
+        folderId: 'inbox',
+        subject: 'Invoice 2291 overdue - paid',
+      },
+      early: { internetMessageId: IMID(1), folderId: 'inbox', received: '2026-11-17T03:13:59Z' },
+      late: { internetMessageId: IMID(1), folderId: 'inbox', received: '2026-11-17T15:14:01Z' },
+      noFrom: { internetMessageId: IMID(1), folderId: 'inbox', sender: null },
+      noSubject: { internetMessageId: IMID(1), folderId: 'inbox', subject: null },
+      noTime: { internetMessageId: IMID(1), folderId: 'inbox', received: null },
+    });
+    const ids = [
+      'ok',
+      'sender',
+      'senderCase',
+      'subject',
+      'early',
+      'late',
+      'noFrom',
+      'noSubject',
+      'noTime',
+    ];
+    const result = await run(h, params([mbox(1, ids.slice(0, 5))]));
+    expect(result.mailboxes[0].messages.map(m => [m.messageId, m.outcome])).toEqual([
+      ['ok', 'moved'],
+      ['sender', 'mismatch'],
+      ['senderCase', 'moved'],
+      ['subject', 'mismatch'],
+      ['early', 'mismatch'],
+    ]);
+    const rest = await run(h, params([mbox(1, ids.slice(5))]));
+    expect(rest.mailboxes[0].messages.map(m => m.outcome)).toEqual([
+      'mismatch',
+      'mismatch',
+      'mismatch',
+      'mismatch',
+    ]);
+    // Only the two matching copies were ever moved
+    expect(h.tenant.requests.filter(r => r.method === 'POST')).toHaveLength(2);
+    // Nothing read about a message is returned
+    expect(JSON.stringify([result, rest])).not.toMatch(/Invoice|billing@|2026-11-17T0|Accounts/);
+    expectOnlyAllowedRequests(h);
+  });
+
   it('leaves a copy already in Deleted Items where it is, and reports a missing one as not found', async () => {
     const h = harness();
     const box = h.tenant.addMailbox(MAILBOX_ID(1));
     box.messages.set('deleted', { internetMessageId: IMID(1), folderId: box.deletedItemsId });
-    const result = await run(
-      h,
-      params([
-        {
-          mailboxId: MAILBOX_ID(1),
-          messageIds: ['deleted', 'gone'],
-          expectedInternetMessageIds: [IMID(1)],
-        },
-      ])
-    );
+    const result = await run(h, params([mbox(1, ['deleted', 'gone'])]));
     expect(outcomesOf(result)).toEqual([
       [
         ['deleted', 'already_deleted', undefined],
@@ -184,12 +212,7 @@ describe('remove_messages', () => {
 
   it('reports an unknown mailbox as an error without touching anything', async () => {
     const h = harness();
-    const result = await run(
-      h,
-      params([
-        { mailboxId: MAILBOX_ID(9), messageIds: ['x', 'y'], expectedInternetMessageIds: [IMID(1)] },
-      ])
-    );
+    const result = await run(h, params([mbox(9, ['x', 'y'])]));
     expect(outcomesOf(result)).toEqual([
       [
         ['x', 'error', 'mailbox_not_found'],
@@ -204,14 +227,9 @@ describe('remove_messages', () => {
     const h = harness();
     h.tenant.addMailbox(MAILBOX_ID(1), { a: { internetMessageId: IMID(1), folderId: 'inbox' } });
     h.tenant.addMailbox(MAILBOX_ID(2), { b: { internetMessageId: IMID(1), folderId: 'inbox' } });
-    const result = await run(
-      h,
-      params([
-        { mailboxId: MAILBOX_ID(1), messageIds: ['a'], expectedInternetMessageIds: [IMID(1)] },
-        { mailboxId: MAILBOX_ID(2), messageIds: ['b'], expectedInternetMessageIds: [IMID(1)] },
-      ]),
-      [MAILBOX_ID(2).toUpperCase()]
-    );
+    const result = await run(h, params([mbox(1, ['a']), mbox(2, ['b'])]), [
+      MAILBOX_ID(2).toUpperCase(),
+    ]);
     expect(outcomesOf(result)).toEqual([
       [['a', 'not_allowed', undefined]],
       [['b', 'moved', undefined]],
@@ -231,12 +249,7 @@ describe('remove_messages', () => {
       r => r.method === 'POST',
       () => json(429, { error: { code: 'TooManyRequests' } }, { 'retry-after': '1' })
     );
-    const result = await run(
-      h,
-      params([
-        { mailboxId: MAILBOX_ID(1), messageIds: ['a'], expectedInternetMessageIds: [IMID(1)] },
-      ])
-    );
+    const result = await run(h, params([mbox(1, ['a'])]));
     expect(outcomesOf(result)).toEqual([[['a', 'moved', undefined]]]);
     expect(h.sleeps).toEqual([2000, 1000]);
     expect(h.tenant.requests.filter(r => r.method === 'POST')).toHaveLength(2);
@@ -257,12 +270,7 @@ describe('remove_messages', () => {
       r => r.method === 'POST' && r.path.includes('/a/'),
       () => json(503, {})
     );
-    const result = await run(
-      h,
-      params([
-        { mailboxId: MAILBOX_ID(1), messageIds: ['a', 'b'], expectedInternetMessageIds: [IMID(1)] },
-      ])
-    );
+    const result = await run(h, params([mbox(1, ['a', 'b'])]));
     expect(outcomesOf(result)).toEqual([
       [
         ['a', 'error', 'move_unconfirmed'],
@@ -285,12 +293,7 @@ describe('remove_messages', () => {
       r => r.method === 'GET' && r.path.endsWith('/a'),
       () => json(429, {}, { 'retry-after': '120' })
     );
-    const result = await run(
-      h,
-      params([
-        { mailboxId: MAILBOX_ID(1), messageIds: ['a', 'b'], expectedInternetMessageIds: [IMID(1)] },
-      ])
-    );
+    const result = await run(h, params([mbox(1, ['a', 'b'])]));
     expect(outcomesOf(result)).toEqual([
       [
         ['a', 'not_attempted', 'throttled'],
@@ -314,19 +317,7 @@ describe('remove_messages', () => {
       h.clock.now += 1500;
       return slow(input as string, init);
     }) as typeof fetch;
-    const result = await run(
-      h,
-      params(
-        [
-          {
-            mailboxId: MAILBOX_ID(1),
-            messageIds: ['a', 'b'],
-            expectedInternetMessageIds: [IMID(1)],
-          },
-        ],
-        4000
-      )
-    );
+    const result = await run(h, params([mbox(1, ['a', 'b'])], 4000));
     expect(outcomesOf(result)).toEqual([
       [
         ['a', 'moved', undefined],
@@ -344,12 +335,7 @@ describe('remove_messages', () => {
       r => r.shape.includes('mailFolders'),
       () => json(401, {})
     );
-    const ok = await run(
-      h,
-      params([
-        { mailboxId: MAILBOX_ID(1), messageIds: ['a'], expectedInternetMessageIds: [IMID(1)] },
-      ])
-    );
+    const ok = await run(h, params([mbox(1, ['a'])]));
     expect(outcomesOf(ok)).toEqual([[['a', 'moved', undefined]]]);
     expect(h.tokens.invalidate).toHaveBeenCalledTimes(1);
 
@@ -357,13 +343,7 @@ describe('remove_messages', () => {
     h2.tenant.addMailbox(MAILBOX_ID(1), { a: { internetMessageId: IMID(1), folderId: 'inbox' } });
     h2.tenant.addMailbox(MAILBOX_ID(2), { b: { internetMessageId: IMID(1), folderId: 'inbox' } });
     h2.tokens.getToken.mockRejectedValue(new Error('no credential'));
-    const failed = await run(
-      h2,
-      params([
-        { mailboxId: MAILBOX_ID(1), messageIds: ['a'], expectedInternetMessageIds: [IMID(1)] },
-        { mailboxId: MAILBOX_ID(2), messageIds: ['b'], expectedInternetMessageIds: [IMID(1)] },
-      ])
-    );
+    const failed = await run(h2, params([mbox(1, ['a']), mbox(2, ['b'])]));
     expect(failed.stoppedBy).toBe('auth_failed');
     expect(failed.mailboxes.flatMap(m => m.messages.map(x => x.outcome))).toEqual([
       'not_attempted',
@@ -379,12 +359,7 @@ describe('remove_messages', () => {
       r => r.method === 'POST',
       () => json(403, { error: { code: 'ErrorAccessDenied', message: 'MAILBOX-CONTENT-MARKER' } })
     );
-    const result = await run(
-      h,
-      params([
-        { mailboxId: MAILBOX_ID(1), messageIds: ['a'], expectedInternetMessageIds: [IMID(1)] },
-      ])
-    );
+    const result = await run(h, params([mbox(1, ['a'])]));
     expect(outcomesOf(result)).toEqual([[['a', 'error', 'forbidden']]]);
     expect(JSON.stringify(result)).not.toContain('MARKER');
     expectOnlyAllowedRequests(h);
@@ -393,12 +368,7 @@ describe('remove_messages', () => {
   it('never reads the moved message the move answers with', async () => {
     const h = harness();
     h.tenant.addMailbox(MAILBOX_ID(1), { a: { internetMessageId: IMID(1), folderId: 'inbox' } });
-    const result = await run(
-      h,
-      params([
-        { mailboxId: MAILBOX_ID(1), messageIds: ['a'], expectedInternetMessageIds: [IMID(1)] },
-      ])
-    );
+    const result = await run(h, params([mbox(1, ['a'])]));
     expect(JSON.stringify(result)).not.toContain('BODY-CONTENT-MARKER');
     expectOnlyAllowedRequests(h);
   });
@@ -410,11 +380,7 @@ describe('remove_messages', () => {
         m1: { internetMessageId: IMID(1), folderId: 'inbox' },
         m2: { internetMessageId: IMID(1), folderId: 'inbox' },
       });
-      return {
-        mailboxId: MAILBOX_ID(i + 1),
-        messageIds: ['m1', 'm2'],
-        expectedInternetMessageIds: [IMID(1)],
-      };
+      return mbox(i + 1, ['m1', 'm2']);
     });
     let inFlight = 0;
     let peak = 0;
@@ -440,16 +406,7 @@ describe('remove_messages', () => {
     h.tenant.addMailbox(MAILBOX_ID(1), {
       'AAMk/+=_-': { internetMessageId: IMID(1), folderId: 'inbox' },
     });
-    const result = await run(
-      h,
-      params([
-        {
-          mailboxId: MAILBOX_ID(1),
-          messageIds: ['AAMk/+=_-'],
-          expectedInternetMessageIds: [IMID(1)],
-        },
-      ])
-    );
+    const result = await run(h, params([mbox(1, ['AAMk/+=_-'])]));
     expect(outcomesOf(result)).toEqual([[['AAMk/+=_-', 'moved', undefined]]]);
     expectOnlyAllowedRequests(h);
   });

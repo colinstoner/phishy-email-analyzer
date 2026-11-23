@@ -469,7 +469,8 @@ export type GraphBrokerCallOutcome =
   | 'refused' // the broker answered but would not run the operation (its reason is logged)
   | 'timeout' // no answer within the feature's time budget
   | 'throttled' // Lambda throttled the invocation (the broker's concurrency limit)
-  | 'invoke_error' // the Invoke call itself failed (permissions, network, no such function)
+  | 'invoke_error' // the Invoke call itself failed (network, or an error of unknown effect)
+  | 'invoke_rejected' // Lambda refused before running the function (permissions, no such function; write broker only)
   | 'function_error' // the broker crashed or timed out
   | 'oversized' // the response was larger than the operation can legitimately return
   | 'malformed' // the response did not match the operation's schema

@@ -360,6 +360,9 @@ Rules:
         AssertDescription: GraphWriteCertificateSecretArn is required with GraphWriteClientId
       - Assert: !Not [!Equals [!Ref GraphTenantId, '']]
         AssertDescription: GraphTenantId is required for the write broker
+      # Plain text comparisons: a different spelling of the same value is not
+      # caught here, and the write broker cannot repeat the check (it is never
+      # given the read registration); see AWS.md
       - Assert: !Not [!Equals [!Ref GraphWriteClientId, !Ref GraphReadClientId]]
         AssertDescription: The write app registration must be a different app from the read one
       - Assert: !Not [!Equals [!Ref GraphWriteCertificateSecretArn, !Ref GraphCertificateSecretArn]]

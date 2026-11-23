@@ -25,12 +25,23 @@
  * Read-only: GET requests only. What it returns is hostile data.
  */
 
-import { EmailMessage, ExtractedEmailData, RetrievedOriginal } from '../../types';
+import {
+  EmailMessage,
+  ExtractedEmailData,
+  RetrievedOriginal,
+  RetrievedOriginalIdentity,
+} from '../../types';
 import { createLogger } from '../../utils/logger';
 import { OriginalFetchOutcome, emitOriginalFetchMetric } from '../../utils/metrics';
 import { domainMatches, extractEmailAddress } from '../../utils/validation';
 import { GraphClient } from './graph.client';
-import { MAX_CLAIMED_TIME_LENGTH, MAX_SUBJECT_LENGTH } from './graph.limits';
+import {
+  GRAPH_ITEM_ID_PATTERN,
+  MAX_ADDRESS_LENGTH,
+  MAX_CLAIMED_TIME_LENGTH,
+  MAX_SUBJECT_LENGTH,
+  MESSAGE_ID_PATTERN,
+} from './graph.limits';
 import { GraphAuthError, GraphError } from './graph.errors';
 import { MessageSummary, findMessagesBySender, getMessageHeaders } from './mail.operations';
 
@@ -405,6 +416,7 @@ async function lookUp(
 
   // Validated above; re-serialized so only a well-formed timestamp leaves here
   const receivedAt = new Date(Date.parse(match.summary.receivedDateTime ?? '')).toISOString();
+  const identity = storedIdentity(match.summary);
   return {
     outcome: 'found',
     reason: match.recoverable ? 'recoverable_items' : 'mailbox',
@@ -413,7 +425,36 @@ async function lookUp(
       receivedAt,
       headers: headers.items.map(header => ({ name: header.name, value: header.value })),
       headersTruncated: headers.truncated,
+      ...(identity ? { identity } : {}),
     },
+  };
+}
+
+/**
+ * The matched message as the mailbox stores it (Graph ID, Internet
+ * Message-ID, From address, subject), shape-checked. These come from
+ * Exchange's copy of the message, not from the forward's pasted text; the
+ * values themselves were still written by the sender and are hostile.
+ */
+function storedIdentity(summary: MessageSummary): RetrievedOriginalIdentity | undefined {
+  if (!GRAPH_ITEM_ID_PATTERN.test(summary.id)) {
+    return undefined;
+  }
+  const internetMessageId = summary.internetMessageId?.trim();
+  const senderAddress = summary.fromAddress?.trim().toLowerCase();
+  return {
+    messageId: summary.id,
+    ...(internetMessageId && MESSAGE_ID_PATTERN.test(internetMessageId)
+      ? { internetMessageId }
+      : {}),
+    ...(senderAddress &&
+    senderAddress.length <= MAX_ADDRESS_LENGTH &&
+    /^[^\s<>@]+@[^\s<>@]+$/.test(senderAddress)
+      ? { senderAddress }
+      : {}),
+    ...(summary.subject !== undefined && summary.subject.length <= MAX_SUBJECT_LENGTH
+      ? { subject: summary.subject }
+      : {}),
   };
 }
 

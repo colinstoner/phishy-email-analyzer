@@ -180,6 +180,13 @@ describe('fetchOriginalMessage', () => {
       receivedAt: '2026-11-16T16:00:07.000Z',
       headers: HEADERS,
       headersTruncated: false,
+      // The message as the mailbox stored it: a live removal's anchor
+      identity: {
+        messageId: 'AAMkAG-original-7731',
+        internetMessageId: '<msg-7731@mail.example.org>',
+        senderAddress: 'billing-alerts@example.org',
+        subject: 'Invoice 7731 overdue',
+      },
     });
 
     expect(graph.requests.map(request => request.method)).toEqual(['GET', 'GET', 'GET']);

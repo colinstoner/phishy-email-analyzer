@@ -65,13 +65,44 @@ function isThrottle(error: unknown): boolean {
 }
 
 /**
- * Failures after which the write broker certainly did nothing: the request
- * was never sent, or the broker answered that it would not run it, or
- * Lambda refused the invocation. For every other failure the broker may
- * have moved some messages.
+ * Lambda API errors raised before the function runs at all: the caller may
+ * not invoke it, it does not exist, or the request itself was refused. The
+ * write broker certainly did nothing. Listed by name; anything else is
+ * `invoke_error`, whose effect is unknown.
+ * https://docs.aws.amazon.com/lambda/latest/api/API_Invoke.html#API_Invoke_Errors
  */
-export function failureChangedNothing(failure: GraphWriteCallFailure): boolean {
-  return failure === 'invalid_request' || failure === 'refused' || failure === 'throttled';
+const PRE_EXECUTION_ERRORS = new Set([
+  'AccessDeniedException',
+  'ResourceNotFoundException',
+  'InvalidParameterValueException',
+  'InvalidRequestContentException',
+  'RequestTooLargeException',
+  'ResourceConflictException',
+  'ResourceNotReadyException',
+  'UnsupportedMediaTypeException',
+]);
+
+function isPreExecution(error: unknown): boolean {
+  return error instanceof Error && PRE_EXECUTION_ERRORS.has(error.name);
+}
+
+/**
+ * Failures after which the write broker certainly did nothing: the request
+ * was never sent, Lambda refused or rejected the invocation before running
+ * it, or the broker answered with a refusal it gives before any Graph
+ * request (`invalid_request`, `write_disabled`, `misconfigured`). A refusal
+ * of `internal_error` can follow work already done, so it is not one of
+ * them; neither is a timeout, a crash, an unexpected invoke error or an
+ * unusable answer. For those the broker may have moved some messages.
+ */
+export function failureChangedNothing(
+  failure: GraphWriteCallFailure,
+  refusal?: GraphWriteRefusal
+): boolean {
+  if (failure === 'refused') {
+    return refusal !== undefined && refusal !== 'internal_error';
+  }
+  return failure === 'invalid_request' || failure === 'throttled' || failure === 'invoke_rejected';
 }
 
 export class GraphWriteBrokerClient {
@@ -100,7 +131,9 @@ export class GraphWriteBrokerClient {
           ? 'timeout'
           : isThrottle(error)
             ? 'throttled'
-            : 'invoke_error';
+            : isPreExecution(error)
+              ? 'invoke_rejected'
+              : 'invoke_error';
       detail = { error: error instanceof Error ? error.name : 'unknown' };
       outcome = { ok: false, failure };
     }

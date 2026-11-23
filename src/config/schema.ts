@@ -175,6 +175,19 @@ const CampaignResponseConfigSchema = z.object({
       mode: z.enum(['dry_run', 'live']).default('dry_run'),
       /** Name or ARN of the Graph write broker function (used only in `live` mode) */
       writeBrokerFunctionName: z.string().max(170).optional(),
+      /**
+       * Live only: a copy is eligible only if it arrived within this many
+       * hours of the anchor (the reported original as the reporter's
+       * mailbox stored it). Default 6.
+       */
+      windowHours: z.number().int().min(1).max(72).optional(),
+      /**
+       * Live only: a copy with a different Internet Message-ID from the
+       * anchor's is eligible only if both message-trace sizes are known and
+       * differ by at most this percentage (same sender and exact subject
+       * still required). 0 admits only the anchor's own Message-ID. Default 1.
+       */
+      sizeTolerancePercent: z.number().min(0).max(10).optional(),
     })
     .optional(),
   /** Shortest gap between incident updates to the security team */
@@ -551,6 +564,7 @@ export const GraphWriteBrokerConfigSchema = z
     certificate: z.string().optional(),
     allowedMailboxIds: z
       .array(z.string().regex(GRAPH_GUID, 'allowedMailboxIds entries must be Entra object GUIDs'))
+      .min(1, 'allowedMailboxIds is set but lists no mailbox')
       .max(1000)
       .optional(),
     logLevel: z.enum(['debug', 'info', 'warn', 'error']).default('info'),

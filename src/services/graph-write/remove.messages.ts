@@ -7,9 +7,11 @@
  * mailbox):
  *   1. outside the allowlist → every message `not_allowed`, no request made
  *   2. GET the Deleted Items folder's ID (once)
- *   3. per message: GET it by ID with `$select=internetMessageId,parentFolderId`
+ *   3. per message: GET it by ID with
+ *      `$select=internetMessageId,parentFolderId,from,subject,receivedDateTime`
  *      - 404 → `not_found` (left alone)
- *      - Internet Message-ID not one of the expected → `mismatch` (left alone)
+ *      - any expected value not met (Internet Message-ID, From address,
+ *        subject hash, received window) → `mismatch` (left alone)
  *      - already in Deleted Items → `already_deleted`
  *      - otherwise POST move to `deleteditems` → `moved`
  *
@@ -30,12 +32,14 @@ import {
   MailboxOutcome,
   MessageOutcome,
   RemovalReason,
+  RemoveMessage,
   RemoveMessagesMailbox,
   RemoveMessagesParams,
   RemoveMessagesResult,
   WRITE_MAILBOX_CONCURRENCY,
 } from './write.protocol';
-import { GraphWriteClient, GraphWriteRequestError } from './write.client';
+import { GraphWriteClient, GraphWriteRequestError, MessageState } from './write.client';
+import { subjectKeyHash } from '../graph/subject.key';
 
 /** Time kept back from the budget to build and return the answer */
 const ANSWER_RESERVE_MS = 500;
@@ -54,6 +58,39 @@ type StopReason = 'time_budget' | 'throttled' | 'auth_failed';
 /** Angle brackets and surrounding space removed: the form Message-IDs are compared in */
 export function bareMessageId(value: string): string {
   return value.trim().replace(/^</, '').replace(/>$/, '');
+}
+
+/**
+ * Does the message as stored still match every expected value? Internet
+ * Message-ID exact (angle brackets aside), From address equal (case aside),
+ * the SHA-256 of the normalized subject equal, and received inside the
+ * window. Any missing value is a mismatch. Nothing compared is kept.
+ */
+export function matchesExpected(
+  current: Extract<MessageState, { kind: 'found' }>,
+  expected: RemoveMessage
+): boolean {
+  if (
+    !current.internetMessageId ||
+    bareMessageId(current.internetMessageId) !== bareMessageId(expected.expectedInternetMessageId)
+  ) {
+    return false;
+  }
+  if (current.senderAddress?.trim().toLowerCase() !== expected.expectedSenderAddress) {
+    return false;
+  }
+  if (
+    current.subject === undefined ||
+    subjectKeyHash(current.subject) !== expected.expectedSubjectSha256
+  ) {
+    return false;
+  }
+  const received = Date.parse(current.receivedDateTime ?? '');
+  return (
+    Number.isFinite(received) &&
+    received >= Date.parse(expected.receivedFrom) &&
+    received <= Date.parse(expected.receivedTo)
+  );
 }
 
 interface RunState {
@@ -103,7 +140,7 @@ async function removeInMailbox(
 ): Promise<MessageOutcome[]> {
   const outcomes: MessageOutcome[] = [];
   const rest = (from: number, outcome: MessageOutcome['outcome'], reason: RemovalReason): void => {
-    for (const messageId of mailbox.messageIds.slice(from)) {
+    for (const { messageId } of mailbox.messages.slice(from)) {
       outcomes.push({ messageId, outcome, reason });
     }
   };
@@ -138,10 +175,9 @@ async function removeInMailbox(
     return outcomes;
   }
 
-  const expected = new Set(mailbox.expectedInternetMessageIds.map(bareMessageId));
-
-  for (let index = 0; index < mailbox.messageIds.length; index++) {
-    const messageId = mailbox.messageIds[index];
+  for (let index = 0; index < mailbox.messages.length; index++) {
+    const expected = mailbox.messages[index];
+    const messageId = expected.messageId;
     if (stopped()) {
       rest(index, 'not_attempted', state.stoppedBy ?? 'stopped');
       return outcomes;
@@ -154,9 +190,9 @@ async function removeInMailbox(
         outcomes.push({ messageId, outcome: 'not_found' });
         continue;
       }
-      // Exact comparison (brackets aside): a message that is not one the
-      // approved scope recorded is never moved
-      if (!current.internetMessageId || !expected.has(bareMessageId(current.internetMessageId))) {
+      // Every expected value must hold: a message that is not provably the
+      // one the approved scope recorded is never moved
+      if (!matchesExpected(current, expected)) {
         outcomes.push({ messageId, outcome: 'mismatch' });
         continue;
       }
@@ -213,7 +249,7 @@ export async function removeMessages(
     if (allowed && !allowed.has(mailbox.mailboxId.toLowerCase())) {
       results.set(
         index,
-        mailbox.messageIds.map(messageId => ({ messageId, outcome: 'not_allowed' as const }))
+        mailbox.messages.map(({ messageId }) => ({ messageId, outcome: 'not_allowed' as const }))
       );
       return false;
     }
@@ -234,7 +270,7 @@ export async function removeMessages(
           // removeInMailbox handles its own failures; this is belt and braces
           results.set(
             next.index,
-            next.mailbox.messageIds.map(messageId => ({
+            next.mailbox.messages.map(({ messageId }) => ({
               messageId,
               outcome: 'error' as const,
               reason: 'move_unconfirmed' as const,

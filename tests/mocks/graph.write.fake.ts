@@ -8,10 +8,38 @@
  */
 
 import type { GraphAccessTokenProvider } from '../../src/services/graph/graph.auth';
+import { subjectKeyHash } from '../../src/services/graph/subject.key';
+import type { RemoveMessage } from '../../src/services/graph-write/write.protocol';
+
+/** The defaults every fake message has unless a test says otherwise */
+export const SENDER = 'billing@examp1e-billing.test';
+export const SUBJECT = 'Invoice 2291 overdue';
+export const RECEIVED = '2026-11-17T09:14:00Z';
 
 export interface FakeMessage {
   internetMessageId?: string;
   folderId: string;
+  /** null: the stored message has none */
+  sender?: string | null;
+  subject?: string | null;
+  received?: string | null;
+}
+
+/** What the write broker is told to expect for one copy (defaults match the fake's) */
+export function expectation(
+  messageId: string,
+  internetMessageId: string,
+  extra: Partial<RemoveMessage> = {}
+): RemoveMessage {
+  return {
+    messageId,
+    expectedInternetMessageId: internetMessageId,
+    expectedSenderAddress: SENDER,
+    expectedSubjectSha256: subjectKeyHash(SUBJECT),
+    receivedFrom: '2026-11-17T03:14:00.000Z',
+    receivedTo: '2026-11-17T15:14:00.000Z',
+    ...extra,
+  };
 }
 
 export interface FakeMailbox {
@@ -37,7 +65,7 @@ export interface Override {
 }
 
 export const ALLOWED_SHAPES = [
-  'GET /users/{}/messages/{}?$select=internetMessageId,parentFolderId',
+  'GET /users/{}/messages/{}?$select=internetMessageId,parentFolderId,from,subject,receivedDateTime',
   'GET /users/{}/mailFolders/deleteditems?$select=id',
   'POST /users/{}/messages/{}/move',
 ];
@@ -124,9 +152,13 @@ export class FakeWriteTenant {
       return json(404, { error: { code: 'ErrorItemNotFound', message: 'secret item text' } });
     }
     if (method === 'GET') {
+      const sender = message.sender === undefined ? SENDER : message.sender;
       return json(200, {
         internetMessageId: message.internetMessageId ?? null,
         parentFolderId: message.folderId,
+        from: sender === null ? null : { emailAddress: { name: 'Accounts', address: sender } },
+        subject: message.subject === undefined ? SUBJECT : message.subject,
+        receivedDateTime: message.received === undefined ? RECEIVED : message.received,
       });
     }
     if ((request.body as { destinationId?: string })?.destinationId !== 'deleteditems') {

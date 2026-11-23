@@ -4,8 +4,9 @@
  *
  * There is exactly one operation, `remove_messages`: for each named mailbox,
  * move each named message to that mailbox's Deleted Items, after re-reading
- * it and confirming its Internet Message-ID is one the approved scope
- * recorded. There is no path, URL, folder, filter, query or "call Graph"
+ * it and confirming that ALL of its own expected values still hold: its
+ * Internet Message-ID, its From address, the SHA-256 of its normalized
+ * subject, and that it was received inside the given window. There is no path, URL, folder, filter, query or "call Graph"
  * field, and no field is ever used as one. A new write capability is a new
  * operation added here, in code, where it is reviewed (CLAUDE.md
  * invariant 7).
@@ -22,19 +23,22 @@
  *   `unknown`. Totals are recomputed from the outcomes, never taken from the
  *   broker.
  *
- * This file imports only Zod and the shared limits, so loading it can never
- * construct a Graph client.
+ * This file imports only Zod, the shared limits and the subject-hash
+ * pattern, so loading it can never construct a Graph client.
  */
 
 import { z } from 'zod';
 import {
   DIRECTORY_ID_PATTERN,
   GRAPH_ITEM_ID_PATTERN,
+  MAX_ADDRESS_LENGTH,
   MAX_REPORTED_COPY_IDS,
   MESSAGE_ID_PATTERN,
 } from '../graph/graph.limits';
+import { SUBJECT_HASH_PATTERN } from '../graph/subject.key';
 
-export const GRAPH_WRITE_VERSION = 1;
+/** 2: each message carries its own expected values (sender, subject hash, window) */
+export const GRAPH_WRITE_VERSION = 2;
 
 export const GRAPH_WRITE_OPERATIONS = ['remove_messages'] as const;
 export type GraphWriteOperation = (typeof GRAPH_WRITE_OPERATIONS)[number];
@@ -63,8 +67,8 @@ export const MAX_WRITE_MAILBOXES_PER_CALL = 50;
 export const MAX_WRITE_MESSAGES_PER_MAILBOX = MAX_REPORTED_COPY_IDS;
 /** Most messages one call may name across all its mailboxes */
 export const MAX_WRITE_MESSAGES_PER_CALL = 100;
-/** Most Internet Message-IDs one mailbox may list as expected */
-export const MAX_EXPECTED_INTERNET_MESSAGE_IDS = MAX_REPORTED_COPY_IDS;
+/** Widest received-time window a copy may be checked against (72 hours either side) */
+export const MAX_RECEIVED_WINDOW_MS = 2 * 72 * 3_600_000;
 /** Shortest and longest time budget a caller may give one call */
 export const MIN_WRITE_BUDGET_MS = 1000;
 export const MAX_WRITE_BUDGET_MS = 80_000;
@@ -76,6 +80,10 @@ export const GRAPH_WRITE_MAX_RESPONSE_BYTES = 256 * 1024;
 const MailboxId = z.string().regex(DIRECTORY_ID_PATTERN);
 const MessageId = z.string().regex(GRAPH_ITEM_ID_PATTERN);
 const InternetMessageId = z.string().regex(MESSAGE_ID_PATTERN);
+const SenderAddress = z
+  .string()
+  .max(MAX_ADDRESS_LENGTH)
+  .regex(/^[^\s<>@A-Z]+@[^\s<>@A-Z]+$/, 'a lower-case address');
 
 function unique(values: string[]): boolean {
   return new Set(values.map(value => value.toLowerCase())).size === values.length;
@@ -83,25 +91,46 @@ function unique(values: string[]): boolean {
 
 // ── Request ─────────────────────────────────────────────────────────────────
 
+/**
+ * One copy to move, with everything it must still be when the write broker
+ * re-reads it. Each value came from Phishy's own lookups (the anchor and the
+ * copy's stored details); the subject travels only as a SHA-256 of its
+ * normalized form, so no email text reaches the write function.
+ */
+const RemoveMessage = z
+  .strictObject({
+    /** Graph message ID in that mailbox, exactly as the approved scope names it */
+    messageId: MessageId,
+    /** The copy's own Internet Message-ID, as the lookup read it */
+    expectedInternetMessageId: InternetMessageId,
+    /** The anchor's From address */
+    expectedSenderAddress: SenderAddress,
+    /** `subjectKeyHash` of the anchor's subject */
+    expectedSubjectSha256: z.string().regex(SUBJECT_HASH_PATTERN),
+    /** The copy must have been received inside this window */
+    receivedFrom: z.iso.datetime(),
+    receivedTo: z.iso.datetime(),
+  })
+  .refine(
+    message => {
+      const span = Date.parse(message.receivedTo) - Date.parse(message.receivedFrom);
+      return span >= 0 && span <= MAX_RECEIVED_WINDOW_MS;
+    },
+    { message: 'the received window is empty or too wide' }
+  );
+
 const RemoveMessagesMailbox = z
   .strictObject({
     /** Entra directory object ID of the mailbox, as the approved scope recorded it */
     mailboxId: MailboxId,
-    /** Graph message IDs in that mailbox, exactly as the approved scope names them */
-    messageIds: z.array(MessageId).min(1).max(MAX_WRITE_MESSAGES_PER_MAILBOX),
-    /**
-     * The Internet Message-IDs the approved scope recorded for those copies.
-     * A message whose own Internet Message-ID is not one of these is refused
-     * (`mismatch`) and left alone.
-     */
-    expectedInternetMessageIds: z
-      .array(InternetMessageId)
-      .min(1)
-      .max(MAX_EXPECTED_INTERNET_MESSAGE_IDS),
+    messages: z.array(RemoveMessage).min(1).max(MAX_WRITE_MESSAGES_PER_MAILBOX),
   })
-  .refine(mailbox => new Set(mailbox.messageIds).size === mailbox.messageIds.length, {
-    message: 'message IDs must be unique within a mailbox',
-  });
+  .refine(
+    mailbox => new Set(mailbox.messages.map(m => m.messageId)).size === mailbox.messages.length,
+    {
+      message: 'message IDs must be unique within a mailbox',
+    }
+  );
 
 const RemoveMessagesParams = z
   .strictObject({
@@ -120,7 +149,7 @@ const RemoveMessagesParams = z
   })
   .refine(
     params =>
-      params.mailboxes.reduce((n, m) => n + m.messageIds.length, 0) <= MAX_WRITE_MESSAGES_PER_CALL,
+      params.mailboxes.reduce((n, m) => n + m.messages.length, 0) <= MAX_WRITE_MESSAGES_PER_CALL,
     { message: 'too many messages in one call' }
   );
 
@@ -141,6 +170,7 @@ export const GraphWriteRequestSchema = z.discriminatedUnion('operation', [
 export type GraphWriteRequest = z.infer<typeof GraphWriteRequestSchema>;
 export type RemoveMessagesParams = z.infer<typeof RemoveMessagesParams>;
 export type RemoveMessagesMailbox = z.infer<typeof RemoveMessagesMailbox>;
+export type RemoveMessage = z.infer<typeof RemoveMessage>;
 
 // ── Response ────────────────────────────────────────────────────────────────
 
@@ -314,7 +344,7 @@ export function reconcileRemovalResult(
     const messages = reported.get(mailbox.mailboxId.toLowerCase());
     return {
       mailboxId: mailbox.mailboxId,
-      messages: mailbox.messageIds.map(messageId => {
+      messages: mailbox.messages.map(({ messageId }) => {
         const found = messages?.get(messageId);
         return found
           ? { messageId, outcome: found.outcome, ...(found.reason ? { reason: found.reason } : {}) }

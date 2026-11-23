@@ -85,18 +85,83 @@ export interface RemovalMailbox {
   /** Graph message IDs Phishy's blast-radius lookup matched for this campaign */
   messageIds: string[];
   /**
-   * The Internet Message-IDs of those copies, as the same lookup read them.
-   * A live removal moves a copy only when its Internet Message-ID, re-read
-   * at removal time, is one of these; a mailbox without them (a scope
-   * proposed before they were recorded) is not sent to the write tier.
+   * A live scope only: for each copy in `messageIds`, what the write broker
+   * must find when it re-reads the copy, or it refuses to move it. Pairs,
+   * never sets: each copy carries its own expected values.
    */
-  internetMessageIds?: string[];
+  verify?: LiveCopyCheck[];
   folder: BlastRadiusFolder;
   isRead?: boolean;
 }
 
+/** What one copy must still be, at removal time, to be moved */
+export interface LiveCopyCheck {
+  messageId: string;
+  internetMessageId: string;
+  /** The anchor's From address, lower case */
+  senderAddress: string;
+  /** `subjectKeyHash` of the anchor's subject */
+  subjectHash: string;
+  /** The allowed received-time window (ISO) */
+  receivedFrom: string;
+  receivedTo: string;
+}
+
+/**
+ * The incident's anchor: the original message Phishy's own original-message
+ * lookup found in a reporter's mailbox, as Exchange stored it, and that the
+ * reporter's blast-radius row shows the reporter forwarded. Only an incident
+ * with one may propose a live removal. Every string is hostile (the sender
+ * wrote it) and is compared as data or shown through `displayText`.
+ */
+export interface RemovalAnchor {
+  /** The reporter's mailbox (Entra object ID) and the copy's Graph ID in it */
+  mailboxId: string;
+  messageId: string;
+  internetMessageId: string;
+  /** From address as stored, lower case */
+  senderAddress: string;
+  /** Subject as stored (at most 255 characters) */
+  subject: string;
+  subjectHash: string;
+  /** When the reporter's mailbox received it (ISO) */
+  receivedAt: string;
+  /** Message-trace size of the reporter's copy, when the trace route ran */
+  size?: number;
+}
+
+/** Why an incident in a live deployment can only have a dry-run removal */
+export type LiveUnavailableReason = 'no_anchor' | 'not_malicious' | 'no_reports';
+
+/** What a live removal's scope rests on, for the approver */
+export interface LiveRemovalBasis {
+  anchor: RemovalAnchor;
+  windowHours: number;
+  sizeTolerancePercent: number;
+  /** Distinct Internet Message-IDs among the included copies */
+  distinctMessages: number;
+  /** Included copies whose Internet Message-ID is the anchor's */
+  sameMessageIdAsAnchor: number;
+  /** Included copies admitted on size instead (a different Message-ID) */
+  matchedOnSize: number;
+  firstReceivedAt?: string;
+  lastReceivedAt?: string;
+  /** Copies the lookup matched that are not provably the same email: not included */
+  excluded: number;
+}
+
 export interface RemovalScope {
   kind: 'remove_messages';
+  /**
+   * `live` only for a scope computed under the live rules (an anchor, and
+   * only copies provably the same email); absent means a dry run. Part of
+   * the scope, so of its hash and of what the reference approves: a dry-run
+   * proposal can never be carried out live.
+   */
+  mode?: 'live';
+  live?: LiveRemovalBasis;
+  /** Set on a dry-run scope when this deployment is live: why it is not live */
+  liveUnavailable?: LiveUnavailableReason;
   mailboxes: RemovalMailbox[];
   messageCount: number;
   limits: { maxMailboxes: number; maxMessages: number };
@@ -318,6 +383,8 @@ export interface IncidentSummary {
   analysisId?: string;
   /** Plain words for what opened the incident */
   detectedBy: string;
+  /** The first confirmed anchor a report supplied (see `RemovalAnchor`); never replaced */
+  removalAnchor?: RemovalAnchor;
   /**
    * Set when the reach trigger opened the incident (a malicious report whose
    * blast-radius lookup found enough delivered recipients) rather than the

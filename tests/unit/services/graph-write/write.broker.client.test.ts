@@ -11,15 +11,13 @@ import {
 } from '../../../../src/services/graph-write/write.broker.client';
 import { GRAPH_WRITE_MAX_RESPONSE_BYTES } from '../../../../src/services/graph-write/write.protocol';
 import * as metrics from '../../../../src/utils/metrics';
-import { ACTION_ID, IMID, MAILBOX_ID } from '../../../mocks/graph.write.fake';
+import { ACTION_ID, IMID, MAILBOX_ID, expectation } from '../../../mocks/graph.write.fake';
 
 type SendArgs = [InvokeCommand, { abortSignal?: AbortSignal }?];
 
 const PARAMS = {
   actionId: ACTION_ID,
-  mailboxes: [
-    { mailboxId: MAILBOX_ID(1), messageIds: ['AAMkAG-1'], expectedInternetMessageIds: [IMID(1)] },
-  ],
+  mailboxes: [{ mailboxId: MAILBOX_ID(1), messages: [expectation('AAMkAG-1', IMID(1))] }],
   budgetMs: 30_000,
 };
 const RESULT = {
@@ -67,7 +65,7 @@ describe('GraphWriteBrokerClient', () => {
     expect(command.input.FunctionName).toBe('phishy-graph-write-broker');
     expect(command.input.InvocationType).toBe('RequestResponse');
     expect(JSON.parse(Buffer.from(command.input.Payload as Uint8Array).toString('utf8'))).toEqual({
-      version: 1,
+      version: 2,
       operation: 'remove_messages',
       params: PARAMS,
     });
@@ -128,10 +126,27 @@ describe('GraphWriteBrokerClient', () => {
     expect(await client(send).removeMessages(PARAMS, 5)).toEqual({ ok: false, failure: 'timeout' });
   });
 
+  it.each(['AccessDeniedException', 'ResourceNotFoundException', 'InvalidParameterValueException'])(
+    'reports %s as rejected before the function ran',
+    async name => {
+      const send = jest.fn(() => Promise.reject(Object.assign(new Error('no'), { name })));
+      expect(await client(send).removeMessages(PARAMS, 5000)).toEqual({
+        ok: false,
+        failure: 'invoke_rejected',
+      });
+    }
+  );
+
   it('knows which failures certainly changed nothing', () => {
-    expect(failureChangedNothing('refused')).toBe(true);
+    for (const refusal of ['invalid_request', 'write_disabled', 'misconfigured'] as const) {
+      expect(failureChangedNothing('refused', refusal)).toBe(true);
+    }
+    // internal_error can follow work already done
+    expect(failureChangedNothing('refused', 'internal_error')).toBe(false);
+    expect(failureChangedNothing('refused')).toBe(false);
     expect(failureChangedNothing('invalid_request')).toBe(true);
     expect(failureChangedNothing('throttled')).toBe(true);
+    expect(failureChangedNothing('invoke_rejected')).toBe(true);
     for (const failure of [
       'timeout',
       'invoke_error',

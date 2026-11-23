@@ -708,6 +708,9 @@ export class EmailParserService {
       receivedAt: Number.isNaN(receivedAt) ? undefined : new Date(receivedAt).toISOString(),
       headers,
       headersTruncated: original.headersTruncated,
+      // Phishy's own lookup produced it (never the forward's text); carried
+      // only as data for a live campaign removal's anchor, never prompted
+      ...(original.identity ? { identity: { ...original.identity } } : {}),
     };
 
     // The claimed sender is now read from the retrieved original (see

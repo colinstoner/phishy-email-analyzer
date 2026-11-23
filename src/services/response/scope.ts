@@ -258,9 +258,6 @@ export function computeRemovalScope(reach: IncidentReach, limits: RemovalLimits)
       address: recipient.address.toLowerCase(),
       mailboxId: recipient.mailboxId,
       messageIds: [...ids],
-      ...(recipient.internetMessageIds?.length
-        ? { internetMessageIds: [...recipient.internetMessageIds] }
-        : {}),
       folder: recipient.folder ?? 'unknown',
       ...(recipient.isRead !== undefined ? { isRead: recipient.isRead } : {}),
     });

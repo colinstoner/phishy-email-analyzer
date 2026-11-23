@@ -1,34 +1,35 @@
 /**
- * The live removal executor: carries out an approved, re-checked removal by
- * asking the Graph write broker (a separate function with its own
- * credential) to move exactly those copies to Deleted Items.
+ * The live removal executor: carries out an approved, re-checked LIVE
+ * removal by asking the Graph write broker (a separate function with its
+ * own credential) to move exactly those copies to Deleted Items.
  *
  * Selected by `createRemovalExecutor` only when
  * `campaignResponse.removal.mode` is `live` and a write broker function is
- * configured; the dry run stays the default. This module never talks to
- * Microsoft and holds no Graph credential: it only invokes the write broker
- * through `GraphWriteBrokerClient`.
+ * configured, and run only for an action whose scope was proposed live
+ * (`scope.mode === 'live'`, computed by `computeLiveRemovalScope` from the
+ * incident's anchor). This module never talks to Microsoft and holds no
+ * Graph credential: it only invokes the write broker.
  *
  * What it sends, and never more:
  * - `recheckRemoval` runs first, exactly as for the dry run: only approved
  *   message IDs the incident's latest reach still shows are kept, per
  *   approved mailbox; copies new since approval are never included and the
  *   scope is never widened.
- * - Per mailbox: the approved scope's mailbox ID, those message IDs, and the
- *   Internet Message-IDs the scope recorded for them. A mailbox whose scope
- *   has no recorded Internet Message-ID (proposed before they were recorded)
- *   is not sent at all: nothing could be checked, so nothing is attempted.
- *   No address is sent.
+ * - Per copy, the check the scope recorded for it (`verify`): its own
+ *   Internet Message-ID, the anchor's From address, the SHA-256 of the
+ *   anchor's normalized subject and the allowed received window. The write
+ *   broker refuses the copy unless all of them still hold. No address or
+ *   email text is sent.
  * - In batches within the write protocol's bounds, one at a time, while the
  *   main function has time; what is left is reported `not_attempted`.
  *
  * What it returns: `dryRun: false`, a summary for the approver by outcome,
  * `removalOutcome` (the counts, recorded in the audit row), and `removed`:
  * per mailbox, the copies the write broker reported `moved`. That list, and
- * only that list, is what makes `CampaignResponseService.sendRemovalNotices`
- * email anyone (by the address the approved scope recorded, safe-domain
- * checked). When the write broker's answer is missing or unusable, every
- * message in that call is `unknown`: nobody is told their copy was removed.
+ * only that list, makes `CampaignResponseService.sendRemovalNotices` email
+ * anyone. When the write broker's answer is missing or unusable, every copy
+ * in that call is `unknown`: nobody is told their copy was removed, and the
+ * approver is told so and how to check.
  *
  * Logs: the incident and action IDs and counts. Never an address, a message
  * ID or anything from the suspicious email.
@@ -49,9 +50,9 @@ import {
   emptyRemovalCounts,
   reconcileRemovalResult,
 } from '../graph-write/write.protocol';
-import { MESSAGE_ID_PATTERN } from '../graph/graph.limits';
 import { displayText } from './display';
 import type { RemovalExecutionOptions, RemovalExecutor } from './executors';
+import { computeLiveRemovalScope } from './removal.eligibility';
 import {
   ActionResult,
   IncidentReach,
@@ -66,10 +67,15 @@ const logger = createLogger('campaign-response');
 
 /** Main-function time kept for the removal notices and the approver's reply */
 const MAIN_RESERVE_MS = 25_000;
-/** Time between the write broker's own deadline and the moment this stops waiting */
-const CALL_OVERHEAD_MS = 3000;
-/** Mailboxes with errors listed by address in the approver's reply */
-const MAX_LISTED_ERROR_MAILBOXES = 10;
+/**
+ * Time between the write broker's own deadline and the moment this stops
+ * waiting: the invoke round trip plus a cold start (bundle load, the
+ * certificate from Secrets Manager, the first token), so a cold write
+ * broker still answers before the main function gives up on it.
+ */
+export const CALL_OVERHEAD_MS = 10_000;
+/** Mailboxes listed by address in the approver's reply */
+const MAX_LISTED_MAILBOXES = 10;
 
 export interface LiveRemovalExecutorOptions {
   client: Pick<GraphWriteBrokerClient, 'removeMessages'>;
@@ -82,14 +88,14 @@ function chunk(mailboxes: RemoveMessagesMailbox[]): RemoveMessagesMailbox[][] {
   for (const mailbox of mailboxes) {
     if (
       current.length >= MAX_WRITE_MAILBOXES_PER_CALL ||
-      messages + mailbox.messageIds.length > MAX_WRITE_MESSAGES_PER_CALL
+      messages + mailbox.messages.length > MAX_WRITE_MESSAGES_PER_CALL
     ) {
       batches.push(current);
       current = [];
       messages = 0;
     }
     current.push(mailbox);
-    messages += mailbox.messageIds.length;
+    messages += mailbox.messages.length;
   }
   if (current.length > 0) {
     batches.push(current);
@@ -97,18 +103,36 @@ function chunk(mailboxes: RemoveMessagesMailbox[]): RemoveMessagesMailbox[][] {
   return batches;
 }
 
-/** The request entry for one approved mailbox, or undefined when it cannot be checked */
-function toRequest(mailbox: RemovalMailbox): RemoveMessagesMailbox | undefined {
-  const expected = (mailbox.internetMessageIds ?? []).filter(id => MESSAGE_ID_PATTERN.test(id));
-  if (expected.length === 0 || mailbox.messageIds.length === 0) {
-    return undefined;
-  }
+/**
+ * The request entry for one re-checked mailbox: each remaining copy with
+ * the check the approved scope recorded for it. A copy without a recorded
+ * check is not sent (counted by the caller).
+ */
+function toRequest(mailbox: RemovalMailbox): {
+  request?: RemoveMessagesMailbox;
+  unchecked: number;
+} {
+  const checks = new Map((mailbox.verify ?? []).map(check => [check.messageId, check]));
+  const messages = mailbox.messageIds
+    .map(id => checks.get(id))
+    .filter((check): check is NonNullable<typeof check> => check !== undefined)
+    .slice(0, MAX_WRITE_MESSAGES_PER_MAILBOX)
+    .map(check => ({
+      messageId: check.messageId,
+      expectedInternetMessageId: check.internetMessageId,
+      expectedSenderAddress: check.senderAddress,
+      expectedSubjectSha256: check.subjectHash,
+      receivedFrom: check.receivedFrom,
+      receivedTo: check.receivedTo,
+    }));
   return {
-    mailboxId: mailbox.mailboxId,
-    messageIds: mailbox.messageIds.slice(0, MAX_WRITE_MESSAGES_PER_MAILBOX),
-    expectedInternetMessageIds: expected.slice(0, MAX_WRITE_MESSAGES_PER_MAILBOX),
+    ...(messages.length > 0 ? { request: { mailboxId: mailbox.mailboxId, messages } } : {}),
+    unchecked: mailbox.messageIds.length - messages.length,
   };
 }
+
+const messagesIn = (batch: RemoveMessagesMailbox[]): number =>
+  batch.reduce((n, mailbox) => n + mailbox.messages.length, 0);
 
 export class LiveRemovalExecutor implements RemovalExecutor {
   readonly name = 'graph_write_removal';
@@ -129,27 +153,25 @@ export class LiveRemovalExecutor implements RemovalExecutor {
     const counts = emptyRemovalCounts();
     const removed: RemovedMailbox[] = [];
     const errorMailboxes = new Set<string>();
+    const unknownMailboxes = new Set<string>();
     let notAttemptedForTime = 0;
-    let noExpectedId = 0;
+    let unchecked = 0;
     let refusal: string | undefined;
 
     // 1. The same re-check the dry run uses: never wider than approved
     const { mailboxes: still, counts: recheck } = recheckRemoval(approved, currentReach);
     const addressOf = new Map(approved.mailboxes.map(m => [m.mailboxId, m.address]));
 
-    // 2. Only mailboxes whose copies can be checked by Internet Message-ID
+    // 2. Each copy with its own recorded check; none without one
     const requests: RemoveMessagesMailbox[] = [];
     for (const mailbox of still) {
-      const request = toRequest(mailbox);
-      if (request) {
-        requests.push(request);
-        const cut = mailbox.messageIds.length - request.messageIds.length;
-        if (cut > 0) {
-          countOutcome(counts, 'not_attempted', cut);
-        }
-      } else {
-        noExpectedId += mailbox.messageIds.length;
-        countOutcome(counts, 'not_attempted', mailbox.messageIds.length);
+      const entry = toRequest(mailbox);
+      if (entry.request) {
+        requests.push(entry.request);
+      }
+      if (entry.unchecked > 0) {
+        unchecked += entry.unchecked;
+        countOutcome(counts, 'not_attempted', entry.unchecked);
       }
     }
 
@@ -157,7 +179,6 @@ export class LiveRemovalExecutor implements RemovalExecutor {
     const batches = chunk(requests);
     for (let index = 0; index < batches.length; index++) {
       const batch = batches[index];
-      const messagesInBatch = batch.reduce((n, m) => n + m.messageIds.length, 0);
       const remaining = options.getRemainingMs?.();
       const available =
         remaining === undefined
@@ -166,9 +187,7 @@ export class LiveRemovalExecutor implements RemovalExecutor {
       const budgetMs = Math.floor(available - CALL_OVERHEAD_MS);
       if (refusal || budgetMs < MIN_WRITE_BUDGET_MS) {
         // Not sent: out of time, or the write broker already refused
-        const left = batches
-          .slice(index)
-          .reduce((n, b) => n + b.reduce((m, mailbox) => m + mailbox.messageIds.length, 0), 0);
+        const left = batches.slice(index).reduce((n, b) => n + messagesIn(b), 0);
         countOutcome(counts, 'not_attempted', left);
         if (!refusal) {
           notAttemptedForTime += left;
@@ -182,17 +201,17 @@ export class LiveRemovalExecutor implements RemovalExecutor {
       );
 
       if (!call.ok) {
-        if (failureChangedNothing(call.failure)) {
-          countOutcome(counts, 'not_attempted', messagesInBatch);
+        if (failureChangedNothing(call.failure, call.refusal)) {
+          countOutcome(counts, 'not_attempted', messagesIn(batch));
           if (call.failure === 'refused') {
             refusal = call.refusal ?? 'refused';
           }
         } else {
           // The write broker may have moved some of them: say so, and
           // tell nobody their copy was removed
-          countOutcome(counts, 'unknown', messagesInBatch);
+          countOutcome(counts, 'unknown', messagesIn(batch));
           for (const mailbox of batch) {
-            errorMailboxes.add(mailbox.mailboxId);
+            unknownMailboxes.add(mailbox.mailboxId);
           }
         }
         continue;
@@ -205,8 +224,11 @@ export class LiveRemovalExecutor implements RemovalExecutor {
           if (message.outcome === 'moved') {
             moved += 1;
           }
-          if (message.outcome === 'error' || message.outcome === 'unknown') {
+          if (message.outcome === 'error') {
             errorMailboxes.add(mailbox.mailboxId);
+          }
+          if (message.outcome === 'unknown') {
+            unknownMailboxes.add(mailbox.mailboxId);
           }
           if (
             message.outcome === 'not_attempted' &&
@@ -221,6 +243,10 @@ export class LiveRemovalExecutor implements RemovalExecutor {
       }
     }
 
+    // Copies the latest reach shows that the anchor rule would admit but the
+    // approved scope does not name: reported, never included
+    const newEligible = this.newEligibleSinceApproval(approved, currentReach);
+
     this.emitMetrics(counts);
     logger.info('Campaign removal executed', {
       incidentId: action.incidentId,
@@ -231,17 +257,21 @@ export class LiveRemovalExecutor implements RemovalExecutor {
       refusal,
     });
 
+    const list = (ids: Set<string>): { shown: string[]; more: number } => {
+      const shown = [...ids]
+        .map(id => displayText(addressOf.get(id)) ?? 'unknown address')
+        .slice(0, MAX_LISTED_MAILBOXES);
+      return { shown, more: ids.size - shown.length };
+    };
     const summary = this.summary(counts, {
       mailboxesRemoved: removed.length,
-      newSinceApproval: recheck.newSinceApproval,
+      newSinceApproval: newEligible,
       noLongerMatched: recheck.noLongerMatched,
-      noExpectedId,
+      unchecked,
       notAttemptedForTime,
       refusal,
-      errorAddresses: [...errorMailboxes]
-        .map(id => displayText(addressOf.get(id)) ?? 'unknown address')
-        .slice(0, MAX_LISTED_ERROR_MAILBOXES),
-      errorMailboxes: errorMailboxes.size,
+      errors: list(errorMailboxes),
+      unknown: list(unknownMailboxes),
     });
 
     return {
@@ -251,6 +281,23 @@ export class LiveRemovalExecutor implements RemovalExecutor {
       removalOutcome: { ...counts },
       removed,
     };
+  }
+
+  private newEligibleSinceApproval(approved: RemovalScope, current: IncidentReach): number {
+    if (!approved.live) {
+      return 0;
+    }
+    const named = new Set(approved.mailboxes.flatMap(m => m.messageIds));
+    const now = computeLiveRemovalScope(
+      current,
+      { maxMailboxes: Number.MAX_SAFE_INTEGER, maxMessages: Number.MAX_SAFE_INTEGER },
+      approved.live.anchor,
+      {
+        windowHours: approved.live.windowHours,
+        sizeTolerancePercent: approved.live.sizeTolerancePercent,
+      }
+    );
+    return now.mailboxes.flatMap(m => m.messageIds).filter(id => !named.has(id)).length;
   }
 
   private emitMetrics(counts: RemovalOutcomeCounts): void {
@@ -269,26 +316,29 @@ export class LiveRemovalExecutor implements RemovalExecutor {
       mailboxesRemoved: number;
       newSinceApproval: number;
       noLongerMatched: number;
-      noExpectedId: number;
+      unchecked: number;
       notAttemptedForTime: number;
       refusal?: string;
-      errorAddresses: string[];
-      errorMailboxes: number;
+      errors: { shown: string[]; more: number };
+      unknown: { shown: string[]; more: number };
     }
   ): string[] {
+    const named = (l: { shown: string[]; more: number }): string =>
+      `${l.shown.join(', ')}${l.more > 0 ? ` and ${l.more} more` : ''}`;
     const lines = [
       `Removal carried out by the Graph write broker: ${counts.moved} message(s) moved to Deleted Items in ${detail.mailboxesRemoved} mailbox(es). Nothing was permanently deleted; each person can restore the message from Deleted Items.`,
       `  moved to Deleted Items: ${counts.moved}`,
       `  already in Deleted Items (left there): ${counts.alreadyDeleted}`,
       `  not found (already moved or purged; left alone): ${counts.notFound}`,
-      `  refused, not the approved message (Internet Message-ID did not match; left alone): ${counts.mismatch}`,
+      `  refused, no longer provably the approved email (Message-ID, sender, subject or arrival time differed; left alone): ${counts.mismatch}`,
       `  refused, mailbox outside the write broker's allowlist: ${counts.notAllowed}`,
       `  errors: ${counts.error}`,
       `  not attempted: ${counts.notAttempted}`,
     ];
     if (counts.unknown > 0) {
       lines.push(
-        `  outcome unknown (the write broker did not answer in time; some may have been moved): ${counts.unknown}`
+        `  outcome unknown: ${counts.unknown}`,
+        `The write broker did not answer in time for ${counts.unknown} message(s) in ${detail.unknown.shown.length + detail.unknown.more} mailbox(es) (${named(detail.unknown)}). Some of them may have been moved. Those people were NOT sent a removal notice. To check, look in the write broker's log for this action's line (it gives the moved count) or in those mailboxes' Deleted Items, and tell those people yourself if their copy was moved.`
       );
     }
     if (detail.refusal) {
@@ -305,9 +355,9 @@ export class LiveRemovalExecutor implements RemovalExecutor {
         `${detail.notAttemptedForTime} message(s) were not attempted because the time available ran out or Microsoft throttled the requests. Approve a new removal from the next incident update to finish.`
       );
     }
-    if (detail.noExpectedId > 0) {
+    if (detail.unchecked > 0) {
       lines.push(
-        `${detail.noExpectedId} message(s) were not attempted: the approved scope did not record their Internet Message-ID, so they could not be checked. They were left alone.`
+        `${detail.unchecked} message(s) were not attempted: the approved scope recorded no check for them. They were left alone.`
       );
     }
     if (detail.noLongerMatched > 0) {
@@ -317,14 +367,11 @@ export class LiveRemovalExecutor implements RemovalExecutor {
     }
     if (detail.newSinceApproval > 0) {
       lines.push(
-        `${detail.newSinceApproval} newer copy(ies) were found that the approved scope does not name; they were not included (a new approval would be needed).`
+        `${detail.newSinceApproval} newer copy(ies) of the same email were found that the approved scope does not name; they were not included (a new approval would be needed).`
       );
     }
-    if (detail.errorMailboxes > 0) {
-      const more = detail.errorMailboxes - detail.errorAddresses.length;
-      lines.push(
-        `Mailboxes with errors or an unknown outcome: ${detail.errorAddresses.join(', ')}${more > 0 ? ` and ${more} more` : ''}.`
-      );
+    if (detail.errors.shown.length > 0) {
+      lines.push(`Mailboxes with errors: ${named(detail.errors)}.`);
     }
     return lines;
   }

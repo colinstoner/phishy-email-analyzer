@@ -108,14 +108,13 @@ afterEach(() => {
 
 function request(mailboxes: Array<{ n: number; ids: string[] }>) {
   return {
-    version: 1,
+    version: 2,
     operation: 'remove_messages',
     params: {
       actionId: fake.ACTION_ID,
       mailboxes: mailboxes.map(m => ({
         mailboxId: fake.MAILBOX_ID(m.n),
-        messageIds: m.ids,
-        expectedInternetMessageIds: [fake.IMID(1)],
+        messages: m.ids.map(id => fake.expectation(id, fake.IMID(1))),
       })),
       budgetMs: 20_000,
     },
@@ -183,6 +182,21 @@ describe('Graph write broker handler', () => {
     });
     expect(tenant.requests).toEqual([]);
   });
+
+  it.each(['', ',', '  ', ' , ,'])(
+    'fails closed when the allowlist is set but lists nothing (%p)',
+    async value => {
+      process.env.PHISHY_GRAPH_WRITE_ALLOWED_MAILBOX_IDS = value;
+      tenant.addMailbox(fake.MAILBOX_ID(1), {
+        a: { internetMessageId: fake.IMID(1), folderId: 'inbox' },
+      });
+      expect(await broker.handler(request([{ n: 1, ids: ['a'] }]), context)).toEqual({
+        ok: false,
+        reason: 'misconfigured',
+      });
+      expect(tenant.requests).toEqual([]);
+    }
+  );
 
   it('does not read the read credential, and the read settings do not enable it', async () => {
     for (const key of Object.keys(ENV)) {

@@ -8,7 +8,8 @@
  * endpoint built by code with `graphPath` from IDs the protocol has already
  * shape-checked:
  *
- *   GET  /users/{mailboxId}/messages/{messageId}?$select=internetMessageId,parentFolderId
+ *   GET  /users/{mailboxId}/messages/{messageId}
+ *          ?$select=internetMessageId,parentFolderId,from,subject,receivedDateTime
  *   GET  /users/{mailboxId}/mailFolders/deleteditems?$select=id
  *   POST /users/{mailboxId}/messages/{messageId}/move   {"destinationId":"deleteditems"}
  *
@@ -23,9 +24,10 @@
  * - get message: https://learn.microsoft.com/en-us/graph/api/message-get?view=graph-rest-1.0
  *
  * There is no delete, no permanent delete, no send, no folder creation, no
- * rule change and no read of any message content: the message `$select`
- * names only `internetMessageId` and `parentFolderId`, and the move's
- * response body (the whole moved message) is discarded unread.
+ * rule change and no read of the body, recipients or attachments: the
+ * message `$select` names only the five fields the identity check needs
+ * (the subject is hashed and compared, never logged or returned), and the
+ * move's response body (the whole moved message) is discarded unread.
  *
  * Other rules, as for the read client: the base URL is fixed; redirects are
  * refused; every attempt has a timeout and the caller's deadline bounds all
@@ -48,7 +50,16 @@ const logger = createLogger('graph-write-client');
 /** The one destination this tier ever moves a message to (a well-known folder name) */
 export const DELETED_ITEMS = 'deleteditems';
 
-const MESSAGE_SELECT = ['internetMessageId', 'parentFolderId'];
+/** Exactly what the identity check needs; no body, no recipients, no attachments */
+export const MESSAGE_SELECT = [
+  'internetMessageId',
+  'parentFolderId',
+  'from',
+  'subject',
+  'receivedDateTime',
+];
+/** A subject longer than this is not compared (it cannot be one Exchange stores) */
+const MAX_SUBJECT_CHARS = 4096;
 const FOLDER_SELECT = ['id'];
 
 const DEFAULT_ATTEMPT_TIMEOUT_MS = 10_000;
@@ -97,12 +108,32 @@ export interface GraphWriteClientOptions {
   baseDelayMs?: number;
 }
 
+/**
+ * What the write tier reads about a message: identity, folder, From address,
+ * subject and arrival time, so it can check every expected value. Hostile
+ * values (the sender wrote them); compared only, never logged or returned.
+ */
 export type MessageState =
-  { kind: 'found'; internetMessageId?: string; parentFolderId?: string } | { kind: 'not_found' };
+  | {
+      kind: 'found';
+      internetMessageId?: string;
+      parentFolderId?: string;
+      senderAddress?: string;
+      subject?: string;
+      receivedDateTime?: string;
+    }
+  | { kind: 'not_found' };
 
 const MessageStateSchema = z.object({
   internetMessageId: z.string().max(MAX_ID_LENGTH).nullish(),
   parentFolderId: z.string().max(MAX_ID_LENGTH).nullish(),
+  from: z
+    .object({
+      emailAddress: z.object({ address: z.string().max(MAX_ID_LENGTH).nullish() }).nullish(),
+    })
+    .nullish(),
+  subject: z.string().max(MAX_SUBJECT_CHARS).nullish(),
+  receivedDateTime: z.string().max(40).nullish(),
 });
 
 const FolderSchema = z.object({ id: z.string().min(1).max(MAX_ID_LENGTH) });
@@ -171,12 +202,15 @@ export class GraphWriteClient {
     if (!parsed.success) {
       throw new GraphWriteRequestError('invalid_response', answer.status);
     }
+    const { data } = parsed;
+    const sender = data.from?.emailAddress?.address;
     return {
       kind: 'found',
-      ...(parsed.data.internetMessageId
-        ? { internetMessageId: parsed.data.internetMessageId }
-        : {}),
-      ...(parsed.data.parentFolderId ? { parentFolderId: parsed.data.parentFolderId } : {}),
+      ...(data.internetMessageId ? { internetMessageId: data.internetMessageId } : {}),
+      ...(data.parentFolderId ? { parentFolderId: data.parentFolderId } : {}),
+      ...(sender ? { senderAddress: sender } : {}),
+      ...(typeof data.subject === 'string' ? { subject: data.subject } : {}),
+      ...(data.receivedDateTime ? { receivedDateTime: data.receivedDateTime } : {}),
     };
   }
 
