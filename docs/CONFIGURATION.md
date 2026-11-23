@@ -260,7 +260,7 @@ Requires campaign alerts (`PHISHY_CAMPAIGN_ALERTS_ENABLED`), the intelligence da
 | `PHISHY_CAMPAIGN_RESPONSE_MAX_WARNINGS` | `campaignResponse.maxWarningsPerCampaign` | `100` | Most employees one campaign emails (warnings and removal notices; someone already warned is not counted again) (1–1000) |
 | `PHISHY_CAMPAIGN_RESPONSE_MAX_REMOVAL_MAILBOXES` | `campaignResponse.maxRemovalMailboxes` | `500` | Most mailboxes one removal may name |
 | `PHISHY_CAMPAIGN_RESPONSE_MAX_REMOVAL_MESSAGES` | `campaignResponse.maxRemovalMessages` | `1000` | Most messages one removal may name |
-| `PHISHY_CAMPAIGN_RESPONSE_UPDATE_INTERVAL_MINUTES` | `campaignResponse.updateIntervalMinutes` | `30` | Shortest gap between incident updates |
+| `PHISHY_CAMPAIGN_RESPONSE_UPDATE_INTERVAL_MINUTES` | `campaignResponse.updateIntervalMinutes` | `30` | Shortest gap between incident updates (SAM `CampaignResponseUpdateIntervalMinutes`). The update that first makes a live removal possible is sent at once |
 | `PHISHY_CAMPAIGN_RESPONSE_REACH_THRESHOLD` | `campaignResponse.reachThreshold` | `5` | Open the incident on the first malicious report when its blast radius found at least this many delivered recipients besides the reporters; `0` = report count only |
 | `PHISHY_CAMPAIGN_RESPONSE_CLICKED_INSTRUCTIONS` | `campaignResponse.alreadyClickedInstructions` | *(see below)* | Plain text shown under "If you already clicked or entered your password" |
 | `PHISHY_CAMPAIGN_RESPONSE_TIME_ZONE` | `campaignResponse.timeZone` | `UTC` | IANA time zone for the times in the warning, the incident email and the fan-out alert (e.g. `Europe/London`) |

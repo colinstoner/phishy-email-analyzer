@@ -77,6 +77,7 @@ All off by default; each is one parameter.
 | `CampaignResponseAudience` | `distribution` | `distribution`, `recipients` (needs `GraphBlastRadiusEnabled`) or `both` |
 | `CampaignResponseEmployeeWarning` | `approve` | `approve`, `auto` or `off` |
 | `CampaignResponseReachThreshold` | `5` | Open the incident on the first malicious report when its blast radius found at least this many delivered recipients besides the reporters (needs `GraphBlastRadiusEnabled`); `0` waits for the report count. Automatic warnings still wait for a second reporter |
+| `CampaignResponseUpdateIntervalMinutes` | `30` | Shortest gap, in minutes, between incident update emails for one campaign |
 | `AttachmentAnalysisEnabled` | `false` | Static inspection of attachments |
 
 With `CampaignResponseEnabled`, `CampaignAlertDistribution` may be left empty: no broadcast is sent, so choose `CampaignResponseAudience=recipients` (or `both`) and enable blast radius, or nobody is warned. The other campaign-response and attachment settings keep their defaults unless set in a config file (see [docs/CONFIGURATION.md](docs/CONFIGURATION.md)). Campaign response needs `CampaignAlertsEnabled=true` and `IntelligenceDbSecretArn`; a deploy without them is rejected.
