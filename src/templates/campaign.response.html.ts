@@ -497,7 +497,8 @@ function recipientCells(recipient: BlastRadiusRecipient): string[] {
   ];
 }
 
-const LISTED_IN_INCIDENT = 25;
+/** Recipients listed by name in a security-team email (the incident email, a dry-run reply) */
+export const LISTED_IN_INCIDENT = 25;
 const RECIPIENT_COLUMNS = ['Recipient', 'Location', 'Read', 'Replied / forwarded'];
 
 function inShort(incident: CampaignIncident): string {
@@ -745,7 +746,7 @@ function describeProposal(
   }
   return {
     title: 'Remove remaining copies from mailboxes (dry run)',
-    does: `re-checks the ${scope.messageCount} copy(ies) in ${scope.mailboxes.length} mailbox(es) that the blast-radius lookup matched for this incident (exact message IDs, never a search) and replies with what a removal would do. No mailbox is changed: the mailbox write tier is not installed.`,
+    does: `re-checks the ${scope.messageCount} copy(ies) in ${scope.mailboxes.length} mailbox(es) that the blast-radius lookup matched for this incident (exact message IDs, never a search) and replies with what a removal would do. No mailbox is changed: removal is set to dry run in this deployment.`,
     ...(left.length ? { notIncluded: left.join(', ') } : {}),
   };
 }

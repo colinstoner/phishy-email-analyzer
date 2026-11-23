@@ -26,16 +26,19 @@ import { EmailSendResult } from '../../types';
 import { createLogger } from '../../utils/logger';
 import { emitCampaignResponseMetric } from '../../utils/metrics';
 import {
+  LISTED_IN_INCIDENT,
   RenderedEmail,
   WarningContext,
   buildDistributionWarning,
   buildEmployeeWarning,
   buildRemovalNotice,
 } from '../../templates/campaign.response.html';
+import { displayText, displayTime } from './display';
 import {
   ActionResult,
   CampaignIncident,
   IncidentReach,
+  RemovalRecipientCounts,
   RemovalScope,
   ResponseAction,
   WarningScope,
@@ -267,30 +270,69 @@ export interface RemovalExecutor {
 }
 
 export const WRITE_TIER_NOT_INSTALLED =
-  'No mailbox was changed: the mailbox write tier is not installed in this version of Phishy.';
+  'No mailbox was changed: this was a dry run (campaign removal is not set to live in this deployment).';
 
+/** Addresses listed by name in a dry-run reply (the incident email's own listing limit) */
+const LISTED_NOT_OPENED = LISTED_IN_INCIDENT;
+
+/** "12 minutes", "1 hour 5 minutes", "less than a minute" */
+function describeInterval(ms: number): string {
+  const minutes = Math.floor(ms / 60_000);
+  if (minutes < 1) {
+    return 'less than a minute';
+  }
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  const part = (n: number, unit: string): string => `${n} ${unit}${n === 1 ? '' : 's'}`;
+  if (hours === 0) {
+    return part(minutes, 'minute');
+  }
+  return rest === 0 ? part(hours, 'hour') : `${part(hours, 'hour')} ${part(rest, 'minute')}`;
+}
+
+export interface DryRunRemovalOptions {
+  /** IANA zone the reply's times are shown in (`campaignResponse.timeZone`) */
+  timeZone?: string;
+  /** Injected for tests; used only when the action carries no approval time */
+  now?: () => Date;
+}
+
+/**
+ * What a removal would do, from the incident's stored blast-radius data.
+ * It reads no mailbox: the approval path has no Graph lookup, so the reply
+ * says that the states come from the most recent lookup and how old it is,
+ * never that the mailboxes were read again.
+ */
 export class DryRunRemovalExecutor implements RemovalExecutor {
   readonly name = 'dry_run_removal';
   readonly changesMailboxes = false;
+  private readonly timeZone: string;
+  private readonly now: () => Date;
+
+  constructor(options: DryRunRemovalOptions = {}) {
+    this.timeZone = options.timeZone ?? 'UTC';
+    this.now = options.now ?? ((): Date => new Date());
+  }
 
   execute(
     action: ResponseAction,
     approved: RemovalScope,
     currentReach: IncidentReach
   ): Promise<ActionResult> {
-    const { counts } = recheckRemoval(approved, currentReach);
+    const { counts, recipients, notOpened } = recheckRemoval(approved, currentReach);
     emitCampaignResponseMetric('ResponseActionsDryRun', 1, { ActionType: action.type });
+    const toMove = counts.toMove ?? 0;
     const summary = [
-      `DRY RUN. Phishy re-checked the approved scope and would remove ${counts.messages} message(s) from ${counts.mailboxes} mailbox(es):`,
+      `DRY RUN. A removal would move ${toMove} copy(ies) in ${counts.toMoveMailboxes ?? 0} mailbox(es) to Deleted Items:`,
       `  unread in the inbox: ${counts.unreadInInbox}`,
       `  read in the inbox: ${counts.readInInbox}`,
       `  in Junk Email: ${counts.inJunk}`,
-      `  already in Deleted Items: ${counts.alreadyInDeletedItems}`,
-      `  in another folder: ${counts.elsewhere}`,
+      `  in another folder, or one Phishy could not identify: ${counts.elsewhere}`,
+      `Already in Deleted Items, left where they are: ${counts.alreadyInDeletedItems} copy(ies) in ${counts.alreadyInDeletedItemsMailboxes ?? 0} mailbox(es).`,
     ];
     if (counts.noLongerMatched > 0) {
       summary.push(
-        `${counts.noLongerMatched} approved message(s) were no longer found where the latest lookup looked (already purged or moved); they would be left alone.`
+        `${counts.noLongerMatched} approved copy(ies) were no longer found where the most recent lookup looked (purged or moved); they would be left alone.`
       );
     }
     if (counts.newSinceApproval > 0) {
@@ -298,11 +340,90 @@ export class DryRunRemovalExecutor implements RemovalExecutor {
         `${counts.newSinceApproval} newer copy(ies) were found that the approved scope does not name; they are not included (a new approval would be needed).`
       );
     }
-    if (currentReach.lookedUpAt) {
-      summary.push(`Mailbox states as of the blast-radius lookup at ${currentReach.lookedUpAt}.`);
-    }
+    summary.push(...this.recipientLines(recipients, notOpened));
+    summary.push(this.whenLine(action, currentReach));
     summary.push(WRITE_TIER_NOT_INSTALLED);
-    return Promise.resolve({ executor: this.name, dryRun: true, summary, wouldRemove: counts });
+    return Promise.resolve({
+      executor: this.name,
+      dryRun: true,
+      summary,
+      wouldRemove: counts,
+      removalRecipients: recipients,
+    });
+  }
+
+  /** Every recipient in one category, so the numbers add up to the total */
+  private recipientLines(recipients: RemovalRecipientCounts, notOpened: string[]): string[] {
+    if (recipients.total === 0) {
+      return ['The incident has no blast-radius recipients to account for.'];
+    }
+    const rows: Array<[number, string]> = [
+      [recipients.toMove, 'a copy would be moved to Deleted Items'],
+      [recipients.alreadyInDeletedItems, 'their copy is already in Deleted Items'],
+      [
+        recipients.noLongerMatched,
+        'in the approved scope, but the approved copy is no longer matched (purged, moved, or the mailbox was not read again)',
+      ],
+      [
+        recipients.onlyInRecoverableItems,
+        'their copy is only in Recoverable Items (already deleted and emptied): nothing to move',
+      ],
+      [
+        recipients.noCopyFound,
+        'their mailbox was read and holds no copy (deleted and purged, or never placed in the mailbox)',
+      ],
+      [
+        recipients.mailboxNotOpened,
+        'delivered, but Phishy did not open the mailbox: not a mailbox it can read (such as a shared mailbox, group or alias), or the lookup did not reach it (time budget, mailbox cap or a failed request); the data does not say which',
+      ],
+      [recipients.notDelivered, 'not delivered (message trace)'],
+      [recipients.noIdentifiers, 'a copy was found, but without a usable mailbox or message ID'],
+      [
+        recipients.notInApprovedScope,
+        'a copy was found, but the approved scope does not name the mailbox (over a cap when it was proposed, or found by a later lookup); a new approval would be needed',
+      ],
+      [recipients.sameMailbox, 'another address of a mailbox already counted'],
+      [
+        recipients.unlisted,
+        'counted by a lookup but not listed by it, so Phishy has no address for them',
+      ],
+    ];
+    const lines = [`All ${recipients.total} recipient(s) the incident's lookups list or count:`];
+    for (const [count, label] of rows) {
+      if (count > 0) {
+        lines.push(`  ${count}: ${label}`);
+      }
+    }
+    const shown = notOpened
+      .slice(0, LISTED_NOT_OPENED)
+      .map(address => displayText(address, 120))
+      .filter((address): address is string => !!address);
+    if (shown.length > 0) {
+      lines.push(
+        'Mailboxes Phishy did not open (check these by hand):',
+        ...shown.map(address => `  - ${address}`)
+      );
+      if (notOpened.length > shown.length) {
+        lines.push(`  ${notOpened.length - shown.length} more not listed here.`);
+      }
+    }
+    return lines;
+  }
+
+  /** When the states were read: the stored lookup, never a claimed re-read */
+  private whenLine(action: ResponseAction, reach: IncidentReach): string {
+    const read = 'Phishy did not read the mailboxes again for this dry run.';
+    const lookedUp = Date.parse(reach.lookedUpAt ?? '');
+    if (!Number.isFinite(lookedUp)) {
+      return `Mailbox states come from the incident's blast-radius data; when it was looked up is not recorded. ${read}`;
+    }
+    const at = displayTime(reach.lookedUpAt, this.timeZone) ?? reach.lookedUpAt;
+    const approvedAt = (action.approvedAt ?? this.now()).getTime();
+    const age =
+      approvedAt >= lookedUp
+        ? `, ${describeInterval(approvedAt - lookedUp)} before this approval`
+        : '';
+    return `Mailbox states are compared with the incident's most recent blast-radius lookup, made at ${at}${age}. ${read}`;
   }
 }
 
@@ -315,10 +436,11 @@ export class DryRunRemovalExecutor implements RemovalExecutor {
  */
 export function createRemovalExecutor(
   removal?: CampaignResponseConfig['removal'],
-  lambda?: LambdaInvoker
+  lambda?: LambdaInvoker,
+  dryRun: DryRunRemovalOptions = {}
 ): RemovalExecutor {
   if (removal?.mode !== 'live') {
-    return new DryRunRemovalExecutor();
+    return new DryRunRemovalExecutor(dryRun);
   }
   if (!isLambdaFunctionReference(removal.writeBrokerFunctionName)) {
     logger.warn(
@@ -326,7 +448,7 @@ export function createRemovalExecutor(
         '(campaignResponse.removal.writeBrokerFunctionName / PHISHY_GRAPH_WRITE_BROKER_FUNCTION); ' +
         'approved removals run as a dry run and change no mailbox'
     );
-    return new DryRunRemovalExecutor();
+    return new DryRunRemovalExecutor(dryRun);
   }
   logger.info(
     'Campaign removal is live: approved removals are carried out by the Graph write broker'

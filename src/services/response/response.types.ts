@@ -169,6 +169,11 @@ export interface ActionResult {
     unknown: number;
   };
   /**
+   * Removal dry run: where every recipient the incident knows of ended up,
+   * counts only (absent in results stored by earlier versions)
+   */
+  removalRecipients?: RemovalRecipientCounts;
+  /**
    * A real (non-dry-run) removal: the mailboxes a copy was actually moved
    * out of, as the executor reports them. Only the future write tier sets
    * it; the dry-run executor never does. Removal notices go only to these.
@@ -189,17 +194,71 @@ export interface RemovedMailbox {
 }
 
 export interface RemovalCounts {
+  /** Mailboxes still holding an approved copy, in any folder (Deleted Items included) */
   mailboxes: number;
+  /** Approved copies still found, in any folder (Deleted Items included) */
   messages: number;
   unreadInInbox: number;
   readInInbox: number;
   inJunk: number;
   alreadyInDeletedItems: number;
+  /** In another folder, or one the lookup could not identify */
   elsewhere: number;
   /** In the approved scope but no longer matched by the latest lookup */
   noLongerMatched: number;
   /** Copies the latest lookup found that the approved scope did not name (not acted on) */
   newSinceApproval: number;
+  /**
+   * Copies a removal would actually move to Deleted Items: unread and read
+   * in the inbox, in Junk, and elsewhere (`messages` minus
+   * `alreadyInDeletedItems`). Absent in results stored by earlier versions,
+   * whose `messages` counted Deleted Items too.
+   */
+  toMove?: number;
+  /** Mailboxes holding at least one copy to move (absent in earlier results) */
+  toMoveMailboxes?: number;
+  /** Mailboxes whose remaining approved copies are all already in Deleted Items */
+  alreadyInDeletedItemsMailboxes?: number;
+}
+
+/**
+ * Every recipient the incident's reach lists or counts, each in exactly one
+ * category, so the categories add up to `total`. Only what the stored
+ * blast-radius data can tell apart is a category of its own.
+ */
+export interface RemovalRecipientCounts {
+  /** Recipients listed by the incident's lookups, plus those counted but not listed */
+  total: number;
+  /** In the approved scope, with a copy a removal would move */
+  toMove: number;
+  /** In the approved scope, every remaining copy already in Deleted Items */
+  alreadyInDeletedItems: number;
+  /** In the approved scope, but no approved copy is matched any more (purged, moved, or not read again) */
+  noLongerMatched: number;
+  /** Copy found only in Recoverable Items: deleted and emptied by the user */
+  onlyInRecoverableItems: number;
+  /** Mailbox read, and no copy in it */
+  noCopyFound: number;
+  /**
+   * Delivered (message trace), but the mailbox was not read: not a mailbox
+   * Phishy can open (a shared mailbox, group or alias), or the lookup did
+   * not reach it (time budget, mailbox cap, or a failed request). The stored
+   * data does not say which.
+   */
+  mailboxNotOpened: number;
+  /** Message trace says delivery failed */
+  notDelivered: number;
+  /** Copy found, but without a usable mailbox or message ID */
+  noIdentifiers: number;
+  /**
+   * Copy found with IDs, but the approved scope does not name the mailbox:
+   * over a cap when it was proposed, or found by a later lookup
+   */
+  notInApprovedScope: number;
+  /** Another address of a mailbox already counted */
+  sameMailbox: number;
+  /** Counted by a lookup but not listed (the listing is capped): no address is known */
+  unlisted: number;
 }
 
 export type AuditEvent =

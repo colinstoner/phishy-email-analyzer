@@ -359,7 +359,12 @@ export class CampaignResponseService {
     this.newReference = deps.newReference ?? ((): string => generateReference());
     this.warningExecutor = new SesWarningExecutor(deps.mailer);
     // The dry run unless the operator chose `live` and named a write broker
-    this.removalExecutor = deps.removalExecutor ?? createRemovalExecutor(deps.config.removal);
+    this.removalExecutor =
+      deps.removalExecutor ??
+      createRemovalExecutor(deps.config.removal, undefined, {
+        timeZone: deps.config.timeZone,
+        now: this.now,
+      });
   }
 
   private get config(): CampaignResponseConfig {
@@ -1282,8 +1287,12 @@ export class CampaignResponseService {
         );
       } else {
         const counts = action.result.wouldRemove;
+        // A result stored by an earlier version has no `toMove`: its
+        // `messages` counted copies already in Deleted Items too
         lines.push(
-          `Ran the removal dry run (${by}${at}): it would remove ${counts?.messages ?? 0} message(s) from ${counts?.mailboxes ?? 0} mailbox(es). No mailbox was changed.`
+          counts?.toMove !== undefined
+            ? `Ran the removal dry run (${by}${at}): it would move ${counts.toMove} copy(ies) in ${counts.toMoveMailboxes ?? 0} mailbox(es) to Deleted Items; ${counts.alreadyInDeletedItems} already there. No mailbox was changed.`
+            : `Ran the removal dry run (${by}${at}): it matched ${counts?.messages ?? 0} copy(ies) in ${counts?.mailboxes ?? 0} mailbox(es), Deleted Items included. No mailbox was changed.`
         );
       }
     }
@@ -1705,7 +1714,8 @@ export class CampaignResponseService {
       type: approved.type,
     });
 
-    const heading = `Approved: ${actionTitle(approved.type, this.removalExecutor.changesMailboxes)} for incident ${incident.reference} (${approved.reference}).`;
+    // Both codes labelled: the incident's reference, and this action's own
+    const heading = `Approved: ${actionTitle(approved.type, this.removalExecutor.changesMailboxes)} for incident reference ${incident.reference} (action reference ${approved.reference}).`;
     if (approved.scope.kind === 'send_warning') {
       const scope = this.recheckWarning(approved, await this.store.listActions(incident.id));
       const summary = await this.runWarning(incident, approved, scope, getRemainingMs);
@@ -1746,6 +1756,7 @@ export class CampaignResponseService {
           executor: result.executor,
           ...(result.wouldRemove ?? {}),
           ...(result.removalOutcome ?? {}),
+          ...(result.removalRecipients ? { recipients: result.removalRecipients } : {}),
           ...(result.dryRun
             ? {}
             : {

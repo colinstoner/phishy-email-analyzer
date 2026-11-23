@@ -572,11 +572,11 @@ describe('remove remaining copies (dry run only)', () => {
     );
     const text = reply.body.join('\n');
     expect(text).toContain('DRY RUN');
-    expect(text).toContain('would remove 5 message(s) from 5 mailbox(es)');
+    expect(text).toContain('would move 5 copy(ies) in 5 mailbox(es) to Deleted Items');
     expect(text).toContain('unread in the inbox: 2');
     expect(text).toContain('read in the inbox: 2');
     expect(text).toContain('in Junk Email: 1');
-    expect(text).toContain('No mailbox was changed: the mailbox write tier is not installed');
+    expect(text).toContain('No mailbox was changed: this was a dry run');
     expect(store.actions.find(a => a.id === removal.id)).toMatchObject({
       status: 'dry_run_completed',
       executor: 'dry_run_removal',
@@ -584,12 +584,170 @@ describe('remove remaining copies (dry run only)', () => {
     });
     const audit = store.audit.find(e => e.event === 'action_dry_run');
     expect(audit).toMatchObject({ actor: 'soc@example.com', actionId: removal.id });
-    expect(audit?.detail).toMatchObject({ messages: 5, mailboxes: 5, unreadInInbox: 2 });
+    expect(audit?.detail).toMatchObject({
+      messages: 5,
+      mailboxes: 5,
+      toMove: 5,
+      unreadInInbox: 2,
+      recipients: { total: 6, toMove: 5, notDelivered: 1 },
+    });
     // The only outbound calls are emails; there is no Graph client here at all
     expect(mailer.sendEmail).toHaveBeenCalledTimes(1);
     // A dry run removes nothing, so nobody gets a removal notice
     expect(sent.filter(e => e.subject.startsWith('Security notice'))).toEqual([]);
     expect(store.actions.find(a => a.id === removal.id)?.result?.notified).toBeUndefined();
+  });
+
+  it('labels both references in the reply heading', async () => {
+    const { service, store } = setup();
+    await service.handleCampaignReport(reportInput());
+    const incident = store.incidents[0];
+    const removal = proposed(store, 'remove_messages')!;
+    const reply = await service.handleApprovals(
+      approve('remove_messages', removal.reference),
+      TEAM[0]
+    );
+    expect(reply.heading).toBe('Done: approval carried out');
+    expect(reply.body[0]).toBe(
+      `Approved: removal of remaining copies (dry run) for incident reference ${incident.reference} (action reference ${removal.reference}).`
+    );
+  });
+
+  it('counts copies already in Deleted Items apart, accounts for every recipient, and says how old the states are', async () => {
+    const { service, store, advance } = setup();
+    const input = reportInput({
+      blastRadius: {
+        ...blast([
+          recipient(1),
+          recipient(2),
+          recipient(3, { folder: 'junk' }),
+          recipient(4, { folder: 'other' }),
+          recipient(5, { folder: 'deleted' }),
+          recipient(6, { folder: 'deleted' }),
+          recipient(7, { folder: 'recoverable' }),
+          recipient(8, { mailboxId: undefined, messageIds: undefined }),
+          {
+            address: 'shared-desk@example.com',
+            mailbox: 'not_checked',
+            deliveryStatus: 'Delivered',
+          },
+          {
+            address: 'alias.team@example.com',
+            mailbox: 'not_checked',
+            deliveryStatus: 'Delivered',
+          },
+          { address: 'person10@example.com', mailbox: 'not_found' },
+          { address: 'failed@example.com', mailbox: 'not_delivered' },
+        ]),
+        totals: { recipients: 13, read: 0, replied: 0, forwarded: 0, notDelivered: 1 },
+      },
+    });
+    await service.handleCampaignReport(input);
+    const removal = proposed(store, 'remove_messages')!;
+    advance(12 * 60_000);
+    const reply = await service.handleApprovals(
+      approve('remove_messages', removal.reference),
+      TEAM[0]
+    );
+    const text = reply.body.join('\n');
+    // The headline is what would move; Deleted Items is reported apart
+    expect(text).toContain('A removal would move 4 copy(ies) in 4 mailbox(es) to Deleted Items:');
+    expect(text).toContain('  in Junk Email: 1');
+    expect(text).toContain('  in another folder, or one Phishy could not identify: 1');
+    expect(text).toContain(
+      'Already in Deleted Items, left where they are: 2 copy(ies) in 2 mailbox(es).'
+    );
+    expect(text).not.toContain('would remove');
+    // Every recipient in one category: 12 listed + 2 counted but not listed
+    expect(text).toContain("All 14 recipient(s) the incident's lookups list or count:");
+    expect(text).toContain('  4: a copy would be moved to Deleted Items');
+    expect(text).toContain('  2: their copy is already in Deleted Items');
+    expect(text).toContain('  1: their copy is only in Recoverable Items');
+    expect(text).toContain('  1: their mailbox was read and holds no copy');
+    expect(text).toContain('  2: delivered, but Phishy did not open the mailbox');
+    expect(text).toContain('  1: not delivered (message trace)');
+    expect(text).toContain('  1: a copy was found, but without a usable mailbox or message ID');
+    expect(text).toContain('  2: counted by a lookup but not listed by it');
+    // The mailboxes nobody could open, defanged, for the team to handle by hand
+    expect(text).toContain('Mailboxes Phishy did not open (check these by hand):');
+    expect(text).toContain('  - shared-desk@example[.]com');
+    expect(text).toContain('  - alias[.]team@example[.]com');
+    // Truthful about when the states were read
+    expect(text).toContain(
+      "Mailbox states are compared with the incident's most recent blast-radius lookup, made at Tue, 17 Nov 2026, 10:00 UTC, 12 minutes before this approval. Phishy did not read the mailboxes again for this dry run."
+    );
+    expect(text).not.toContain('re-checked');
+    expect(text).not.toContain('2026-11-17T10:00');
+    const result = store.actions.find(a => a.id === removal.id)?.result;
+    expect(result?.wouldRemove).toMatchObject({
+      messages: 6,
+      mailboxes: 6,
+      toMove: 4,
+      toMoveMailboxes: 4,
+      alreadyInDeletedItems: 2,
+      alreadyInDeletedItemsMailboxes: 2,
+    });
+    const r = result!.removalRecipients!;
+    expect(
+      r.toMove +
+        r.alreadyInDeletedItems +
+        r.noLongerMatched +
+        r.onlyInRecoverableItems +
+        r.noCopyFound +
+        r.mailboxNotOpened +
+        r.notDelivered +
+        r.noIdentifiers +
+        r.notInApprovedScope +
+        r.sameMailbox +
+        r.unlisted
+    ).toBe(r.total);
+  });
+
+  it('lists at most the incident listing limit of unopened mailboxes, and says how many more', async () => {
+    const { service, store } = setup();
+    const unopened = Array.from({ length: 30 }, (_, n): BlastRadiusRecipient => ({
+      address: `shared${n}@example.com`,
+      mailbox: 'not_checked',
+    }));
+    await service.handleCampaignReport(
+      reportInput({ blastRadius: blast([recipient(1), ...unopened]) })
+    );
+    const reply = await service.handleApprovals(
+      approve('remove_messages', proposed(store, 'remove_messages')!.reference),
+      TEAM[0]
+    );
+    const listed = reply.body.filter(line => line.startsWith('  - shared'));
+    expect(listed).toHaveLength(25);
+    expect(reply.body).toContain('  5 more not listed here.');
+  });
+
+  it('describes a dry run in the next incident update by what would move, and reads older results truthfully', async () => {
+    const { service, store, sent, advance } = setup();
+    await service.handleCampaignReport(
+      reportInput({ blastRadius: blast([recipient(1), recipient(2, { folder: 'deleted' })]) })
+    );
+    const removal = proposed(store, 'remove_messages')!;
+    await service.handleApprovals(approve('remove_messages', removal.reference), TEAM[0]);
+    advance(31 * 60_000);
+    const later = reportInput({
+      blastRadius: blast([recipient(1), recipient(2, { folder: 'deleted' })]),
+    });
+    later.match = { ...later.match, detectionCount: 4, shouldAlert: false };
+    await service.handleCampaignReport(later);
+    expect(sent[sent.length - 1].text).toContain(
+      'it would move 1 copy(ies) in 1 mailbox(es) to Deleted Items; 1 already there. No mailbox was changed.'
+    );
+
+    // A result stored by an earlier version (no `toMove`) is not restated as a removal
+    const stored = store.actions.find(a => a.id === removal.id)!;
+    const { toMove: _m, toMoveMailboxes: _n, ...older } = stored.result!.wouldRemove!;
+    stored.result = { ...stored.result!, wouldRemove: older };
+    advance(31 * 60_000);
+    const again = { ...later, match: { ...later.match, detectionCount: 5 } };
+    await service.handleCampaignReport(again);
+    expect(sent[sent.length - 1].text).toContain(
+      'it matched 2 copy(ies) in 2 mailbox(es), Deleted Items included. No mailbox was changed.'
+    );
   });
 
   it('keeps audit rows append-only (frozen entries, never rewritten)', async () => {
