@@ -805,6 +805,7 @@ function anchored(input: CampaignReportInput): CampaignReportInput {
           internetMessageId: ANCHOR_IMID,
           senderAddress: 'billing@examp1e-billing.test',
           subject: ANCHOR_SUBJECT,
+          sameMessageIdCount: '1',
         },
       },
     },

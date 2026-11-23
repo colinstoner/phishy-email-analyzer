@@ -248,6 +248,7 @@ export const OriginalMessageLookupResultSchema = z
             internetMessageId: z.string().regex(MESSAGE_ID_PATTERN).optional(),
             senderAddress: MailAddress.optional(),
             subject: z.string().max(MAX_SUBJECT_LENGTH).optional(),
+            sameMessageIdCount: z.enum(['1', '2+', 'unknown']).optional(),
           })
           .optional(),
       })

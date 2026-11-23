@@ -167,6 +167,12 @@ export interface RetrievedOriginalIdentity {
   internetMessageId?: string;
   senderAddress?: string;
   subject?: string;
+  /**
+   * How many messages with that Internet Message-ID the reporter's mailbox
+   * holds (normal store and Recoverable Items), from a Message-ID search the
+   * lookup makes: `1`, `2+`, or `unknown` (failed, or no time left)
+   */
+  sameMessageIdCount?: '1' | '2+' | 'unknown';
 }
 
 /** A count that may have been cut short by a row cap: `atLeast` means "N or more" */

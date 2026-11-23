@@ -169,6 +169,77 @@ describe('confirmedReporterMailbox', () => {
   });
 });
 
+/**
+ * The candidate is found by the sender search; a separate search by its
+ * Internet Message-ID then counts how many messages carry that ID.
+ */
+function withIdSearch(
+  byId: { store?: unknown[] | 'fail'; recoverable?: unknown[] | 'fail' },
+  candidate = stored()
+): FakeResponder[] {
+  const isIdSearch = (request: RecordedRequest): boolean =>
+    request.query.$filter?.startsWith('internetMessageId eq ') ?? false;
+  const answer = (value: unknown[] | 'fail' | undefined): Response =>
+    value === 'fail'
+      ? graphErrorResponse(500, 'InternalServerError')
+      : collection(value ?? [candidate]);
+  return [
+    request =>
+      isIdSearch(request) && request.path === MAILBOX_PATH ? answer(byId.store) : undefined,
+    request =>
+      isIdSearch(request) && request.path === RECOVERABLE_PATH
+        ? answer(byId.recoverable ?? [])
+        : undefined,
+    ...mailbox([candidate]),
+  ];
+}
+
+describe('the Message-ID uniqueness count (a live removal anchor needs exactly one)', () => {
+  const countOf = async (responders: FakeResponder[], budgetMs?: number) => {
+    const graph = fakeGraph(responders);
+    const result = await fetchOriginalMessage(graph.client, REQUEST, budgetMs ? { budgetMs } : {});
+    return { result, count: result.original?.identity?.sameMessageIdCount };
+  };
+
+  it('is 1 when the search finds only the original', async () => {
+    expect((await countOf(withIdSearch({}))).count).toBe('1');
+  });
+
+  it('is 2+ for a second message with the same ID in another folder', async () => {
+    const other = stored({ id: 'AAMkAG-other-folder', parentFolderId: 'folder-archive' });
+    expect((await countOf(withIdSearch({ store: [stored(), other] }))).count).toBe('2+');
+  });
+
+  it('is 2+ for a second message with the same ID in Recoverable Items', async () => {
+    const purged = stored({ id: 'AAMkAG-purged' });
+    expect((await countOf(withIdSearch({ recoverable: [purged] }))).count).toBe('2+');
+  });
+
+  it('is unknown when the search fails, and the lookup still succeeds', async () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { result, count } = await countOf(withIdSearch({ store: 'fail' }));
+    expect(result.outcome).toBe('found');
+    expect(result.original?.headers).toEqual(HEADERS);
+    expect(count).toBe('unknown');
+    warn.mockRestore();
+  });
+
+  it('is unknown, without a search, when the budget has no room for it', async () => {
+    const graph = fakeGraph(withIdSearch({}));
+    // Each request takes 150 ms: after the lookup's own requests, less than
+    // a second of the 1.4 s budget is left, too little for the search
+    const slow = graph.client as unknown as { fetchImpl: typeof fetch };
+    const inner = slow.fetchImpl;
+    slow.fetchImpl = (async (...args: Parameters<typeof fetch>) => {
+      await new Promise(resolve => setTimeout(resolve, 150));
+      return inner(...args);
+    }) as typeof fetch;
+    const result = await fetchOriginalMessage(graph.client, REQUEST, { budgetMs: 1400 });
+    expect(result.outcome).toBe('found');
+    expect(result.original?.identity?.sameMessageIdCount).toBe('unknown');
+  });
+});
+
 describe('fetchOriginalMessage', () => {
   it('finds a unique message and reads its headers, with GET requests only', async () => {
     const graph = fakeGraph(mailbox([stored()]));
@@ -186,14 +257,36 @@ describe('fetchOriginalMessage', () => {
         internetMessageId: '<msg-7731@mail.example.org>',
         senderAddress: 'billing-alerts@example.org',
         subject: 'Invoice 7731 overdue',
+        // A Message-ID search of the reporter's mailbox found it exactly once
+        sameMessageIdCount: '1',
       },
     });
 
-    expect(graph.requests.map(request => request.method)).toEqual(['GET', 'GET', 'GET']);
+    expect(graph.requests.map(request => request.method)).toEqual([
+      'GET',
+      'GET',
+      'GET',
+      'GET',
+      'GET',
+    ]);
+    const idSearches = graph.requests.filter(request =>
+      request.query.$filter?.startsWith('internetMessageId eq ')
+    );
+    expect(idSearches.map(request => request.path).sort()).toEqual([
+      RECOVERABLE_PATH,
+      MAILBOX_PATH,
+    ]);
+    for (const request of idSearches) {
+      expect(request.query.$filter).toBe("internetMessageId eq '<msg-7731@mail.example.org>'");
+      expect(request.query.$top).toBe('2');
+    }
     const filter =
       'receivedDateTime ge 2026-11-15T15:00:00.000Z and receivedDateTime lt 2026-11-16T23:00:00.000Z' +
       ` and from/emailAddress/address eq '${SENDER}' and subject eq '${SUBJECT}'`;
-    const lists = graph.requests.filter(request => request.path !== HEADERS_PATH);
+    const lists = graph.requests.filter(
+      request =>
+        request.path !== HEADERS_PATH && !request.query.$filter?.startsWith('internetMessageId')
+    );
     expect(lists.map(request => request.path).sort()).toEqual([RECOVERABLE_PATH, MAILBOX_PATH]);
     for (const request of lists) {
       expect(request.query.$filter).toBe(filter);

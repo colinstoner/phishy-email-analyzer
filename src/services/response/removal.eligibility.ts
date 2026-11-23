@@ -34,7 +34,7 @@
  */
 
 import type { BlastRadiusReport, CopyDetail } from '../graph/blast-radius.service';
-import { subjectGroupKey, subjectKeyHash } from '../graph/subject.key';
+import { stripReplyForwardPrefixes, subjectGroupKey, subjectKeyHash } from '../graph/subject.key';
 import { stripAngleBrackets } from '../graph/trace.operations';
 import type { ExtractedEmailData } from '../../types';
 import type {
@@ -67,6 +67,7 @@ export type AnchorRejection =
   | 'no_blast_radius'
   | 'reporter_copy_not_found'
   | 'ambiguous_message_id'
+  | 'uniqueness_unknown'
   | 'reporter_copy_differs'
   | 'not_forwarded_by_reporter';
 
@@ -75,43 +76,63 @@ const bare = (id: string): string => stripAngleBrackets(id.trim());
 const sameId = (a: string | undefined, b: string | undefined): boolean =>
   a !== undefined && b !== undefined && bare(a) === bare(b);
 
-/** Most Message-IDs read from one header (a long References chain is cut, never searched past) */
-const MAX_HEADER_IDS = 50;
+/** Longest header value read; a longer one binds nothing */
+const MAX_HEADER_CHARS = 20_000;
 
 /**
- * The Message-IDs a report's own top-level header names (`In-Reply-To` or
- * `References`), bare. Only the report's headers as SES received them are
+ * The Message-IDs in a report's own top-level header (all lines with that
+ * name, any case), bare and in order, or undefined when the header is too
+ * long to read whole. Only the report's headers as SES received them are
  * read: never body text, never an attached message's headers.
  */
-function headerIds(headers: Record<string, string> | undefined, name: string): string[] {
+function headerIds(
+  headers: Record<string, string> | undefined,
+  name: string
+): string[] | undefined {
   const wanted = name.toLowerCase();
   const ids: string[] = [];
   for (const [key, value] of Object.entries(headers ?? {})) {
     if (key.toLowerCase() !== wanted || typeof value !== 'string') {
       continue;
     }
-    for (const match of value.slice(0, 20_000).matchAll(/<([^<>\s]{1,460})>/g)) {
+    if (value.length > MAX_HEADER_CHARS) {
+      return undefined;
+    }
+    for (const match of value.matchAll(/<([^<>\s]{1,460})>/g)) {
       ids.push(bare(match[1]));
-      if (ids.length >= MAX_HEADER_IDS) {
-        return ids;
-      }
     }
   }
   return ids;
 }
 
 /**
- * Is `internetMessageId` the message this report forwards? It must be the
- * report's `In-Reply-To`, or failing that one of its `References`.
+ * The Message-ID this report says it forwards: its single `In-Reply-To`
+ * ID; or, when it has no `In-Reply-To`, only the LAST `References` ID (the
+ * parent, RFC 5322). The other `References` entries may have been copied
+ * from the original, whose sender wrote them, so they never bind. An
+ * `In-Reply-To` naming more than one ID binds nothing.
  */
+export function forwardedMessageId(
+  headers: Record<string, string> | undefined
+): string | undefined {
+  const inReplyTo = headerIds(headers, 'In-Reply-To');
+  if (inReplyTo === undefined || inReplyTo.length > 1) {
+    return undefined;
+  }
+  if (inReplyTo.length === 1) {
+    return inReplyTo[0];
+  }
+  const references = headerIds(headers, 'References');
+  return references && references.length > 0 ? references[references.length - 1] : undefined;
+}
+
+/** Is `internetMessageId` the message this report's own headers say it forwards? */
 export function namedByForward(
   headers: Record<string, string> | undefined,
   internetMessageId: string
 ): boolean {
-  const id = bare(internetMessageId);
-  return (
-    headerIds(headers, 'In-Reply-To').includes(id) || headerIds(headers, 'References').includes(id)
-  );
+  const named = forwardedMessageId(headers);
+  return named !== undefined && named === bare(internetMessageId);
 }
 
 /**
@@ -120,7 +141,9 @@ export function namedByForward(
  * are used; nothing from the forward's body text.
  */
 export function anchorFromReport(
-  emailData: Partial<Pick<ExtractedEmailData, 'retrievedOriginal' | 'userReport' | 'headers'>>,
+  emailData: Partial<
+    Pick<ExtractedEmailData, 'retrievedOriginal' | 'userReport' | 'headers' | 'subject'>
+  >,
   blastRadius: BlastRadiusReport | undefined
 ): { anchor: RemovalAnchor } | { rejected: AnchorRejection } {
   if (emailData.userReport) {
@@ -141,8 +164,21 @@ export function anchorFromReport(
   ) {
     return { rejected: 'incomplete_identity' };
   }
-  if (!namedByForward(emailData.headers, identity.internetMessageId)) {
+  // Bound to THIS forward by its own headers: the ID its client wrote, and
+  // its own subject (decoded, top level) agreeing with the stored one
+  if (
+    !namedByForward(emailData.headers, identity.internetMessageId) ||
+    subjectGroupKey(stripReplyForwardPrefixes(emailData.subject)) !==
+      subjectGroupKey(identity.subject)
+  ) {
     return { rejected: 'not_the_forwarded_message' };
+  }
+  // Unique in the reporter's mailbox by a real Message-ID search
+  if (identity.sameMessageIdCount === '2+') {
+    return { rejected: 'ambiguous_message_id' };
+  }
+  if (identity.sameMessageIdCount !== '1') {
+    return { rejected: 'uniqueness_unknown' };
   }
   const reporter = blastRadius?.reporterAddress?.toLowerCase();
   if (

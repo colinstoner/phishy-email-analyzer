@@ -26,5 +26,16 @@ export function subjectKeyHash(subject: string | undefined): string {
   return createHash('sha256').update(subjectGroupKey(subject), 'utf8').digest('hex');
 }
 
+/**
+ * Leading reply/forward prefixes (`RE:`, `FW:`, `Fwd:`, repeated, any case):
+ * the same prefixes blast radius and campaign response already strip.
+ */
+export const REPLY_FORWARD_PREFIX = /^(?:\s*(?:fw|fwd|re)\s*:\s*)+/i;
+
+/** A forward's own subject with its reply/forward prefixes removed */
+export function stripReplyForwardPrefixes(subject: string | undefined): string {
+  return (subject ?? '').replace(REPLY_FORWARD_PREFIX, '');
+}
+
 /** The shape of a `subjectKeyHash` */
 export const SUBJECT_HASH_PATTERN = /^[0-9a-f]{64}$/;

@@ -134,11 +134,13 @@ function reachOf(recipients: BlastRadiusRecipient[]): IncidentReach {
 /** What the original-message lookup stored for the reporter's copy */
 function retrieved(
   identity: Partial<NonNullable<ExtractedEmailData['retrievedOriginal']>['identity']> = {},
-  headers: Record<string, string> = { 'In-Reply-To': IMID, References: `<earlier@x.test> ${IMID}` }
-): Pick<ExtractedEmailData, 'retrievedOriginal' | 'headers'> {
+  headers: Record<string, string> = { 'In-Reply-To': IMID, References: `<earlier@x.test> ${IMID}` },
+  subject = `FW: ${SUBJECT}`
+): Pick<ExtractedEmailData, 'retrievedOriginal' | 'headers' | 'subject'> {
   return {
-    // The report's own top-level headers, as SES received them
+    // The report's own top-level headers and Subject, as SES received them
     headers,
+    subject,
     retrievedOriginal: {
       location: 'mailbox',
       receivedAt: RECEIVED,
@@ -149,6 +151,7 @@ function retrieved(
         internetMessageId: IMID,
         senderAddress: SENDER,
         subject: SUBJECT,
+        sameMessageIdCount: '1',
         ...identity,
       },
     },
@@ -220,15 +223,28 @@ describe('anchorFromReport', () => {
     expect(found).toEqual({
       anchor: { ...ANCHOR, receivedAt: RECEIVED },
     });
-    // In-Reply-To alone, References alone, any header-name case, brackets aside
+    // In-Reply-To alone; with no In-Reply-To, the LAST References entry;
+    // any header-name case, brackets and spaces aside
     for (const headers of <Array<Record<string, string>>>[
       { 'In-Reply-To': IMID },
       { references: `<a@x.test>\r\n ${IMID}` },
-      { 'in-reply-to': ` ${IMID} ` },
+      { 'in-reply-to': ` ${IMID} `, References: `${IMID} <later@x.test>` },
     ]) {
       expect(anchorFromReport(retrieved({}, headers), report([reporterRow()]))).toHaveProperty(
         'anchor'
       );
+    }
+    // The forward's own Subject, with its reply/forward prefixes removed
+    for (const subject of [
+      SUBJECT,
+      `FW: ${SUBJECT}`,
+      `Fwd: ${SUBJECT}`,
+      `RE: FW: fwd:  ${SUBJECT.toUpperCase()}`,
+      ` fw :${SUBJECT}  `,
+    ]) {
+      expect(
+        anchorFromReport(retrieved({}, undefined, subject), report([reporterRow()]))
+      ).toHaveProperty('anchor');
     }
   });
 
@@ -320,6 +336,54 @@ describe('anchorFromReport', () => {
     [
       'a report whose headers name a different message',
       retrieved({}, { 'In-Reply-To': '<other@x.test>', References: '<other@x.test>' }),
+      report([reporterRow()]),
+      'not_the_forwarded_message',
+    ],
+    [
+      'a Message-ID the mailbox search found twice (another folder, Recoverable Items, or beyond the 5-copy row)',
+      retrieved({ sameMessageIdCount: '2+' }),
+      report([reporterRow()]),
+      'ambiguous_message_id',
+    ],
+    [
+      'a Message-ID search that failed or had no time',
+      retrieved({ sameMessageIdCount: 'unknown' }),
+      report([reporterRow()]),
+      'uniqueness_unknown',
+    ],
+    [
+      'no Message-ID search at all',
+      retrieved({ sameMessageIdCount: undefined }),
+      report([reporterRow()]),
+      'uniqueness_unknown',
+    ],
+    [
+      'an In-Reply-To naming two messages',
+      retrieved({}, { 'In-Reply-To': `${IMID} <other@x.test>` }),
+      report([reporterRow()]),
+      'not_the_forwarded_message',
+    ],
+    [
+      'an In-Reply-To naming another message, even with the anchor in References',
+      retrieved({}, { 'In-Reply-To': '<other@x.test>', References: IMID }),
+      report([reporterRow()]),
+      'not_the_forwarded_message',
+    ],
+    [
+      'References naming the anchor, but not last',
+      retrieved({}, { References: `${IMID} <later@x.test>` }),
+      report([reporterRow()]),
+      'not_the_forwarded_message',
+    ],
+    [
+      "a forward whose own Subject is another email's",
+      retrieved({}, undefined, 'FW: Payroll for November'),
+      report([reporterRow()]),
+      'not_the_forwarded_message',
+    ],
+    [
+      'a forward with no Subject',
+      retrieved({}, undefined, ''),
       report([reporterRow()]),
       'not_the_forwarded_message',
     ],
@@ -938,6 +1002,30 @@ describe('a live removal through CampaignResponseService', () => {
     );
     expect(text).not.toContain('different Internet Message-ID');
     expect(text).not.toMatch(/strongest|is the reported email itself/);
+  });
+
+  it('stores one anchor when two reports open the same incident at once', async () => {
+    // Creation is INSERT ... ON CONFLICT (campaign_signature) DO NOTHING: one
+    // insert wins; the other reads the winner's row and joins it as an update,
+    // where the stored anchor is kept (summary and write-once store)
+    const { service: svc, store } = service();
+    const later = '<later@mail.examp1e-billing.test>';
+    const first = campaignReport([recipient(1)]);
+    const second = campaignReport(
+      [recipient(1)],
+      retrieved({ internetMessageId: later }, { 'In-Reply-To': later })
+    ) as { blastRadius: BlastRadiusReport };
+    second.blastRadius.recipients![0] = reporterRow({
+      copyDetails: [detail('AAMkAG-reporter', { internetMessageId: later })],
+    });
+    await Promise.all([svc.handleCampaignReport(first), svc.handleCampaignReport(second as never)]);
+    expect(store.incidents).toHaveLength(1);
+    expect(store.incidents[0].summary.removalAnchor?.internetMessageId).toBe(IMID);
+    // Every removal proposed rests on that one anchor
+    for (const action of removals(store)) {
+      const scope = action.scope as RemovalScope;
+      expect(scope.live?.anchor.internetMessageId).toBe(IMID);
+    }
   });
 
   it('keeps the first anchor when two reports are processed at once', async () => {
