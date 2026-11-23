@@ -793,6 +793,8 @@ function anchored(input: CampaignReportInput): CampaignReportInput {
     ...input,
     emailData: {
       ...input.emailData,
+      // The report's own header naming the forwarded message
+      headers: { 'In-Reply-To': ANCHOR_IMID },
       retrievedOriginal: {
         location: 'mailbox',
         receivedAt: '2026-11-17T09:14:00.000Z',

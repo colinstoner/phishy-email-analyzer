@@ -184,6 +184,18 @@ describe('ResponseStore', () => {
     expect(calls).toHaveLength(1);
   });
 
+  it('keeps a stored removal anchor: a summary write can set it once, never replace or drop it', async () => {
+    const { calls, db } = fakeDb();
+    const store = new ResponseStore(db);
+    await store.updateIncident('i1', { summary: { removalAnchor: { messageId: 'b' } } as never });
+    // One statement: under concurrency Postgres re-evaluates it on the row
+    // another writer just committed, so the first anchor written survives
+    expect(calls[0].text).toContain(
+      "summary = CASE WHEN summary ? 'removalAnchor' THEN $1::jsonb || jsonb_build_object('removalAnchor', summary->'removalAnchor') ELSE $1::jsonb END"
+    );
+    expect(calls[0].params[0]).toBe(JSON.stringify({ removalAnchor: { messageId: 'b' } }));
+  });
+
   it('expires and cancels with conditional updates', async () => {
     const { calls, db } = fakeDb([[ACTION_ROW], [ACTION_ROW]]);
     const store = new ResponseStore(db);

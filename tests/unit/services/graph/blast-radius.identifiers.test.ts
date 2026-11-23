@@ -187,6 +187,39 @@ describe('blast radius identifiers for campaign response', () => {
     );
   });
 
+  it('omits a copy detail value over its bound instead of truncating it', async () => {
+    const long: FakeResponder = (request: RecordedRequest) => {
+      const path = decodeURIComponent(request.path);
+      if (path === `/users/${ALICE}/messages`) {
+        return collection([
+          {
+            ...msg('AAMkAGI2-alice-1='),
+            internetMessageId: `<${'a'.repeat(170)}@mail.example.org>`,
+            from: { emailAddress: { address: `${'b'.repeat(120)}@example.org` } },
+          },
+        ]);
+      }
+      return responder(request);
+    };
+    const graph = fakeGraph([long]);
+    const service = new BlastRadiusService({
+      client: graph.client,
+      now: (): number => NOW.getTime(),
+      concurrency: 1,
+    });
+    const report = await service.lookup(email);
+    const alice = (report.recipients ?? []).find(r => r.address === 'alice@example.com');
+    expect(alice?.copyDetails?.[0]).toEqual({
+      messageId: 'AAMkAGI2-alice-1=',
+      subjectHash: subjectKeyHash('Invoice 7731 overdue'),
+      receivedAt: '2026-11-16T08:03:00.000Z',
+    });
+    // Still a valid answer for the broker's wire format
+    expect(
+      BlastRadiusLookupResultSchema.safeParse({ report, errors: 0, cached: false }).success
+    ).toBe(true);
+  });
+
   it('refuses malformed identifiers from the broker', () => {
     const base = {
       status: 'complete',

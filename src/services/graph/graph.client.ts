@@ -24,6 +24,7 @@ import { createLogger } from '../../utils/logger';
 import { GraphAccessTokenProvider } from './graph.auth';
 import { GraphError, GraphFailureKind } from './graph.errors';
 import { GraphPath, GraphQuery, buildRequestUrl, parseNextLink } from './graph.request';
+import { parseRetryAfter } from './retry.after';
 
 const logger = createLogger('graph-client');
 
@@ -143,28 +144,8 @@ function readRequestId(response: Response): string | undefined {
   return value && /^[A-Za-z0-9-]{1,64}$/.test(value) ? value : undefined;
 }
 
-/**
- * Parse a `Retry-After` header (delta-seconds or an HTTP date) into
- * milliseconds from now
- */
-export function parseRetryAfter(
-  header: string | null,
-  nowMs: number = Date.now()
-): number | undefined {
-  if (!header) {
-    return undefined;
-  }
-  const trimmed = header.trim();
-  if (/^\d+$/.test(trimmed)) {
-    return parseInt(trimmed, 10) * 1000;
-  }
-  // Date.parse is lenient ("-5" is a year); accept only the HTTP-date shape
-  const dateMs = /^[A-Za-z]{3}, \d{2} [A-Za-z]{3} \d{4} /.test(trimmed) ? Date.parse(trimmed) : NaN;
-  if (Number.isNaN(dateMs)) {
-    return undefined;
-  }
-  return Math.max(0, dateMs - nowMs);
-}
+// Shared with the write tier, which must not bundle this client
+export { parseRetryAfter } from './retry.after';
 
 export class GraphClient {
   /** Label of the credential this client acts as (e.g. `read`) */

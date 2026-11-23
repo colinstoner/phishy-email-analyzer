@@ -138,6 +138,11 @@ export interface LiveRemovalBasis {
   anchor: RemovalAnchor;
   windowHours: number;
   sizeTolerancePercent: number;
+  /** A copy with the anchor's Message-ID must have arrived within this of the anchor */
+  sameMessageSpreadMinutes: number;
+  /** Arrival spread (ISO) of the copies admitted on each basis */
+  sameIdReceived?: { first: string; last: string };
+  sizeReceived?: { first: string; last: string };
   /** Distinct Internet Message-IDs among the included copies */
   distinctMessages: number;
   /** Included copies whose Internet Message-ID is the anchor's */

@@ -39,7 +39,10 @@ import {
   DELIVERY_STATUS_PATTERN,
   DIRECTORY_ID_PATTERN,
   GRAPH_ITEM_ID_PATTERN,
+  COPY_TEXT_PATTERN,
   MAX_ADDRESS_LENGTH,
+  MAX_COPY_MESSAGE_ID_LENGTH,
+  MAX_COPY_SENDER_LENGTH,
   MAX_LISTED_RECIPIENTS,
   MAX_REPORTED_COPY_IDS,
   MAX_SUBJECT_LENGTH,
@@ -1216,8 +1219,16 @@ function copyDetails(found: MessageSummary[], traceSizes: Map<string, number>): 
     }
     seen.add(message.id);
     const internetMessageId = message.internetMessageId?.trim();
-    const validId = internetMessageId && MESSAGE_ID_PATTERN.test(internetMessageId);
-    const sender = message.fromAddress?.trim().toLowerCase();
+    const validId =
+      internetMessageId &&
+      internetMessageId.length <= MAX_COPY_MESSAGE_ID_LENGTH &&
+      COPY_TEXT_PATTERN.test(internetMessageId) &&
+      MESSAGE_ID_PATTERN.test(internetMessageId);
+    const rawSender = message.fromAddress?.trim().toLowerCase();
+    const sender =
+      rawSender && rawSender.length <= MAX_COPY_SENDER_LENGTH && COPY_TEXT_PATTERN.test(rawSender)
+        ? rawSender
+        : undefined;
     const received = Date.parse(message.receivedDateTime ?? '');
     const size = validId ? traceSizes.get(stripAngleBrackets(internetMessageId)) : undefined;
     details.push({

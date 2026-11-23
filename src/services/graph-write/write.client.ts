@@ -42,7 +42,7 @@ import { randomUUID } from 'crypto';
 import { z } from 'zod';
 import { createLogger } from '../../utils/logger';
 import { GraphAccessTokenProvider } from '../graph/graph.auth';
-import { parseRetryAfter } from '../graph/graph.client';
+import { parseRetryAfter } from '../graph/retry.after';
 import { GraphPath, buildRequestUrl, graphPath } from '../graph/graph.request';
 
 const logger = createLogger('graph-write-client');

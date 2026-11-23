@@ -52,7 +52,7 @@ const SUBJECT = 'Invoice 2291 overdue';
 const RECEIVED = '2026-11-17T09:14:00.000Z';
 const ACTION_ID = '9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d';
 const REPORTER = 'reporter1@example.com';
-const RULES = { windowHours: 6, sizeTolerancePercent: 1 };
+const RULES = { windowHours: 6, sizeTolerancePercent: 1, sameMessageSpreadMinutes: 60 };
 const LIMITS = { maxMailboxes: 500, maxMessages: 1000 };
 
 const ANCHOR: RemovalAnchor = {
@@ -133,9 +133,12 @@ function reachOf(recipients: BlastRadiusRecipient[]): IncidentReach {
 
 /** What the original-message lookup stored for the reporter's copy */
 function retrieved(
-  identity: Partial<NonNullable<ExtractedEmailData['retrievedOriginal']>['identity']> = {}
-): Pick<ExtractedEmailData, 'retrievedOriginal'> {
+  identity: Partial<NonNullable<ExtractedEmailData['retrievedOriginal']>['identity']> = {},
+  headers: Record<string, string> = { 'In-Reply-To': IMID, References: `<earlier@x.test> ${IMID}` }
+): Pick<ExtractedEmailData, 'retrievedOriginal' | 'headers'> {
   return {
+    // The report's own top-level headers, as SES received them
+    headers,
     retrievedOriginal: {
       location: 'mailbox',
       receivedAt: RECEIVED,
@@ -212,10 +215,73 @@ function stubBroker(
 // ── The anchor ─────────────────────────────────────────────────────────────
 
 describe('anchorFromReport', () => {
-  it('accepts the reporter-mailbox original the reporter forwarded, as Exchange stored it', () => {
+  it('accepts the reporter-mailbox original this forward names in its own headers', () => {
     const found = anchorFromReport(retrieved(), report([reporterRow(), recipient(1)]));
     expect(found).toEqual({
       anchor: { ...ANCHOR, receivedAt: RECEIVED },
+    });
+    // In-Reply-To alone, References alone, any header-name case, brackets aside
+    for (const headers of <Array<Record<string, string>>>[
+      { 'In-Reply-To': IMID },
+      { references: `<a@x.test>\r\n ${IMID}` },
+      { 'in-reply-to': ` ${IMID} ` },
+    ]) {
+      expect(anchorFromReport(retrieved({}, headers), report([reporterRow()]))).toHaveProperty(
+        'anchor'
+      );
+    }
+  });
+
+  it('(a) a planted block naming a message the reporter forwarded last week gives no anchor', () => {
+    // An Outlook-style forward of the phishing email, whose body carries a
+    // planted Gmail-style block naming a real email from last week. The
+    // parser takes the planted block, so the original-message lookup finds
+    // that real email, which the reporter did forward (last week). The
+    // forward's own headers name the phishing email it actually forwards.
+    const lastWeek = '<payroll-0910@hr.example.com>';
+    const found = anchorFromReport(
+      retrieved(
+        {
+          internetMessageId: lastWeek,
+          senderAddress: 'hr@example.com',
+          subject: 'Payroll for November',
+        },
+        { 'In-Reply-To': IMID, References: IMID, 'Thread-Index': 'AQHZ' }
+      ),
+      report([
+        reporterRow({
+          copyDetails: [
+            detail('AAMkAG-reporter', {
+              internetMessageId: lastWeek,
+              senderAddress: 'hr@example.com',
+              subjectHash: subjectKeyHash('Payroll for November'),
+              receivedAt: '2026-11-10T08:00:00.000Z',
+            }),
+          ],
+        }),
+      ])
+    );
+    expect(found).toEqual({ rejected: 'not_the_forwarded_message' });
+  });
+
+  it('(e) reads In-Reply-To only from the report itself, never from an attached message', () => {
+    // A forward-as-attachment: the report has no In-Reply-To of its own; the
+    // attached message's headers (and text pasted in the body) do not count
+    const emailData = {
+      ...retrieved({}, { Subject: 'FW: Invoice 2291 overdue', 'Message-ID': '<fw-1@example.com>' }),
+      forwardedHeaders: { 'Original-Message-ID': IMID, 'In-Reply-To': IMID },
+      text: `In-Reply-To: ${IMID}\nReferences: ${IMID}`,
+      attachments: [
+        {
+          filename: 'Invoice.eml',
+          contentType: 'message/rfc822',
+          size: 1,
+          headers: { 'In-Reply-To': IMID },
+        },
+      ],
+    };
+    expect(anchorFromReport(emailData as never, report([reporterRow()]))).toEqual({
+      rejected: 'not_the_forwarded_message',
     });
   });
 
@@ -238,6 +304,35 @@ describe('anchorFromReport', () => {
       retrieved({ senderAddress: undefined }),
       report([reporterRow()]),
       'incomplete_identity',
+    ],
+    [
+      'an original whose subject is empty once normalized',
+      retrieved({ subject: '   ' }),
+      report([reporterRow()]),
+      'incomplete_identity',
+    ],
+    [
+      'a report with no In-Reply-To or References',
+      retrieved({}, { Subject: 'Fwd: Invoice 2291 overdue' }),
+      report([reporterRow()]),
+      'not_the_forwarded_message',
+    ],
+    [
+      'a report whose headers name a different message',
+      retrieved({}, { 'In-Reply-To': '<other@x.test>', References: '<other@x.test>' }),
+      report([reporterRow()]),
+      'not_the_forwarded_message',
+    ],
+    [
+      'a Message-ID held twice in the reporter mailbox',
+      retrieved(),
+      report([
+        reporterRow({
+          messageIds: ['AAMkAG-reporter', 'AAMkAG-reporter-2'],
+          copyDetails: [detail('AAMkAG-reporter'), detail('AAMkAG-reporter-2')],
+        }),
+      ]),
+      'ambiguous_message_id',
     ],
     ['no blast-radius lookup', retrieved(), undefined, 'no_blast_radius'],
     [
@@ -292,6 +387,7 @@ describe('computeLiveRemovalScope', () => {
       recipient(4, {}, { senderAddress: 'billing@example.org' }), // another sender
       recipient(5, {}, { subjectHash: subjectKeyHash('Invoice 2291 overdue - reminder') }), // contains, not equal
       recipient(6, {}, { receivedAt: '2026-11-17T16:00:00.000Z' }), // outside 6 h
+      recipient(11, {}, { receivedAt: '2026-11-17T10:30:00.000Z' }), // same ID, 76 min later
       recipient(7, {}, { internetMessageId: '<other-7@x.test>', size: undefined }), // no size
       recipient(8, { copyDetails: undefined }), // no details at all
       recipient(9, { mailboxId: undefined }), // no identifiers
@@ -319,13 +415,21 @@ describe('computeLiveRemovalScope', () => {
       distinctMessages: 2,
       sameMessageIdAsAnchor: 3,
       matchedOnSize: 1,
-      excluded: 6,
+      excluded: 7,
       windowHours: 6,
       sizeTolerancePercent: 1,
+      sameMessageSpreadMinutes: 60,
+      sameIdReceived: { first: RECEIVED, last: RECEIVED },
+      sizeReceived: { first: RECEIVED, last: RECEIVED },
+    });
+    // A same-ID copy is re-checked within the tight window, a size match within the wide one
+    expect(scope.mailboxes[1].verify?.[0]).toMatchObject({
+      receivedFrom: '2026-11-17T08:14:00.000Z',
+      receivedTo: '2026-11-17T10:14:00.000Z',
     });
     expect(scope.skipped.noIdentifiers).toBe(1);
     // The reach itself is unchanged: warnings still see everyone
-    expect(reach.recipients).toHaveLength(11);
+    expect(reach.recipients).toHaveLength(12);
   });
 
   it('admits only the anchor Message-ID when the size band is 0 or the anchor size is unknown', () => {
@@ -384,7 +488,7 @@ describe('computeLiveRemovalScope', () => {
         }),
       ])
     );
-    expect(decoy).toEqual({ rejected: 'not_forwarded_by_reporter' });
+    expect(decoy).toEqual({ rejected: 'not_the_forwarded_message' });
   });
 });
 
@@ -452,8 +556,8 @@ describe('LiveRemovalExecutor', () => {
       expectedInternetMessageId: IMID,
       expectedSenderAddress: SENDER,
       expectedSubjectSha256: subjectKeyHash(SUBJECT),
-      receivedFrom: '2026-11-17T03:14:00.000Z',
-      receivedTo: '2026-11-17T15:14:00.000Z',
+      receivedFrom: '2026-11-17T08:14:00.000Z',
+      receivedTo: '2026-11-17T10:14:00.000Z',
     });
     expect(broker.calls[0].params).toEqual({
       actionId: ACTION_ID,
@@ -757,7 +861,12 @@ describe('a live removal through CampaignResponseService', () => {
       sent,
       broker,
     } = service({
-      cfg: { employeeWarning: 'auto', distributionWarning: 'auto' },
+      cfg: {
+        employeeWarning: 'auto',
+        distributionWarning: 'auto',
+        // Size matching is off by default; this operator raised it
+        removal: { mode: 'live', sizeTolerancePercent: 1 },
+      },
     });
     await svc.handleCampaignReport(
       campaignReport([
@@ -765,7 +874,11 @@ describe('a live removal through CampaignResponseService', () => {
         recipient(
           2,
           {},
-          { internetMessageId: '<other-2@mail.examp1e-billing.test>', size: 20_100 }
+          {
+            internetMessageId: '<other-2@mail.examp1e-billing.test>',
+            size: 20_100,
+            receivedAt: '2026-11-17T11:40:00.000Z',
+          }
         ),
         recipient(3, {}, { senderAddress: 'billing@example.org' }),
       ])
@@ -781,7 +894,13 @@ describe('a live removal through CampaignResponseService', () => {
     expect(text).not.toContain('never a search');
     expect(text).toContain('Moves 3 copy(ies) in 3 mailbox(es)');
     expect(text).toContain('They are 2 distinct email(s) by Internet Message-ID');
-    expect(text).toContain('within 1% of it');
+    expect(text).toContain(
+      '2 copy(ies) carry the same Internet Message-ID as the reported copy, arriving at Tue, 17 Nov 2026, 09:14 UTC (within 60 minutes of it)'
+    );
+    expect(text).toContain(
+      "1 copy(ies) have a different Internet Message-ID and were included because their message-trace size is within 1% of the reported copy's, arriving at Tue, 17 Nov 2026, 11:40 UTC (within 6 hour(s) of it)"
+    );
+    expect(text).not.toMatch(/strongest|is the reported email itself/);
     expect(text).toContain(
       'from billing@examp1e-billing[.]test with exactly the subject "Invoice 2291 overdue"'
     );
@@ -794,12 +913,58 @@ describe('a live removal through CampaignResponseService', () => {
     expect(broker.calls).toEqual([]);
   });
 
-  it('says so when every copy is the reported email itself', async () => {
-    const { service: svc, sent } = service();
-    await svc.handleCampaignReport(campaignReport([recipient(1), recipient(2)]));
-    expect(sent.find(e => e.to === TEAM[0])!.text).toContain(
-      'every copy is the reported email itself (the same Internet Message-ID as the copy the reporter forwarded): the strongest case'
+  it('by default admits only copies with the reported Message-ID, arriving close to it', async () => {
+    const { service: svc, store, sent } = service();
+    await svc.handleCampaignReport(
+      campaignReport([
+        recipient(1),
+        recipient(2, {}, { receivedAt: '2026-11-17T09:50:00.000Z' }),
+        // Same sender and subject, size identical, another Message-ID: off by default
+        recipient(3, {}, { internetMessageId: '<other-3@mail.examp1e-billing.test>' }),
+        // Same Message-ID but 3 hours later: outside the 60-minute spread
+        recipient(4, {}, { receivedAt: '2026-11-17T12:14:00.000Z' }),
+      ])
     );
+    const scope = removals(store)[0].scope as RemovalScope;
+    expect(scope.mailboxes.map(m => m.address)).toEqual([
+      REPORTER,
+      'person1@example.com',
+      'person2@example.com',
+    ]);
+    expect(scope.live).toMatchObject({ sizeTolerancePercent: 0, matchedOnSize: 0, excluded: 2 });
+    const text = sent.find(e => e.to === TEAM[0])!.text;
+    expect(text).toContain(
+      '3 copy(ies) carry the same Internet Message-ID as the reported copy, arriving between Tue, 17 Nov 2026, 09:14 UTC and Tue, 17 Nov 2026, 09:50 UTC (within 60 minutes of it)'
+    );
+    expect(text).not.toContain('different Internet Message-ID');
+    expect(text).not.toMatch(/strongest|is the reported email itself/);
+  });
+
+  it('keeps the first anchor when two reports are processed at once', async () => {
+    const { service: svc, store } = service();
+    // The incident exists without an anchor (its first report had none)
+    await svc.handleCampaignReport(campaignReport([recipient(1)], {}));
+    const second = campaignReport([recipient(1)]);
+    const third = campaignReport(
+      [recipient(1)],
+      retrieved(
+        { internetMessageId: '<later@mail.examp1e-billing.test>' },
+        { 'In-Reply-To': '<later@mail.examp1e-billing.test>' }
+      )
+    ) as { blastRadius: BlastRadiusReport };
+    third.blastRadius.recipients![0] = reporterRow({
+      copyDetails: [
+        detail('AAMkAG-reporter', { internetMessageId: '<later@mail.examp1e-billing.test>' }),
+      ],
+    });
+    // Both read the incident before either writes it
+    await Promise.all([svc.handleCampaignReport(second), svc.handleCampaignReport(third as never)]);
+    expect(store.incidents[0].summary.removalAnchor?.internetMessageId).toBe(IMID);
+    // A later write without an anchor does not drop it either
+    await store.updateIncident(store.incidents[0].id, {
+      summary: { ...store.incidents[0].summary, removalAnchor: undefined },
+    });
+    expect(store.incidents[0].summary.removalAnchor?.internetMessageId).toBe(IMID);
   });
 
   it.each([

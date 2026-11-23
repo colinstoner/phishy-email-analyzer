@@ -68,6 +68,7 @@ import {
 import {
   DEFAULT_REMOVAL_SIZE_TOLERANCE_PERCENT,
   DEFAULT_REMOVAL_WINDOW_HOURS,
+  DEFAULT_SAME_MESSAGE_SPREAD_MINUTES,
   LiveRemovalRules,
   anchorFromReport,
   computeLiveRemovalScope,
@@ -142,10 +143,8 @@ export interface CampaignReportInput {
   campaign: CampaignRecord;
   risk: ReportRisk;
   analysis: Pick<AnalysisResult, 'summary' | 'indicators' | 'analysisFailed'>;
-  emailData: Pick<
-    ExtractedEmailData,
-    'subject' | 'forwardedHeaders' | 'retrievedOriginal' | 'userReport'
-  >;
+  emailData: Pick<ExtractedEmailData, 'subject' | 'forwardedHeaders'> &
+    Partial<Pick<ExtractedEmailData, 'retrievedOriginal' | 'userReport' | 'headers'>>;
   analysisId?: string;
   /** This report's blast-radius lookup, when one ran */
   blastRadius?: BlastRadiusReport;
@@ -403,6 +402,8 @@ export class CampaignResponseService {
       windowHours: this.config.removal?.windowHours ?? DEFAULT_REMOVAL_WINDOW_HOURS,
       sizeTolerancePercent:
         this.config.removal?.sizeTolerancePercent ?? DEFAULT_REMOVAL_SIZE_TOLERANCE_PERCENT,
+      sameMessageSpreadMinutes:
+        this.config.removal?.sameMessageSpreadMinutes ?? DEFAULT_SAME_MESSAGE_SPREAD_MINUTES,
     };
   }
 
@@ -443,7 +444,7 @@ export class CampaignResponseService {
   private anchorOf(input: CampaignReportInput): RemovalAnchor | undefined {
     const found = anchorFromReport(input.emailData, input.blastRadius);
     if ('rejected' in found) {
-      logger.info('No removal anchor from this report', { reason: found.rejected });
+      logger.debug('No removal anchor from this report', { reason: found.rejected });
       return undefined;
     }
     return found.anchor;
@@ -660,6 +661,17 @@ export class CampaignResponseService {
     const reach = mergeReach(stored.reach, input.blastRadius, input.blastRadiusEnabled);
     const summary = this.withDelivery(this.summaryFrom(input, stored.summary), reach);
     await this.store.updateIncident(stored.id, { reach, summary, reportCount });
+    if (summary.removalAnchor && !stored.summary.removalAnchor) {
+      // The store keeps the first anchor written (another report may have
+      // set one since this one was read): use the stored one, never ours
+      const fresh = await this.store.getIncident(stored.id);
+      const kept = fresh?.summary.removalAnchor;
+      if (kept) {
+        summary.removalAnchor = kept;
+      } else {
+        delete summary.removalAnchor;
+      }
+    }
     const incident: CampaignIncident = { ...stored, reach, summary, reportCount };
     if (stored.summary.openedOnReach && input.match.shouldAlert && input.campaign.id) {
       // The reach-opened incident has now crossed the report-count threshold

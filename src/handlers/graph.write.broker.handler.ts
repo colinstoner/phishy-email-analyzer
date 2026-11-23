@@ -42,7 +42,7 @@
 import type { Context } from 'aws-lambda';
 import { loadGraphWriteBrokerConfig } from '../config';
 import { GraphWriteBrokerConfig } from '../config/schema';
-import { loadGraphCredential } from '../services/graph/graph.credential';
+import { loadGraphCredential } from '../services/graph/certificate.loader';
 import { GraphTokenProvider } from '../services/graph/graph.auth';
 import { GraphWriteClient } from '../services/graph-write/write.client';
 import { removeMessages } from '../services/graph-write/remove.messages';

@@ -248,6 +248,16 @@ export class ResponseStore {
       params.push(
         typeof value === 'object' && !(value instanceof Date) ? JSON.stringify(value) : value
       );
+      if (key === 'summary') {
+        // The live-removal anchor is write-once: a stored anchor always
+        // survives (two reports processed at once cannot replace or drop
+        // it), and the incoming one is kept only when none is stored. One
+        // statement, so a concurrent update re-evaluates it on the new row
+        sets.push(
+          `summary = CASE WHEN summary ? 'removalAnchor' THEN $${params.length}::jsonb || jsonb_build_object('removalAnchor', summary->'removalAnchor') ELSE $${params.length}::jsonb END`
+        );
+        continue;
+      }
       sets.push(`${column} = $${params.length}`);
     }
     if (sets.length === 0) {

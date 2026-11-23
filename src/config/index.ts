@@ -93,6 +93,8 @@ export const ENV_MAPPINGS: Readonly<Record<string, string>> = {
   PHISHY_CAMPAIGN_RESPONSE_REMOVAL_WINDOW_HOURS: 'campaignResponse.removal.windowHours',
   PHISHY_CAMPAIGN_RESPONSE_REMOVAL_SIZE_TOLERANCE_PERCENT:
     'campaignResponse.removal.sizeTolerancePercent',
+  PHISHY_CAMPAIGN_RESPONSE_REMOVAL_SAME_MESSAGE_SPREAD_MINUTES:
+    'campaignResponse.removal.sameMessageSpreadMinutes',
 
   // Campaign verdict cache
   PHISHY_CAMPAIGN_CACHE_ENABLED: 'campaignCache.enabled',

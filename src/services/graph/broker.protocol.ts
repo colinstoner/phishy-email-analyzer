@@ -27,12 +27,15 @@
 
 import { z } from 'zod';
 import {
+  COPY_TEXT_PATTERN,
   DELIVERY_STATUS_PATTERN,
   DIRECTORY_ID_PATTERN,
   GRAPH_ITEM_ID_PATTERN,
   IP_SHAPE,
   MAX_ADDRESS_LENGTH,
   MAX_CLAIMED_TIME_LENGTH,
+  MAX_COPY_MESSAGE_ID_LENGTH,
+  MAX_COPY_SENDER_LENGTH,
   MAX_LISTED_RECIPIENTS,
   MAX_MESSAGE_HEADERS,
   MAX_REPORTED_BURST_IPS,
@@ -491,10 +494,20 @@ const BlastRadiusRecipientSchema = z.strictObject({
     .array(
       z.strictObject({
         messageId: z.string().regex(GRAPH_ITEM_ID_PATTERN),
-        internetMessageId: z.string().regex(MESSAGE_ID_PATTERN).optional(),
-        senderAddress: MailAddress.optional(),
+        internetMessageId: z
+          .string()
+          .max(MAX_COPY_MESSAGE_ID_LENGTH)
+          .regex(COPY_TEXT_PATTERN)
+          .regex(MESSAGE_ID_PATTERN)
+          .optional(),
+        senderAddress: z
+          .string()
+          .max(MAX_COPY_SENDER_LENGTH)
+          .regex(COPY_TEXT_PATTERN)
+          .regex(/^[^@]+@[^@]+$/)
+          .optional(),
         subjectHash: z.string().regex(SUBJECT_HASH_PATTERN).optional(),
-        receivedAt: z.iso.datetime().optional(),
+        receivedAt: z.iso.datetime().max(40).optional(),
         size: z
           .number()
           .int()
@@ -590,7 +603,10 @@ export type GraphBrokerResult<Op extends GraphBrokerOperation> = z.infer<
  */
 export const GRAPH_BROKER_MAX_RESPONSE_BYTES: Record<GraphBrokerOperation, number> = {
   original_message_lookup: 3 * 1024 * 1024,
-  blast_radius_lookup: 512 * 1024,
+  // At most 100 listed recipients, each with up to 5 copy IDs and 5 copy
+  // details at their field bounds: about 1.0 MB at the schema's worst case
+  // (tests/unit/services/graph/broker.protocol.size.test.ts), with margin
+  blast_radius_lookup: 1536 * 1024,
   sender_history_lookup: 64 * 1024,
   // Up to 10 flags, each with 100 recipients and a handful of numbers
   fanout_scan: 512 * 1024,

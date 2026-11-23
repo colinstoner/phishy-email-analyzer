@@ -124,6 +124,9 @@ describe('mailbox writes live only in the write tier', () => {
       'src/services/graph/mail.operations.ts',
       'src/services/graph/blast-radius.service.ts',
       'src/services/graph/trace.operations.ts',
+      // The read client (and the module that builds read clients)
+      'src/services/graph/graph.client.ts',
+      'src/services/graph/graph.credential.ts',
       'src/handlers/graph.broker.handler.ts',
       'src/services/email/parser.service.ts',
       'node_modules/mailparser',

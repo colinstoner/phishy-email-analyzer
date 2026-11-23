@@ -295,6 +295,7 @@ export class LiveRemovalExecutor implements RemovalExecutor {
       {
         windowHours: approved.live.windowHours,
         sizeTolerancePercent: approved.live.sizeTolerancePercent,
+        sameMessageSpreadMinutes: approved.live.sameMessageSpreadMinutes,
       }
     );
     return now.mailboxes.flatMap(m => m.messageIds).filter(id => !named.has(id)).length;
