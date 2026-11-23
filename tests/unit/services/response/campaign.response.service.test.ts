@@ -23,6 +23,7 @@ import type {
   RemovedMailbox,
   WarningScope as WarningScopeType,
 } from '../../../../src/services/response/response.types';
+import { subjectKeyHash } from '../../../../src/services/graph/subject.key';
 import { FakeResponseStore } from './fake.store';
 
 const SAFE = ['example.com'];
@@ -576,7 +577,7 @@ describe('remove remaining copies (dry run only)', () => {
     expect(text).toContain('unread in the inbox: 2');
     expect(text).toContain('read in the inbox: 2');
     expect(text).toContain('in Junk Email: 1');
-    expect(text).toContain('No mailbox was changed: the mailbox write tier is not installed');
+    expect(text).toContain('No mailbox was changed: this was a dry run');
     expect(store.actions.find(a => a.id === removal.id)).toMatchObject({
       status: 'dry_run_completed',
       executor: 'dry_run_removal',
@@ -763,7 +764,60 @@ describe('remove remaining copies (dry run only)', () => {
   });
 });
 
-describe('removal notice (only after a real removal: the write tier is not built)', () => {
+/**
+ * The same report with what a live removal needs: the original-message
+ * lookup's stored identity for the reporter's copy, and blast-radius copy
+ * details showing every copy is that email, with the reporter's own copy
+ * marked forwarded. Invented data.
+ */
+const ANCHOR_IMID = '<invoice-2291@mail.examp1e-billing.test>';
+const ANCHOR_SUBJECT = 'Invoice 2291 overdue';
+function anchored(input: CampaignReportInput): CampaignReportInput {
+  const subjectHash = subjectKeyHash(ANCHOR_SUBJECT);
+  const recipients = (input.blastRadius?.recipients ?? []).map(r =>
+    r.mailboxId && r.messageIds
+      ? {
+          ...r,
+          ...(r.address === 'reporter1@example.com' ? { response: 'forwarded' as const } : {}),
+          copyDetails: r.messageIds.map(id => ({
+            messageId: id,
+            internetMessageId: ANCHOR_IMID,
+            senderAddress: 'billing@examp1e-billing.test',
+            subjectHash,
+            receivedAt: '2026-11-17T09:14:00.000Z',
+          })),
+        }
+      : r
+  );
+  return {
+    ...input,
+    emailData: {
+      ...input.emailData,
+      // The report's own header naming the forwarded message
+      headers: { 'In-Reply-To': ANCHOR_IMID },
+      retrievedOriginal: {
+        location: 'mailbox',
+        receivedAt: '2026-11-17T09:14:00.000Z',
+        headers: [],
+        headersTruncated: false,
+        identity: {
+          messageId: 'AAMkAG-9',
+          internetMessageId: ANCHOR_IMID,
+          senderAddress: 'billing@examp1e-billing.test',
+          subject: ANCHOR_SUBJECT,
+          sameMessageIdCount: '1',
+        },
+      },
+    },
+    blastRadius: {
+      ...input.blastRadius!,
+      reporterAddress: 'reporter1@example.com',
+      recipients,
+    },
+  };
+}
+
+describe('removal notice (only after a live removal moved a copy)', () => {
   /**
    * Stands in for the future write tier: reports, per mailbox, what it
    * "removed". No Graph call exists; this only returns a result.
@@ -794,7 +848,7 @@ describe('removal notice (only after a real removal: the write tier is not built
     cfg: Partial<CampaignResponseConfig> = {}
   ) {
     const ctx = setup(cfg, { removalExecutor: fakeWriteExecutor(removed) });
-    await ctx.service.handleCampaignReport(reportInput());
+    await ctx.service.handleCampaignReport(anchored(reportInput()));
     const removal = proposed(ctx.store, 'remove_messages')!;
     const reply = await ctx.service.handleApprovals(
       approve('remove_messages', removal.reference),
@@ -872,7 +926,7 @@ describe('removal notice (only after a real removal: the write tier is not built
   it('reports the removal and the notices in the next incident update', async () => {
     const { service, sent, advance } = await approveRemoval(all);
     advance(31 * 60_000);
-    const later = reportInput();
+    const later = anchored(reportInput());
     later.match = { ...later.match, detectionCount: 4, shouldAlert: false };
     await service.handleCampaignReport(later);
     const update = sent[sent.length - 1];
@@ -885,7 +939,7 @@ describe('removal notice (only after a real removal: the write tier is not built
 
   it('keeps the removal result when a notice fails', async () => {
     const ctx = setup({}, { removalExecutor: fakeWriteExecutor(all) });
-    await ctx.service.handleCampaignReport(reportInput());
+    await ctx.service.handleCampaignReport(anchored(reportInput()));
     const removal = proposed(ctx.store, 'remove_messages')!;
     ctx.mailer.sendEmail.mockImplementation(async () => ({
       success: false,

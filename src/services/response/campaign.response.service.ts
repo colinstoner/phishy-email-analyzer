@@ -17,10 +17,11 @@
  *    warned; the distribution list gets its broadcast as before
  *    (`distributionWarning: auto`) unless the operator changes that;
  * 3. "remove remaining copies" is proposed with a scope of exact message IDs
- *    per mailbox; approving it runs a DRY RUN only (no Graph write exists).
- *    A removal executor that really changes mailboxes (the future write
- *    tier) would report each mailbox it removed a copy from, and each of
- *    those people would get the removal notice; with the dry run, nobody does;
+ *    per mailbox; approving it runs a DRY RUN by default. With
+ *    `campaignResponse.removal.mode: live` (and the separate Graph write
+ *    broker deployed and enabled) it moves the approved copies to Deleted
+ *    Items; the executor reports each mailbox it removed a copy from, and
+ *    each of those people gets the removal notice; with the dry run, nobody does;
  * 4. later reports and wider reach update the incident in the same thread,
  *    rate-limited.
  *
@@ -62,7 +63,16 @@ import {
   RemovalExecutor,
   SesWarningExecutor,
   WarningMailer,
+  createRemovalExecutor,
 } from './executors';
+import {
+  DEFAULT_REMOVAL_SIZE_TOLERANCE_PERCENT,
+  DEFAULT_REMOVAL_WINDOW_HOURS,
+  DEFAULT_SAME_MESSAGE_SPREAD_MINUTES,
+  LiveRemovalRules,
+  anchorFromReport,
+  computeLiveRemovalScope,
+} from './removal.eligibility';
 import { generateReference } from './reference';
 import { RESPONSE_MIGRATION, ResponseStore, ResponseStoreUnavailableError } from './response.store';
 import {
@@ -74,6 +84,8 @@ import {
   FanoutIncidentOutcome,
   IncidentReach,
   IncidentSummary,
+  LiveUnavailableReason,
+  RemovalAnchor,
   RemovalScope,
   ResponseAction,
   ResponseActionType,
@@ -131,7 +143,8 @@ export interface CampaignReportInput {
   campaign: CampaignRecord;
   risk: ReportRisk;
   analysis: Pick<AnalysisResult, 'summary' | 'indicators' | 'analysisFailed'>;
-  emailData: Pick<ExtractedEmailData, 'subject' | 'forwardedHeaders'>;
+  emailData: Pick<ExtractedEmailData, 'subject' | 'forwardedHeaders'> &
+    Partial<Pick<ExtractedEmailData, 'retrievedOriginal' | 'userReport' | 'headers'>>;
   analysisId?: string;
   /** This report's blast-radius lookup, when one ran */
   blastRadius?: BlastRadiusReport;
@@ -289,11 +302,17 @@ function contactedBy(actions: ResponseAction[], except?: string): Set<string> {
   return contacted;
 }
 
+/** How long an approved action with no result yet counts as in flight (a Lambda's limit) */
+const IN_FLIGHT_MS = 15 * 60_000;
+
 /**
- * Who has had (or, for an approved removal in flight, may be about to get)
- * a removal notice for this campaign: nobody gets one twice.
+ * Who has had (or, for an approved removal in flight right now, may be about
+ * to get) a removal notice for this campaign: nobody gets one twice. An
+ * approved removal that never recorded a result and is older than any
+ * invocation can run (it crashed, or its result could not be stored) does
+ * not count: nobody is treated as notified on its account.
  */
-function noticedBy(actions: ResponseAction[], except: string): Set<string> {
+function noticedBy(actions: ResponseAction[], except: string, now: Date): Set<string> {
   const noticed = new Set<string>();
   for (const action of actions) {
     if (action.id === except || action.type !== 'remove_messages') {
@@ -303,7 +322,12 @@ function noticedBy(actions: ResponseAction[], except: string): Set<string> {
       for (const address of action.result.notified ?? []) {
         noticed.add(address.toLowerCase());
       }
-    } else if (action.status === 'approved' && action.scope.kind === 'remove_messages') {
+    } else if (
+      action.status === 'approved' &&
+      action.scope.kind === 'remove_messages' &&
+      action.approvedAt !== undefined &&
+      now.getTime() - action.approvedAt.getTime() < IN_FLIGHT_MS
+    ) {
       for (const mailbox of action.scope.mailboxes) {
         noticed.add(mailbox.address.toLowerCase());
       }
@@ -323,8 +347,26 @@ function distributionDone(actions: ResponseAction[], except?: string): boolean {
   );
 }
 
-function actionTitle(type: ResponseActionType): string {
-  return type === 'send_warning' ? 'targeted warning' : 'removal of remaining copies (dry run)';
+/**
+ * A live removal that left nothing to do: every copy was moved or found
+ * moved, gone or refused. One that left copies not attempted, failed or of
+ * unknown outcome (out of time, throttled, the write broker switched off)
+ * may be proposed again with the same scope.
+ */
+function removalFinished(action: ResponseAction): boolean {
+  const outcome = action.result?.removalOutcome;
+  return (
+    action.status === 'completed' &&
+    (!outcome || outcome.notAttempted + outcome.error + outcome.unknown === 0)
+  );
+}
+
+function actionTitle(type: ResponseActionType, liveRemoval = false): string {
+  return type === 'send_warning'
+    ? 'targeted warning'
+    : liveRemoval
+      ? 'removal of remaining copies (moves them to Deleted Items)'
+      : 'removal of remaining copies (dry run)';
 }
 
 export class CampaignResponseService {
@@ -333,19 +375,79 @@ export class CampaignResponseService {
   private readonly newReference: () => string;
   private readonly warningExecutor: SesWarningExecutor;
   private readonly removalExecutor: RemovalExecutor;
+  /** Always available: a dry-run proposal is carried out as a dry run, whatever the deployment */
+  private readonly dryRunExecutor: RemovalExecutor;
 
   constructor(private readonly deps: CampaignResponseDeps) {
     this.store = deps.store;
     this.now = deps.now ?? ((): Date => new Date());
     this.newReference = deps.newReference ?? ((): string => generateReference());
     this.warningExecutor = new SesWarningExecutor(deps.mailer);
+    const dryRunOptions = { timeZone: deps.config.timeZone, now: this.now };
+    // The dry run unless the operator chose `live` and named a write broker
     this.removalExecutor =
-      deps.removalExecutor ??
-      new DryRunRemovalExecutor({ timeZone: deps.config.timeZone, now: this.now });
+      deps.removalExecutor ?? createRemovalExecutor(deps.config.removal, undefined, dryRunOptions);
+    this.dryRunExecutor = this.removalExecutor.changesMailboxes
+      ? new DryRunRemovalExecutor(dryRunOptions)
+      : this.removalExecutor;
   }
 
   private get config(): CampaignResponseConfig {
     return this.deps.config;
+  }
+
+  /** The live-removal eligibility rules from configuration, with conservative defaults */
+  private get liveRules(): LiveRemovalRules {
+    return {
+      windowHours: this.config.removal?.windowHours ?? DEFAULT_REMOVAL_WINDOW_HOURS,
+      sizeTolerancePercent:
+        this.config.removal?.sizeTolerancePercent ?? DEFAULT_REMOVAL_SIZE_TOLERANCE_PERCENT,
+      sameMessageSpreadMinutes:
+        this.config.removal?.sameMessageSpreadMinutes ?? DEFAULT_SAME_MESSAGE_SPREAD_MINUTES,
+    };
+  }
+
+  /**
+   * The removal to propose. A LIVE scope only when this deployment removes
+   * live AND the incident has reports, a malicious verdict and a confirmed
+   * anchor; it then names only copies provably the anchor's email. Anything
+   * else is the dry-run scope, which in a live deployment says why it is not
+   * live. The mode is part of the scope, so of what the reference approves.
+   */
+  private removalScope(incident: CampaignIncident): RemovalScope {
+    const limits = {
+      maxMailboxes: this.config.maxRemovalMailboxes,
+      maxMessages: this.config.maxRemovalMessages,
+    };
+    if (!this.removalExecutor.changesMailboxes) {
+      return computeRemovalScope(incident.reach, limits);
+    }
+    const anchor = incident.summary.removalAnchor;
+    const why: LiveUnavailableReason | undefined =
+      incident.reportCount === 0
+        ? 'no_reports'
+        : !MALICIOUS_VERDICTS.includes(incident.summary.verdict as ThreatVerdict)
+          ? 'not_malicious'
+          : !anchor
+            ? 'no_anchor'
+            : undefined;
+    if (why || !anchor) {
+      return {
+        ...computeRemovalScope(incident.reach, limits),
+        liveUnavailable: why ?? 'no_anchor',
+      };
+    }
+    return computeLiveRemovalScope(incident.reach, limits, anchor, this.liveRules);
+  }
+
+  /** This report's anchor, when it supplies a confirmed one (logged by fixed word only) */
+  private anchorOf(input: CampaignReportInput): RemovalAnchor | undefined {
+    const found = anchorFromReport(input.emailData, input.blastRadius);
+    if ('rejected' in found) {
+      logger.debug('No removal anchor from this report', { reason: found.rejected });
+      return undefined;
+    }
+    return found.anchor;
   }
 
   // -------------------------------------------------------------------------
@@ -421,6 +523,7 @@ export class CampaignResponseService {
       forwarded['Original-Subject'] ??
       (input.emailData.subject ?? '').replace(FORWARD_PREFIX, '').trim();
     const nowIso = this.now().toISOString();
+    const anchor = previous?.removalAnchor ?? this.anchorOf(input);
     return {
       verdict: input.risk.verdict,
       riskScore: input.risk.riskScore,
@@ -456,6 +559,8 @@ export class CampaignResponseService {
         ? 'fan-out scan, then employee reports'
         : (previous?.detectedBy ?? 'employee reports (the campaign alert threshold)'),
       ...(previous?.openedOnReach ? { openedOnReach: previous.openedOnReach } : {}),
+      // The first confirmed anchor is kept; a later report never replaces it
+      ...(anchor ? { removalAnchor: anchor } : {}),
     };
   }
 
@@ -556,6 +661,17 @@ export class CampaignResponseService {
     const reach = mergeReach(stored.reach, input.blastRadius, input.blastRadiusEnabled);
     const summary = this.withDelivery(this.summaryFrom(input, stored.summary), reach);
     await this.store.updateIncident(stored.id, { reach, summary, reportCount });
+    if (summary.removalAnchor && !stored.summary.removalAnchor) {
+      // The store keeps the first anchor written (another report may have
+      // set one since this one was read): use the stored one, never ours
+      const fresh = await this.store.getIncident(stored.id);
+      const kept = fresh?.summary.removalAnchor;
+      if (kept) {
+        summary.removalAnchor = kept;
+      } else {
+        delete summary.removalAnchor;
+      }
+    }
     const incident: CampaignIncident = { ...stored, reach, summary, reportCount };
     if (stored.summary.openedOnReach && input.match.shouldAlert && input.campaign.id) {
       // The reach-opened incident has now crossed the report-count threshold
@@ -836,10 +952,13 @@ export class CampaignResponseService {
       if (
         type === 'remove_messages' &&
         existing.some(
-          a => a.type === type && a.status === 'dry_run_completed' && a.scopeHash === hash
+          a =>
+            a.type === type &&
+            (a.status === 'dry_run_completed' || removalFinished(a)) &&
+            a.scopeHash === hash
         )
       ) {
-        return undefined; // that exact scope was already dry-run
+        return undefined; // that exact scope was already dry-run, or fully carried out
       }
       for (const cancelled of await this.store.cancelProposed(incident.id, type)) {
         await this.store.appendAudit({
@@ -985,10 +1104,7 @@ export class CampaignResponseService {
       );
     }
 
-    const removal = computeRemovalScope(incident.reach, {
-      maxMailboxes: this.config.maxRemovalMailboxes,
-      maxMessages: this.config.maxRemovalMessages,
-    });
+    const removal = this.removalScope(incident);
     if (!isEmptyScope(removal)) {
       await this.propose(incident, 'remove_messages', removal, 'approve', actions);
     }
@@ -1299,6 +1415,7 @@ export class CampaignResponseService {
       ...(content.idleReason ? { idleReason: content.idleReason } : {}),
       commandsEnabled: this.deps.commandsEnabled,
       timeZone: this.config.timeZone,
+      liveRemoval: this.removalExecutor.changesMailboxes,
     });
     let result: EmailSendResult;
     try {
@@ -1645,7 +1762,7 @@ export class CampaignResponseService {
       return {
         acted: false,
         body: [
-          `${command.reference} is not a ${actionTitle(expected)}. Nothing was done. Check the line in the incident email.`,
+          `${command.reference} is not a ${expected === 'send_warning' ? 'targeted warning' : 'removal of remaining copies'}. Nothing was done. Check the line in the incident email.`,
         ],
       };
     }
@@ -1687,28 +1804,82 @@ export class CampaignResponseService {
       type: approved.type,
     });
 
-    // Both codes labelled: the incident's reference, and this action's own
-    const heading = `Approved: ${actionTitle(approved.type)} for incident reference ${incident.reference} (action reference ${approved.reference}).`;
     if (approved.scope.kind === 'send_warning') {
+      const heading = `Approved: ${actionTitle(approved.type)} for incident reference ${incident.reference} (action reference ${approved.reference}).`;
       const scope = this.recheckWarning(approved, await this.store.listActions(incident.id));
       const summary = await this.runWarning(incident, approved, scope, getRemainingMs);
       return { acted: true, body: [heading, ...summary] };
     }
+    return this.runRemoval(incident, approved, approved.scope, approver, getRemainingMs);
+  }
 
-    // remove_messages: the dry run, against the incident's latest reach
+  /**
+   * Carry out an approved removal in the mode it was PROPOSED in, never a
+   * wider one: a dry-run proposal runs as a dry run even when this
+   * deployment is now live, and a live proposal runs as a dry run when this
+   * deployment is no longer live. Either way the reply says which.
+   *
+   * After a live executor has run, mailboxes may have changed: its real
+   * result is persisted first, and a failure to record it (or to send the
+   * notices) never overwrites that result or tells the approver something
+   * that did not happen.
+   */
+  private async runRemoval(
+    incident: CampaignIncident,
+    approved: ResponseAction,
+    scope: RemovalScope,
+    approver: string,
+    getRemainingMs?: () => number | undefined
+  ): Promise<{ acted: boolean; body: string[] }> {
+    const proposedLive = scope.mode === 'live';
+    const live = proposedLive && this.removalExecutor.changesMailboxes;
+    const executor = live ? this.removalExecutor : this.dryRunExecutor;
+    // Both codes labelled: the incident's reference, and this action's own
+    const heading = `Approved: ${actionTitle(approved.type, live)} for incident reference ${incident.reference} (action reference ${approved.reference}).`;
+    const modeNote = proposedLive
+      ? live
+        ? []
+        : [
+            'This removal was proposed as a live removal, but this deployment is now set to dry run (campaignResponse.removal.mode), so it ran as a dry run. Nothing was moved.',
+          ]
+      : this.removalExecutor.changesMailboxes
+        ? [
+            'This removal was proposed as a dry run, so it ran as a dry run and moved nothing, although this deployment can now remove live. A live removal is proposed in a later incident update when the incident qualifies.',
+          ]
+        : [];
+
+    let executed: ActionResult;
     try {
-      const executed = await this.removalExecutor.execute(approved, approved.scope, incident.reach);
-      // Only a real removal that reports what it changed sends notices; the
-      // dry run (the only executor today) never does
-      const result = executed.dryRun
-        ? executed
-        : await this.sendRemovalNotices(
-            incident,
-            approved,
-            approved.scope,
-            executed,
-            getRemainingMs
-          );
+      executed = await executor.execute(approved, scope, incident.reach, { getRemainingMs });
+    } catch (error) {
+      // Neither executor throws; if one ever did, say what that means
+      logger.error('Removal executor failed', {
+        incidentId: incident.id,
+        actionId: approved.id,
+        live,
+        error: error instanceof Error ? error.name : 'unknown',
+      });
+      const summary = live
+        ? 'The removal could not be completed. Some copies may have been moved to Deleted Items, and nobody was sent a removal notice. Check the write broker log for this action.'
+        : 'The dry run could not be completed. No mailbox was changed.';
+      await this.store
+        .finishAction(approved.id, 'failed', {
+          executor: executor.name,
+          dryRun: !live,
+          summary: [summary],
+        })
+        .catch(() => undefined);
+      return { acted: false, body: [heading, ...modeNote, summary] };
+    }
+
+    // Only a real removal that reports what it changed sends notices; the
+    // dry run never does. `sendRemovalNotices` never throws.
+    const result = executed.dryRun
+      ? executed
+      : await this.sendRemovalNotices(incident, approved, scope, executed, getRemainingMs);
+    const body = [heading, ...modeNote, ...result.summary];
+
+    try {
       await this.store.finishAction(
         approved.id,
         result.dryRun ? 'dry_run_completed' : 'completed',
@@ -1721,7 +1892,9 @@ export class CampaignResponseService {
         actor: approver,
         detail: {
           executor: result.executor,
+          ...(proposedLive && !live ? { proposedLive: true } : {}),
           ...(result.wouldRemove ?? {}),
+          ...(result.removalOutcome ?? {}),
           ...(result.removalRecipients ? { recipients: result.removalRecipients } : {}),
           ...(result.dryRun
             ? {}
@@ -1733,21 +1906,28 @@ export class CampaignResponseService {
               }),
         },
       });
-      return { acted: true, body: [heading, ...result.summary] };
     } catch (error) {
-      logger.error('Removal dry run failed', {
-        error: error instanceof Error ? error.message : String(error),
-      });
-      await this.store.finishAction(approved.id, 'failed', {
-        executor: this.removalExecutor.name,
-        dryRun: true,
-        summary: ['The dry run could not be completed.'],
+      // What happened still happened: log it in full (counts only) and tell
+      // the approver the real outcome, with the recording failure
+      logger.error('Removal result could not be recorded', {
+        incidentId: incident.id,
+        actionId: approved.id,
+        executor: result.executor,
+        dryRun: result.dryRun,
+        ...(result.removalOutcome ?? {}),
+        removedMailboxes: result.removed?.length ?? 0,
+        notified: result.notified?.length ?? 0,
+        error: error instanceof Error ? error.name : 'unknown',
       });
       return {
-        acted: false,
-        body: [heading, 'The dry run could not be completed. No mailbox was changed.'],
+        acted: true,
+        body: [
+          ...body,
+          'Phishy could not record this result in its database (see the logs). What is reported above is what happened.',
+        ],
       };
     }
+    return { acted: true, body };
   }
 
   /**
@@ -1812,9 +1992,10 @@ export class CampaignResponseService {
     if (targets.length === 0) {
       return result;
     }
+    let sending = false;
     try {
       const actions = await this.store.listActions(incident.id);
-      const noticed = noticedBy(actions, action.id);
+      const noticed = noticedBy(actions, action.id, this.now());
       const contacted = contactedBy(actions, action.id);
       let remaining = Math.max(0, this.config.maxWarningsPerCampaign - contacted.size);
       let unsafe = 0;
@@ -1837,6 +2018,7 @@ export class CampaignResponseService {
         }
         addresses.push(address);
       }
+      sending = addresses.length > 0;
       const sent =
         addresses.length > 0
           ? await this.warningExecutor.sendRemovalNotices(addresses, {
@@ -1874,11 +2056,18 @@ export class CampaignResponseService {
     } catch (error) {
       logger.error('Removal notices failed', {
         incidentId: incident.id,
-        error: error instanceof Error ? error.message : String(error),
+        sending,
+        error: error instanceof Error ? error.name : 'unknown',
       });
+      // Before sending began nothing went out; after, some notices may have
       return {
         ...result,
-        summary: [...result.summary, 'The removal notices could not be sent. See the logs.'],
+        summary: [
+          ...result.summary,
+          sending
+            ? 'Sending the removal notices failed part-way: some people may have been sent one and others not. See the logs.'
+            : 'The removal notices could not be sent: none went out. See the logs.',
+        ],
         notified: [],
       };
     }
@@ -1937,10 +2126,7 @@ export class CampaignResponseService {
         modes.distribution !== 'off'
       );
     } else {
-      scope = computeRemovalScope(incident.reach, {
-        maxMailboxes: this.config.maxRemovalMailboxes,
-        maxMessages: this.config.maxRemovalMessages,
-      });
+      scope = this.removalScope(incident);
     }
     const fresh = isEmptyScope(scope)
       ? undefined

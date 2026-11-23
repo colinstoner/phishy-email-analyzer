@@ -25,14 +25,30 @@
  * Read-only: GET requests only. What it returns is hostile data.
  */
 
-import { EmailMessage, ExtractedEmailData, RetrievedOriginal } from '../../types';
+import {
+  EmailMessage,
+  ExtractedEmailData,
+  RetrievedOriginal,
+  RetrievedOriginalIdentity,
+} from '../../types';
 import { createLogger } from '../../utils/logger';
 import { OriginalFetchOutcome, emitOriginalFetchMetric } from '../../utils/metrics';
 import { domainMatches, extractEmailAddress } from '../../utils/validation';
 import { GraphClient } from './graph.client';
-import { MAX_CLAIMED_TIME_LENGTH, MAX_SUBJECT_LENGTH } from './graph.limits';
+import {
+  GRAPH_ITEM_ID_PATTERN,
+  MAX_ADDRESS_LENGTH,
+  MAX_CLAIMED_TIME_LENGTH,
+  MAX_SUBJECT_LENGTH,
+  MESSAGE_ID_PATTERN,
+} from './graph.limits';
 import { GraphAuthError, GraphError } from './graph.errors';
-import { MessageSummary, findMessagesBySender, getMessageHeaders } from './mail.operations';
+import {
+  MessageSummary,
+  findMessagesByInternetMessageId,
+  findMessagesBySender,
+  getMessageHeaders,
+} from './mail.operations';
 
 const logger = createLogger('graph-original-fetch');
 
@@ -337,10 +353,61 @@ function satisfies(candidate: MessageSummary, criteria: Criteria): boolean {
   return criteria.subject === undefined || sameSubject(candidate.subject ?? '', criteria.subject);
 }
 
+/** Time kept back from the lookup's budget when the uniqueness search runs */
+const UNIQUENESS_RESERVE_MS = 500;
+/** Shortest time worth giving the uniqueness search; less and it is `unknown` */
+const UNIQUENESS_MIN_MS = 1000;
+
+/**
+ * How many messages with this Internet Message-ID the reporter's mailbox
+ * holds, across the normal store (`/messages`) and Recoverable Items: `1`,
+ * `2+`, or `unknown` when the search failed, did not fit the remaining
+ * budget, or (inconsistently) found none. A sender chooses the Message-ID,
+ * so a live removal's anchor needs exactly one. Never throws and never
+ * delays the lookup past its budget: what does not fit is `unknown`.
+ */
+async function countByMessageId(
+  client: GraphClient,
+  mailbox: string,
+  internetMessageId: string,
+  remainingMs: () => number
+): Promise<'1' | '2+' | 'unknown'> {
+  const available = remainingMs() - UNIQUENESS_RESERVE_MS;
+  if (available < UNIQUENESS_MIN_MS) {
+    return 'unknown';
+  }
+  const search = async (): Promise<'1' | '2+' | 'unknown'> => {
+    const query = { mailbox, internetMessageId, maxItems: 2 };
+    const [store, recoverable] = await Promise.all([
+      findMessagesByInternetMessageId(client, query),
+      findMessagesByInternetMessageId(client, { ...query, folder: 'recoverableitemsdeletions' }),
+    ]);
+    const ids = new Set([...store.items, ...recoverable.items].map(item => item.id));
+    if (store.truncated || recoverable.truncated || ids.size > 1) {
+      return '2+';
+    }
+    return ids.size === 1 ? '1' : 'unknown';
+  };
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      search(),
+      new Promise<'unknown'>(resolve => {
+        timer = setTimeout(() => resolve('unknown'), available);
+      }),
+    ]);
+  } catch {
+    return 'unknown';
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function lookUp(
   client: GraphClient,
   criteria: Criteria,
-  expired: () => boolean
+  expired: () => boolean,
+  remainingMs: () => number = (): number => 0
 ): Promise<OriginalFetchResult> {
   const query = {
     mailbox: criteria.mailbox,
@@ -405,6 +472,15 @@ async function lookUp(
 
   // Validated above; re-serialized so only a well-formed timestamp leaves here
   const receivedAt = new Date(Date.parse(match.summary.receivedDateTime ?? '')).toISOString();
+  const stored = storedIdentity(match.summary);
+  const identity = stored
+    ? {
+        ...stored,
+        sameMessageIdCount: stored.internetMessageId
+          ? await countByMessageId(client, criteria.mailbox, stored.internetMessageId, remainingMs)
+          : ('unknown' as const),
+      }
+    : undefined;
   return {
     outcome: 'found',
     reason: match.recoverable ? 'recoverable_items' : 'mailbox',
@@ -413,7 +489,38 @@ async function lookUp(
       receivedAt,
       headers: headers.items.map(header => ({ name: header.name, value: header.value })),
       headersTruncated: headers.truncated,
+      ...(identity ? { identity } : {}),
     },
+  };
+}
+
+/**
+ * The matched message as the mailbox stores it (Graph ID, Internet
+ * Message-ID, From address, subject), shape-checked. These come from
+ * Exchange's copy of the message, not from the forward's pasted text; the
+ * values themselves were still written by the sender and are hostile.
+ */
+function storedIdentity(
+  summary: MessageSummary
+): Omit<RetrievedOriginalIdentity, 'sameMessageIdCount'> | undefined {
+  if (!GRAPH_ITEM_ID_PATTERN.test(summary.id)) {
+    return undefined;
+  }
+  const internetMessageId = summary.internetMessageId?.trim();
+  const senderAddress = summary.fromAddress?.trim().toLowerCase();
+  return {
+    messageId: summary.id,
+    ...(internetMessageId && MESSAGE_ID_PATTERN.test(internetMessageId)
+      ? { internetMessageId }
+      : {}),
+    ...(senderAddress &&
+    senderAddress.length <= MAX_ADDRESS_LENGTH &&
+    /^[^\s<>@]+@[^\s<>@]+$/.test(senderAddress)
+      ? { senderAddress }
+      : {}),
+    ...(summary.subject !== undefined && summary.subject.length <= MAX_SUBJECT_LENGTH
+      ? { subject: summary.subject }
+      : {}),
   };
 }
 
@@ -501,7 +608,12 @@ export async function fetchOriginalMessage(
 
   try {
     return await withBudget(
-      lookUp(client, criteria, () => Date.now() >= deadline),
+      lookUp(
+        client,
+        criteria,
+        () => Date.now() >= deadline,
+        () => deadline - Date.now()
+      ),
       budgetMs
     );
   } catch (error) {

@@ -50,3 +50,14 @@ export const DIRECTORY_ID_PATTERN = /^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a
 
 /** Graph IDs of matching copies kept per recipient: the scope a response action may name */
 export const MAX_REPORTED_COPY_IDS = 5;
+
+/**
+ * Per-copy details a live removal checks (`copyDetails`): tight bounds so a
+ * sender cannot inflate the blast-radius answer past its size cap. A value
+ * over its bound, or not plain printable ASCII, is omitted (that copy is
+ * then not eligible for a live removal), never truncated and compared.
+ */
+export const MAX_COPY_MESSAGE_ID_LENGTH = 160;
+export const MAX_COPY_SENDER_LENGTH = 128;
+/** Printable ASCII with no quote or backslash: one byte each in JSON */
+export const COPY_TEXT_PATTERN = /^[\x21\x23-\x5b\x5d-\x7e]+$/;

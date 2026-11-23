@@ -424,8 +424,15 @@ describe('Graph broker', () => {
           },
         },
       ]);
-      // And the same three GETs a direct lookup makes
-      expect(fake.requests.map(request => request.method)).toEqual(['GET', 'GET', 'GET']);
+      // And the same GETs a direct lookup makes (two searches, the headers,
+      // and the Message-ID uniqueness search in both locations)
+      expect(fake.requests.map(request => request.method)).toEqual([
+        'GET',
+        'GET',
+        'GET',
+        'GET',
+        'GET',
+      ]);
     });
 
     it('does not ask the broker when the reporter is not confirmed or nothing is usable', async () => {

@@ -12,6 +12,7 @@ import {
 import type { S3Service } from '../../../../src/services/storage/s3.service';
 import { buildPhishingAnalysisPrompt } from '../../../../src/services/ai/prompt.builder';
 import { EmailMessage, SESRecord } from '../../../../src/types';
+import { namedByForward } from '../../../../src/services/response/removal.eligibility';
 
 type MockS3 = { getObject: jest.Mock };
 
@@ -431,6 +432,41 @@ describe('EmailParserService', () => {
       expect(forwarded['Original-From']).toContain('billing@examp1e-secure.test');
       expect(forwarded['Original-Subject']).toBe('Your account is suspended');
       expect(forwarded['Original-Reply-To']).toContain('collect@example-evil.test');
+    });
+
+    it("keeps an attached message's In-Reply-To out of the report's own headers", async () => {
+      // A live removal's anchor is bound by the report's own In-Reply-To /
+      // References as SES received them; an inner message's must not count
+      const innerEmail = [
+        'From: billing@examp1e-secure.test',
+        'Subject: Your account is suspended',
+        'Message-ID: <inner@examp1e-secure.test>',
+        'In-Reply-To: <legit-0910@hr.example.com>',
+        'References: <legit-0910@hr.example.com>',
+        'Content-Type: text/plain; charset=utf-8',
+        '',
+        'In-Reply-To: <legit-0910@hr.example.com>',
+      ].join(CRLF);
+      const outerEmail = [
+        'From: employee@example.com',
+        'Subject: FW: Your account is suspended',
+        'MIME-Version: 1.0',
+        'Content-Type: multipart/mixed; boundary="b"',
+        '',
+        '--b',
+        'Content-Type: message/rfc822',
+        '',
+        innerEmail,
+        '--b--',
+        '',
+      ].join(CRLF);
+      const parser = makeParser();
+      const [event] = await parser.parseSESRecords([makeSESRecord({ content: outerEmail })]);
+      const emailData = parser.extractEmailData(event.msg);
+      const names = Object.keys(emailData.headers).map(name => name.toLowerCase());
+      expect(names).not.toContain('in-reply-to');
+      expect(names).not.toContain('references');
+      expect(namedByForward(emailData.headers, '<legit-0910@hr.example.com>')).toBe(false);
     });
 
     it('carries every To and Cc recipient of a forward-as-attachment original', async () => {

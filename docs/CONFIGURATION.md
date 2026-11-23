@@ -49,7 +49,7 @@ Everything beyond forward-and-reply is off by default and switched on independen
 | `PHISHY_CAMPAIGN_ALERTS_ENABLED` | off | intelligence DB; a distribution list | [Campaign alerts](#campaign-alerts): one broadcast warning once several people report the same email |
 | `PHISHY_CAMPAIGN_CACHE_ENABLED` | off | intelligence DB + migration 003 | [Verdict cache](#campaign-verdict-cache): repeat reports of one campaign reuse the first verdict |
 | `PHISHY_EMAIL_COMMANDS_ENABLED` | off | intelligence DB + migration 002 | [Email commands](#email-commands-security-team-correspondence): the security team confirms or overturns a verdict by replying |
-| `PHISHY_CAMPAIGN_RESPONSE_ENABLED` | off | campaign alerts, intelligence DB + migration 006; email commands for approvals; blast radius for targeted warnings | [Campaign response](#campaign-response-optional): incident email, targeted warning, actions approved by reply (removal is a dry run) |
+| `PHISHY_CAMPAIGN_RESPONSE_ENABLED` | off | campaign alerts, intelligence DB + migration 006; email commands for approvals; blast radius for targeted warnings | [Campaign response](#campaign-response-optional): incident email, targeted warning, actions approved by reply (removal is a dry run unless the [mailbox write tier](#mailbox-write-tier-optional) is on) |
 | `PHISHY_AGENTIC_ENABLED` | off | nothing (database tools appear when the DB is on) | [Agentic analysis](#agentic-analysis): Claude may consult Phishy's own data before its verdict |
 | `PHISHY_SCORING_MODE=checklist` | `model` | nothing | [Checklist scoring](#risk-score-mode-experimental) (experimental): the risk score is computed by code from a fixed checklist |
 | `PHISHY_ATTACHMENT_ANALYSIS_ENABLED` | off | nothing (in process, no network) | [Attachment analysis](#attachment-analysis-optional): Phishy inspects attachment bytes statically |
@@ -59,6 +59,7 @@ Everything beyond forward-and-reply is off by default and switched on independen
 | `PHISHY_GRAPH_SENDER_HISTORY_ENABLED` | off | Graph; `ExchangeMessageTrace.Read.All` | [Sender-relationship check](#sender-relationship-check-optional): message-trace counts about the claimed sender |
 | `PHISHY_GRAPH_BLAST_RADIUS_ENABLED` | off | Graph; read permissions listed in that section | [Blast radius](#blast-radius-optional): who else received a malicious email (security team's copy only) |
 | `PHISHY_GRAPH_FANOUT_SCAN_ENABLED` | off | Graph; `ExchangeMessageTrace.Read.All`; intelligence DB + migration 005; a schedule | [Scheduled fan-out scan](#scheduled-fan-out-scan-optional): proactive alert when a known external sender suddenly mails many people (no model) |
+| `PHISHY_CAMPAIGN_RESPONSE_REMOVAL_MODE=live` | `dry_run` | campaign response; the Graph write broker (its own app registration with `Mail.ReadWrite`, and its own `PHISHY_GRAPH_WRITE_ENABLED`) | [Mailbox write tier](#mailbox-write-tier-optional): an approved removal moves the copies to Deleted Items |
 
 Migrations past 001 are applied by hand (`psql -f migrations/00N_*.sql`); see [DATABASE.md](DATABASE.md). A feature whose migration is missing logs which file to apply and stays off.
 
@@ -238,8 +239,8 @@ What Phishy does once a campaign crosses the [campaign-alert](#campaign-alerts) 
 When on, each campaign becomes an **incident**:
 
 - **The security team** gets one incident email: what the attack is, timeline, blast radius, what Phishy has done, and proposed actions, each with the exact reply line that approves it. Later reports and wider reach arrive as replies in the same thread, at most one per `updateIntervalMinutes`.
-- **The people who received it** (found by blast radius) get a plain-language warning, one email each, with your organization's own "if you already clicked" instructions. People who reported it are not emailed. When the future mailbox write tier removes a copy (not built: removal is a dry run today), the person whose copy was removed gets a short notice that it was moved to Deleted Items. Nobody whose copy was not delivered is warned; every address must be on a safe domain; no link from the attack is ever included.
-- **Remove remaining copies** is proposed with a scope of exact message IDs per mailbox. In this version approving it runs a **dry run**: Phishy replies with what it would remove, and no mailbox is changed (the mailbox write tier is not built).
+- **The people who received it** (found by blast radius) get a plain-language warning, one email each, with your organization's own "if you already clicked" instructions. People who reported it are not emailed. When the [mailbox write tier](#mailbox-write-tier-optional) moves a copy to Deleted Items (only in `live` removal mode), the person whose copy was moved gets a short notice that it was moved. Nobody whose copy was not delivered is warned; every address must be on a safe domain; no link from the attack is ever included.
+- **Remove remaining copies** is proposed with a scope of exact message IDs per mailbox, always for approval. By default approving it runs a **dry run**: Phishy replies with what it would remove, and no mailbox is changed. With the [mailbox write tier](#mailbox-write-tier-optional) on (`PHISHY_CAMPAIGN_RESPONSE_REMOVAL_MODE=live`), approving it moves those copies to Deleted Items.
 
 **Reach trigger.** With [blast radius](#blast-radius-optional) on, the incident opens on the *first* malicious report (verdict phishing, BEC or malware delivery; not merely suspicious) when that report's lookup found at least `reachThreshold` people (default 5) whose copy was delivered to a mailbox, not counting anyone who reported it. Only recipients the lookup actually listed count; failed, quarantined and unread-mailbox rows do not. When the lookup is unavailable or blast radius is off, the report-count threshold still applies. `0` turns the reach trigger off. Because such an incident can rest on one person's report, anything set to `auto` is proposed for approval instead until a second person reports it; it then goes ahead automatically (once), unless the security team approved it first.
 
@@ -263,12 +264,14 @@ Requires campaign alerts (`PHISHY_CAMPAIGN_ALERTS_ENABLED`), the intelligence da
 | `PHISHY_CAMPAIGN_RESPONSE_REACH_THRESHOLD` | `campaignResponse.reachThreshold` | `5` | Open the incident on the first malicious report when its blast radius found at least this many delivered recipients besides the reporters; `0` = report count only |
 | `PHISHY_CAMPAIGN_RESPONSE_CLICKED_INSTRUCTIONS` | `campaignResponse.alreadyClickedInstructions` | *(see below)* | Plain text shown under "If you already clicked or entered your password" |
 | `PHISHY_CAMPAIGN_RESPONSE_TIME_ZONE` | `campaignResponse.timeZone` | `UTC` | IANA time zone for the times in the warning, the incident email and the fan-out alert (e.g. `Europe/London`) |
+| `PHISHY_CAMPAIGN_RESPONSE_REMOVAL_MODE` | `campaignResponse.removal.mode` | `dry_run` | `dry_run` or `live` (moves approved copies to Deleted Items through the write broker); see [Mailbox write tier](#mailbox-write-tier-optional) |
+| `PHISHY_GRAPH_WRITE_BROKER_FUNCTION` | `campaignResponse.removal.writeBrokerFunctionName` | - | Name or ARN of the Graph write broker function (`live` only) |
 
 Default "already clicked" text: *If you clicked a link in it, opened an attachment, or entered your password, contact your IT or security team straight away and change your password. You will not be in trouble: reporting it quickly is what limits the damage.* Replace it with your organization's own instructions (who to call, how to reach them out of hours).
 
 Sending notes: warnings are sent one per person through SES, so `maxWarningsPerCampaign` emails count against your SES sending rate and quota; in `auto` mode they are sent from the Lambda that crossed the threshold, after the reports, and anything not sent before the function runs short of time is counted and proposed again. The targeted warning reaches at most the 100 recipients a blast-radius lookup lists; a larger campaign's incident email says how many have no known address, and `audience: both` covers them with the broadcast.
 
-**Metrics** (namespace `Phishy`): `CampaignIncidentsOpened` (dimension `Trigger`), `CampaignIncidentUpdates`, `CampaignWarningsSent` (`Audience`), `CampaignWarningsSkipped` (`Reason`), `CampaignWarningSendFailures`, `CampaignRemovalNoticesSent` (always zero until a mailbox write tier exists), and `ResponseActionsProposed`, `ResponseActionApprovals`, `ResponseActionApprovalsRejected` (`Reason`), `ResponseActionsExpired`, `ResponseActionsDryRun`, dimensioned by `ActionType`.
+**Metrics** (namespace `Phishy`): `CampaignIncidentsOpened` (dimension `Trigger`), `CampaignIncidentUpdates`, `CampaignWarningsSent` (`Audience`), `CampaignWarningsSkipped` (`Reason`), `CampaignWarningSendFailures`, `CampaignRemovalNoticesSent` (only after a live removal), `CampaignMessagesRemoved`, `CampaignRemovalErrors`, `CampaignRemovalRefused` (`Reason`), `CampaignRemovalNotAttempted`, and `ResponseActionsProposed`, `ResponseActionApprovals`, `ResponseActionApprovalsRejected` (`Reason`), `ResponseActionsExpired`, `ResponseActionsDryRun`, dimensioned by `ActionType`.
 
 ### Outlook Report Button Intake
 
@@ -310,7 +313,7 @@ Every limit that stops an inspection is disclosed to the model, and the step log
 
 ### Microsoft Graph (Optional)
 
-Phishy can authenticate to Microsoft Graph on your own Microsoft 365 tenant, read-only. `PHISHY_GRAPH_ENABLED` is a **foundation**: on its own it does not change how emails are analyzed. Each feature that uses Graph has its own flag — the [original-message lookup](#original-message-lookup), the [sender-relationship check](#sender-relationship-check-optional), [blast radius](#blast-radius-optional) (checking who else received a malicious email) and the [scheduled fan-out scan](#scheduled-fan-out-scan-optional) — so that features share one safe, already-reviewed way to reach the tenant. Leave it off unless you are enabling one of them. Phishy has no Graph write code: nothing it does changes a mailbox. See [ARCHITECTURE.md](ARCHITECTURE.md#microsoft-graph-optional-foundation) for the trust rules.
+Phishy can authenticate to Microsoft Graph on your own Microsoft 365 tenant. Everything in this section is read-only. `PHISHY_GRAPH_ENABLED` is a **foundation**: on its own it does not change how emails are analyzed. Each feature that uses Graph has its own flag — the [original-message lookup](#original-message-lookup), the [sender-relationship check](#sender-relationship-check-optional), [blast radius](#blast-radius-optional) (checking who else received a malicious email) and the [scheduled fan-out scan](#scheduled-fan-out-scan-optional) — so that features share one safe, already-reviewed way to reach the tenant. Leave it off unless you are enabling one of them. None of these features changes a mailbox; the one thing that can is the separate, optional [mailbox write tier](#mailbox-write-tier-optional), with its own app registration. See [ARCHITECTURE.md](ARCHITECTURE.md#microsoft-graph-optional-foundation) for the trust rules.
 
 To find out which Graph calls work in your tenant — with which permissions and licences — before any feature depends on them, run the read-only probe: [GRAPH_PROBE.md](GRAPH_PROBE.md). It runs locally (`npm run graph:probe`), takes the same tenant ID, client ID and certificate, and does not need `PHISHY_GRAPH_ENABLED`.
 
@@ -431,6 +434,73 @@ Sizing:
 | `GraphBrokerCallDurationMs` | same | Round-trip time of the invocation |
 
 The features' own metrics (`OriginalFetchCount`, `SenderHistoryLookups`, `BlastRadius*`) are emitted by the main function in both modes, so existing dashboards and alarms keep working. Cached answers (`cache_hit`, `BlastRadiusCacheHits`) now come from the broker's instances, which are shared by every main-function instance.
+
+#### Mailbox write tier (Optional)
+
+The only way Phishy changes a mailbox: after a security-team member approves a campaign removal with the exact `APPROVE REMOVAL <ref>` reply, the approved copies of the phishing email are moved to each mailbox's **Deleted Items** (never deleted for good; each person can restore it), and each person whose copy was moved gets a short notice. It is done by a third Lambda function, the **Graph write broker**, which holds its own app registration and certificate. Off by default at every level; without it, an approved removal is a dry run. Design and threat model: [ARCHITECTURE.md](ARCHITECTURE.md#the-mailbox-write-tier).
+
+Three switches must all be on for anything to move:
+
+1. the write broker is deployed with its own credential;
+2. its own kill switch, `PHISHY_GRAPH_WRITE_ENABLED=true`, on the write broker;
+3. `PHISHY_CAMPAIGN_RESPONSE_REMOVAL_MODE=live` and `PHISHY_GRAPH_WRITE_BROKER_FUNCTION` on the main function.
+
+`live` without a valid function name logs a warning and runs the dry run. A removal is never automatic, whatever `employeeWarning` says.
+
+**Which incidents get a live removal.** Only one with an **anchor**: the reported email as Phishy's [original-message lookup](#original-message-lookup) found it in the reporter's own mailbox, whose Internet Message-ID the report's own `In-Reply-To` header names (or, without one, the last `References` entry), whose subject matches the forward's own Subject, which a Message-ID search finds exactly once in the reporter's mailbox, and which Exchange marks as forwarded. So a live removal needs `PHISHY_GRAPH_ORIGINAL_FETCH_ENABLED` and `PHISHY_GRAPH_BLAST_RADIUS_ENABLED` as well, reports forwarded inline from an Exchange client that writes those headers (Outlook does), a malicious verdict and at least one report. Report-button submissions, fan-out-scan incidents and reports without a matching anchor get a dry-run removal, and the proposal says why. A live removal then names only copies with the anchor's From address and exactly its subject (after collapsing whitespace and case) and, by default, its own Internet Message-ID, arriving within `sameMessageSpreadMinutes` of it. With `sizeTolerancePercent` raised above its default of 0, copies with a different Message-ID whose message-trace size is within that percentage, arriving within `windowHours`, are included too: that admits templated mail from the same sender with the same subject, so check your own mail before raising it (1 is a reasonable value). Other copies the lookup matched are listed as "not provably the same email: not included" and still get the warning. A legitimate email from the same sender with the same subject and Message-ID in that window would still be included: read the sender and subject in the proposal before approving. See [ARCHITECTURE.md](ARCHITECTURE.md#the-mailbox-write-tier).
+
+**Main function**
+
+| Variable | Config key | Default | Description |
+|----------|-----------|---------|-------------|
+| `PHISHY_CAMPAIGN_RESPONSE_REMOVAL_MODE` | `campaignResponse.removal.mode` | `dry_run` | `dry_run`: an approved removal is reported, nothing changes. `live`: the write broker moves the approved copies |
+| `PHISHY_GRAPH_WRITE_BROKER_FUNCTION` | `campaignResponse.removal.writeBrokerFunctionName` | - | Name or ARN of the write broker function (used only in `live` mode) |
+| `PHISHY_CAMPAIGN_RESPONSE_REMOVAL_SAME_MESSAGE_SPREAD_MINUTES` | `campaignResponse.removal.sameMessageSpreadMinutes` | `60` | Live only: a copy with the reported copy's own Internet Message-ID must have arrived within this many minutes of it (5-360) |
+| `PHISHY_CAMPAIGN_RESPONSE_REMOVAL_SIZE_TOLERANCE_PERCENT` | `campaignResponse.removal.sizeTolerancePercent` | `0` | Live only: when above 0, a copy with a different Internet Message-ID is included if its message-trace size is within this percentage of the reported copy's (0-10). Off by default; raising it admits templated mail from the same sender with the same subject |
+| `PHISHY_CAMPAIGN_RESPONSE_REMOVAL_WINDOW_HOURS` | `campaignResponse.removal.windowHours` | `6` | Live only: a size-matched copy must have arrived within this many hours of the reported copy (1-72) |
+
+Its execution role needs `lambda:InvokeFunction` on the write broker and nothing else for it: **never** the write client ID, the write certificate or access to the write secret. Any `PHISHY_GRAPH_WRITE_CLIENT_ID` or `PHISHY_GRAPH_WRITE_CERTIFICATE` in its environment (or a `graph.write` key in the configuration file) is ignored, with a warning to remove it. In a VPC without internet access it also needs the Lambda interface endpoint, as for the read broker.
+
+**Write broker function**
+
+Handler `graph-write-broker.handler` when bundled from `src/graph-write-broker.ts` (or `dist/handlers/graph.write.broker.handler.handler` from the `tsc` build). Deploy it **outside** the VPC, with no trigger. It reads **only its own environment**: not `PHISHY_CONFIG_S3`, not the read registration's variables.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PHISHY_GRAPH_WRITE_ENABLED` | `false` | The kill switch. Anything but `true` refuses every request (`write_disabled`) |
+| `PHISHY_GRAPH_TENANT_ID` | - | Directory (tenant) ID or verified domain. Required when enabled |
+| `PHISHY_GRAPH_WRITE_CLIENT_ID` | - | Application (client) ID of the **write** app registration (not the read one). Required when enabled |
+| `PHISHY_GRAPH_WRITE_CERTIFICATE` | - | Secrets Manager ARN of the **write** app's private key and certificate (same formats as the read certificate). Required when enabled |
+| `PHISHY_GRAPH_WRITE_ALLOWED_MAILBOX_IDS` | - | Optional. Comma-separated Entra object IDs (GUIDs) of the only mailboxes it may change; any other is refused (`not_allowed`). An entry that is not a GUID, or a value that lists nothing (`""`, `","`), makes the function refuse everything (`misconfigured`). Use it to limit a staging deployment to one test mailbox |
+| `LOG_LEVEL` | `info` | Optional |
+
+Its execution role needs CloudWatch Logs and `secretsmanager:GetSecretValue` on the write secret, and nothing else: not the read secret. If the secret is encrypted with a customer-managed KMS key (not the default `aws/secretsmanager` key), the role also needs `kms:Decrypt` on that key; the SAM template does not add it. The function refuses to start if its environment also carries the read app's client ID or certificate and they equal its own.
+
+**Who may invoke it.** Anything in the AWS account allowed `lambda:InvokeFunction` on the write broker can request moves, within its kill switch and allowlist; the write broker cannot check an approval. The template grants that permission only to the main function, and only in live mode, but an administrator, a broad `lambda:*` policy or a CI role has it too. Restrict it: for example an explicit deny on the function for every principal except the main function's role (a permissions boundary or a service control policy), and alert on its invocations (CloudTrail data events for Lambda).
+
+**Deploy order.** The read broker's protocol is strict: a read broker of this version talking to an older main function answers in a shape that function refuses (`malformed`), so blast radius and the original-message lookup are unavailable until the main function is updated. Deploy both together (one SAM stack does), or the main function first. Timeout: 100 seconds (one call works for at most 80). Memory: 256 MB. A small reserved concurrency (the template uses 2) bounds how many calls can run at once.
+
+**Entra setup (a separate app registration)**
+
+1. **Register a second single-tenant app**, for example *Phishy Graph (write)*, exactly as in [Entra app registration](#entra-app-registration). Never reuse the read app: a read path must not be able to obtain a write token.
+2. **Create a new certificate** for it (a new key pair, as in [The certificate](#the-certificate), with its own CN such as `phishy-graph-write`), upload only the `.crt` to this app, and store the key and certificate as a **new** Secrets Manager secret (for example `phishy/graph-write`). Do not create a client secret.
+3. **Grant `Mail.ReadWrite` (Application) and grant admin consent.** That is the least-privileged application permission for [moving a message](https://learn.microsoft.com/en-us/graph/api/message-move?view=graph-rest-1.0) and also covers the re-read Phishy does before each move. Grant nothing else to this app.
+4. **Optional hardening: scope it to mailboxes.** Granted in Entra, `Mail.ReadWrite` applies to every mailbox in the tenant. Exchange Online application RBAC can limit an app's mailbox permission to a management scope instead; see Microsoft's documentation on [RBAC for Applications](https://learn.microsoft.com/en-us/exchange/permissions-exo/application-rbac), and the warning above that an unscoped Entra grant defeats the scope. `PHISHY_GRAPH_WRITE_ALLOWED_MAILBOX_IDS` is Phishy's own, independent limit.
+5. Find the mailbox object IDs for the allowlist in Entra (*Users* → the user → *Object ID*).
+
+**Before turning live removal on.**
+
+1. Confirm your mail clients set `In-Reply-To` (or `References`) to the forwarded message's ID on forwards: forward a test email to Phishy from each client your staff use and check the report's headers. Without it no incident gets a live removal (the proposal says "not proposed").
+2. Deploy the main function before, or together with, the read broker (the read broker's protocol is strict; see Deploy order above).
+3. Deploy the write broker with `PHISHY_GRAPH_WRITE_ENABLED=false`, set the main function to `live`, and approve one removal: the reply should say the write broker refused (`write_disabled`). Nothing moves.
+4. Enable it with `PHISHY_GRAPH_WRITE_ALLOWED_MAILBOX_IDS` set to one test mailbox and rehearse the whole path on a test campaign that reached it: proposal → `APPROVE REMOVAL` → the copy moves to Deleted Items → the removal notice arrives → approving the same line again does nothing.
+5. Keep `sizeTolerancePercent` at 0 until you have checked it against your own mail.
+6. Brief the approvers: Phishy cannot exclude a legitimate email from the same sender with the same subject and the same Message-ID, so compare what the approval shows (sender, subject, number of distinct emails, arrival times) with the analysis report before approving.
+7. Only then remove the allowlist.
+
+**What the approver is told.** The proposal states what the removal rests on (how many distinct emails; how many copies carry the same Internet Message-ID as the reported copy, and when they arrived; separately, any admitted on size and when they arrived; the sender and exact subject) and what it leaves out. The reply to `APPROVE REMOVAL` gives, by count: moved to Deleted Items, already in Deleted Items, not found, refused because the copy was no longer provably the approved email (its Message-ID, sender, subject or arrival time differed), refused by the allowlist, errors, not attempted (with why: time, throttling, a refusal) and, if the write broker did not answer in time, outcome unknown, with which mailboxes those are, that those people were not notified, and how to check. Only people whose copy was actually moved get the removal notice. A removal proposed as a dry run is carried out as a dry run, and one proposed live is carried out as a dry run if the deployment is no longer live; the reply says so.
+
+**Metrics:** `CampaignMessagesRemoved`, `CampaignRemovalErrors`, `CampaignRemovalRefused` (`Reason`: `mismatch` or `not_allowed`), `CampaignRemovalNotAttempted`, `CampaignRemovalNoticesSent`, and `GraphBrokerCalls` with `Operation=remove_messages`. The write broker logs one line per call (`Graph write broker request finished`) with the action ID and the counts, never a mailbox, message or Internet Message-ID.
 
 #### Blast radius (Optional)
 

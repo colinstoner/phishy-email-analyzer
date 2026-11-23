@@ -10,6 +10,8 @@ import { z } from 'zod';
 import {
   GraphBrokerConfig,
   GraphBrokerConfigSchema,
+  GraphWriteBrokerConfig,
+  GraphWriteBrokerConfigSchema,
   PhishyConfig,
   PhishyConfigSchema,
   PartialPhishyConfig,
@@ -85,6 +87,14 @@ export const ENV_MAPPINGS: Readonly<Record<string, string>> = {
   PHISHY_CAMPAIGN_RESPONSE_REACH_THRESHOLD: 'campaignResponse.reachThreshold',
   PHISHY_CAMPAIGN_RESPONSE_CLICKED_INSTRUCTIONS: 'campaignResponse.alreadyClickedInstructions',
   PHISHY_CAMPAIGN_RESPONSE_TIME_ZONE: 'campaignResponse.timeZone',
+  // Approved removals: dry_run (default) or live through the Graph write broker
+  PHISHY_CAMPAIGN_RESPONSE_REMOVAL_MODE: 'campaignResponse.removal.mode',
+  PHISHY_GRAPH_WRITE_BROKER_FUNCTION: 'campaignResponse.removal.writeBrokerFunctionName',
+  PHISHY_CAMPAIGN_RESPONSE_REMOVAL_WINDOW_HOURS: 'campaignResponse.removal.windowHours',
+  PHISHY_CAMPAIGN_RESPONSE_REMOVAL_SIZE_TOLERANCE_PERCENT:
+    'campaignResponse.removal.sizeTolerancePercent',
+  PHISHY_CAMPAIGN_RESPONSE_REMOVAL_SAME_MESSAGE_SPREAD_MINUTES:
+    'campaignResponse.removal.sameMessageSpreadMinutes',
 
   // Campaign verdict cache
   PHISHY_CAMPAIGN_CACHE_ENABLED: 'campaignCache.enabled',
@@ -181,6 +191,7 @@ export async function loadConfig(): Promise<PhishyConfig> {
   config = await resolveSecrets(config);
 
   warnAboutCredentialInBrokerMode(config);
+  warnAboutWriteCredential(config);
   for (const warning of ignoredConfigKeyWarnings(config)) {
     logger.warn(warning);
   }
@@ -238,6 +249,108 @@ function warnAboutCredentialInBrokerMode(config: PartialPhishyConfig): void {
         'It is ignored here; remove it so only the Graph broker holds the credential'
     );
   }
+}
+
+/**
+ * The write credential belongs to the Graph write broker alone. The main
+ * function's schema has no place for it (a `graph.write` key is dropped and
+ * the write broker's variables have no mapping here), so it is never part of
+ * this function's configuration; this says so when someone put it here
+ * anyway, so it can be removed from the environment too. Names only, never
+ * a value.
+ */
+function warnAboutWriteCredential(config: PartialPhishyConfig): void {
+  const present = GRAPH_WRITE_CREDENTIAL_ENV.filter(name => process.env[name] !== undefined);
+  const graph = (config.graph ?? {}) as Record<string, unknown>;
+  if (present.length > 0 || graph.write !== undefined) {
+    logger.warn(
+      'A Graph write credential is configured for this function ' +
+        `(${[...present, ...(graph.write !== undefined ? ['graph.write'] : [])].join(', ')}). ` +
+        'It is ignored here; only the Graph write broker may hold it. Remove it'
+    );
+  }
+}
+
+/**
+ * Environment variables of the Graph write broker function and the
+ * configuration path each sets in `GraphWriteBrokerConfigSchema`. Read by
+ * `loadGraphWriteBrokerConfig` only; deliberately not in `ENV_MAPPINGS`, so
+ * setting them on the main function (or the read broker) does nothing.
+ */
+export const GRAPH_WRITE_ENV_MAPPINGS: Readonly<Record<string, string>> = {
+  PHISHY_GRAPH_WRITE_ENABLED: 'enabled',
+  PHISHY_GRAPH_TENANT_ID: 'tenantId',
+  PHISHY_GRAPH_WRITE_CLIENT_ID: 'clientId',
+  PHISHY_GRAPH_WRITE_CERTIFICATE: 'certificate',
+  PHISHY_GRAPH_WRITE_ALLOWED_MAILBOX_IDS: 'allowedMailboxIds',
+  LOG_LEVEL: 'logLevel',
+};
+
+/** The write broker's credential variables, which no other function should have */
+const GRAPH_WRITE_CREDENTIAL_ENV = [
+  'PHISHY_GRAPH_WRITE_CLIENT_ID',
+  'PHISHY_GRAPH_WRITE_CERTIFICATE',
+];
+
+/**
+ * Load the Graph write broker's configuration from its own environment only.
+ * No S3 file is read: the shared configuration file is written for the main
+ * function, and nothing in it may enable or widen the write tier. Throws
+ * (with paths and fixed messages only) when the settings are invalid.
+ */
+export function loadGraphWriteBrokerConfig(
+  env: NodeJS.ProcessEnv = process.env
+): GraphWriteBrokerConfig {
+  const raw: Record<string, unknown> = {};
+  for (const [name, key] of Object.entries(GRAPH_WRITE_ENV_MAPPINGS)) {
+    const value = env[name];
+    if (value === undefined) {
+      continue;
+    }
+    if (key === 'enabled') {
+      // Only an explicit "true" turns writes on; anything else is off
+      raw.enabled = value.trim().toLowerCase() === 'true';
+    } else if (key === 'allowedMailboxIds') {
+      const ids = value
+        .split(',')
+        .map(id => id.trim().toLowerCase())
+        .filter(id => id.length > 0);
+      // Present but empty ("", ",", spaces) is a mistake, never "no
+      // allowlist": the schema refuses an empty list, so the broker is
+      // misconfigured and refuses everything
+      raw.allowedMailboxIds = ids;
+    } else if (value.trim().length > 0) {
+      raw[key] = value.trim();
+    }
+  }
+  const validation = GraphWriteBrokerConfigSchema.safeParse(raw);
+  // The write function is never given the read registration. If it was,
+  // and it names the same app or the same secret, the separation the write
+  // tier rests on is gone: refuse to start (the SAM rule checks the same
+  // thing at deploy time; it cannot see a manual deployment)
+  const sameAs = (name: string, value: unknown): boolean =>
+    typeof value === 'string' &&
+    env[name] !== undefined &&
+    env[name]?.trim().toLowerCase() === value.trim().toLowerCase();
+  if (
+    validation.success &&
+    (sameAs('PHISHY_GRAPH_READ_CLIENT_ID', validation.data.clientId) ||
+      sameAs('PHISHY_GRAPH_READ_CERTIFICATE', validation.data.certificate))
+  ) {
+    logger.error(
+      'Graph write broker configuration names the read app registration or the read certificate; the write tier needs its own'
+    );
+    throw new Error('Invalid Graph write broker configuration');
+  }
+  if (!validation.success) {
+    const issues = validation.error.issues.map(issue => ({
+      path: issue.path.join('.'),
+      message: issue.message,
+    }));
+    logger.error('Graph write broker configuration validation failed', { issues });
+    throw new Error('Invalid Graph write broker configuration');
+  }
+  return validation.data;
 }
 
 /**
@@ -635,4 +748,9 @@ async function streamToString(stream: Readable): Promise<string> {
 export { partitionSecurityTeamMembers, securityTeamCommandSenders } from './security-team';
 
 // Re-export types
-export { GraphBrokerConfig, PhishyConfig, PartialPhishyConfig } from './schema';
+export {
+  GraphBrokerConfig,
+  GraphWriteBrokerConfig,
+  PhishyConfig,
+  PartialPhishyConfig,
+} from './schema';

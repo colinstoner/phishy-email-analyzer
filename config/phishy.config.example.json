@@ -54,6 +54,12 @@
     "maxWarningsPerCampaign": 100,
     "maxRemovalMailboxes": 500,
     "maxRemovalMessages": 1000,
+    "removal": {
+      "mode": "dry_run",
+      "windowHours": 6,
+      "sameMessageSpreadMinutes": 60,
+      "sizeTolerancePercent": 0
+    },
     "updateIntervalMinutes": 30,
     "reachThreshold": 5,
     "alreadyClickedInstructions": "If you clicked a link in it, opened an attachment, or entered your password, contact your IT or security team straight away and change your password. You will not be in trouble: reporting it quickly is what limits the damage.",

@@ -83,7 +83,12 @@ export class FakeResponseStore {
     this.check();
     const row = this.incidents.find(i => i.id === id);
     if (row) {
+      const stored = row.summary.removalAnchor;
       Object.assign(row, structuredClone(patch));
+      // As the real store's UPDATE: a stored anchor is write-once
+      if (patch.summary && stored) {
+        row.summary.removalAnchor = structuredClone(stored);
+      }
     }
   }
 

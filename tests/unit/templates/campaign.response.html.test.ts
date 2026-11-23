@@ -300,7 +300,9 @@ describe('incident email', () => {
     expect(email.text).toContain('Reply with this line:  APPROVE WARNING PHY-WWWW-WWWW-WWWW-WWWW');
     expect(email.text).toContain('Reply with this line:  APPROVE REMOVAL PHY-RRRR-RRRR-RRRR-RRRR');
     expect(email.text).toContain('Emails a warning to 1 recipient(s), one email each');
-    expect(email.text).toContain('No mailbox is changed: the mailbox write tier is not installed.');
+    expect(email.text).toContain(
+      'No mailbox is changed: removal is set to dry run in this deployment.'
+    );
     expect(email.text).toContain('Reply with this line:  false positive');
     expect(email.text).toContain(
       'good until Tue, 17 Nov 2026, 14:00 UTC and applies to this incident only'
