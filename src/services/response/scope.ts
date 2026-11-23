@@ -17,6 +17,7 @@ import {
   IncidentReach,
   RemovalCounts,
   RemovalMailbox,
+  RemovalRecipientCounts,
   RemovalScope,
   WarningRecipient,
   WarningScope,
@@ -301,15 +302,113 @@ export function scopeHash(scope: ActionScope): string {
     .digest('hex');
 }
 
+/** What happened to one approved mailbox at re-check */
+type ApprovedOutcome = 'toMove' | 'alreadyInDeletedItems' | 'noLongerMatched';
+
+/**
+ * Put every recipient the reach lists or counts in exactly one category, so
+ * the categories add up to the total. A recipient is matched to the approved
+ * scope by mailbox ID, or by address when the newer lookup no longer gave a
+ * mailbox ID. Approved mailboxes the reach no longer lists at all are added
+ * as "no longer matched" (and to the total), so nothing approved goes
+ * unaccounted for.
+ */
+function accountRecipients(
+  approved: RemovalScope,
+  current: IncidentReach,
+  outcomes: Map<string, ApprovedOutcome>
+): { recipients: RemovalRecipientCounts; notOpened: string[] } {
+  const recipients: RemovalRecipientCounts = {
+    total: current.recipients.length + current.unlisted,
+    toMove: 0,
+    alreadyInDeletedItems: 0,
+    noLongerMatched: 0,
+    onlyInRecoverableItems: 0,
+    noCopyFound: 0,
+    mailboxNotOpened: 0,
+    notDelivered: 0,
+    noIdentifiers: 0,
+    notInApprovedScope: 0,
+    sameMailbox: 0,
+    unlisted: current.unlisted,
+  };
+  const notOpened: string[] = [];
+  const approvedByAddress = new Map(
+    approved.mailboxes.map(mailbox => [mailbox.address.toLowerCase(), mailbox.mailboxId])
+  );
+  const counted = new Set<string>();
+
+  for (const recipient of current.recipients) {
+    const byId =
+      recipient.mailboxId && outcomes.has(recipient.mailboxId) ? recipient.mailboxId : undefined;
+    const byAddress = recipient.mailboxId
+      ? undefined
+      : approvedByAddress.get(recipient.address.toLowerCase());
+    const approvedId = byId ?? byAddress;
+    if (approvedId !== undefined && counted.has(approvedId)) {
+      recipients.sameMailbox += 1;
+      continue;
+    }
+    if (approvedId !== undefined) {
+      counted.add(approvedId);
+      recipients[outcomes.get(approvedId) ?? 'noLongerMatched'] += 1;
+      continue;
+    }
+    if (recipient.mailboxId && counted.has(recipient.mailboxId)) {
+      recipients.sameMailbox += 1;
+      continue;
+    }
+    if (recipient.mailboxId) {
+      counted.add(recipient.mailboxId);
+    }
+    if (recipient.mailbox === 'not_delivered') {
+      recipients.notDelivered += 1;
+    } else if (recipient.mailbox === 'not_checked') {
+      recipients.mailboxNotOpened += 1;
+      notOpened.push(recipient.address);
+    } else if (recipient.mailbox === 'not_found') {
+      recipients.noCopyFound += 1;
+    } else if (recipient.folder === 'recoverable') {
+      recipients.onlyInRecoverableItems += 1;
+    } else if (!recipient.mailboxId || (recipient.messageIds ?? []).length === 0) {
+      recipients.noIdentifiers += 1;
+    } else {
+      recipients.notInApprovedScope += 1;
+    }
+  }
+
+  // Approved mailboxes the reach no longer lists (it keeps every recipient
+  // an earlier lookup listed, so only past its own recipient cap)
+  for (const mailboxId of outcomes.keys()) {
+    if (!counted.has(mailboxId)) {
+      counted.add(mailboxId);
+      recipients.noLongerMatched += 1;
+      recipients.total += 1;
+    }
+  }
+  return { recipients, notOpened };
+}
+
 /**
  * Re-check a removal scope against the incident's current reach. Only the
  * approved copies are ever counted: a copy the newer lookup found that the
  * approved scope did not name is reported as new and not acted on.
+ *
+ * `counts.messages` is every approved copy still found, Deleted Items
+ * included; `counts.toMove` is the ones a removal would actually move.
+ * `recipients` puts every recipient the reach knows of in one category, and
+ * `notOpened` lists the addresses whose mailbox was not read (for the
+ * security team to handle by hand).
  */
 export function recheckRemoval(
   approved: RemovalScope,
   current: IncidentReach
-): { counts: RemovalCounts; mailboxes: RemovalMailbox[] } {
+): {
+  counts: RemovalCounts;
+  mailboxes: RemovalMailbox[];
+  recipients: RemovalRecipientCounts;
+  notOpened: string[];
+} {
   const now = new Map<string, BlastRadiusRecipient>();
   for (const recipient of current.recipients) {
     if (recipient.mailboxId) {
@@ -327,8 +426,12 @@ export function recheckRemoval(
     noLongerMatched: 0,
     newSinceApproval: 0,
   };
+  let toMove = 0;
+  let toMoveMailboxes = 0;
+  let deletedMailboxes = 0;
   const still: RemovalMailbox[] = [];
   const approvedMailboxes = new Set<string>();
+  const outcomes = new Map<string, ApprovedOutcome>();
 
   for (const mailbox of approved.mailboxes) {
     approvedMailboxes.add(mailbox.mailboxId);
@@ -341,11 +444,21 @@ export function recheckRemoval(
       if (latest?.folder === 'recoverable') {
         counts.noLongerMatched += ids.length;
       }
+      if (!outcomes.has(mailbox.mailboxId)) {
+        outcomes.set(mailbox.mailboxId, 'noLongerMatched');
+      }
       continue;
     }
     const folder = latest.folder ?? mailbox.folder;
     counts.mailboxes += 1;
     counts.messages += ids.length;
+    if (folder === 'deleted') {
+      deletedMailboxes += 1;
+    } else {
+      toMove += ids.length;
+      toMoveMailboxes += 1;
+    }
+    outcomes.set(mailbox.mailboxId, folder === 'deleted' ? 'alreadyInDeletedItems' : 'toMove');
     if (folder === 'inbox') {
       if (latest.isRead === true) {
         counts.readInInbox += ids.length;
@@ -371,5 +484,14 @@ export function recheckRemoval(
       counts.newSinceApproval += recipient.messageIds?.length ?? 0;
     }
   }
-  return { counts, mailboxes: still };
+  return {
+    counts: {
+      ...counts,
+      toMove,
+      toMoveMailboxes,
+      alreadyInDeletedItemsMailboxes: deletedMailboxes,
+    },
+    mailboxes: still,
+    ...accountRecipients(approved, current, outcomes),
+  };
 }
