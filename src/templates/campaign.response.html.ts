@@ -492,7 +492,8 @@ function recipientCells(recipient: BlastRadiusRecipient): string[] {
   ];
 }
 
-const LISTED_IN_INCIDENT = 25;
+/** Recipients listed by name in a security-team email (the incident email, a dry-run reply) */
+export const LISTED_IN_INCIDENT = 25;
 const RECIPIENT_COLUMNS = ['Recipient', 'Location', 'Read', 'Replied / forwarded'];
 
 function inShort(incident: CampaignIncident): string {

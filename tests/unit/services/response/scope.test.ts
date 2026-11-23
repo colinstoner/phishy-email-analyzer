@@ -298,4 +298,85 @@ describe('recheckRemoval', () => {
     expect(gone.counts.messages).toBe(0);
     expect(gone.counts.noLongerMatched).toBe(2);
   });
+
+  it('counts the copies that would move apart from those already in Deleted Items', () => {
+    const approved = computeRemovalScope(
+      reachOf([
+        found('a@example.com', { mailboxId: MAILBOX_A, messageIds: ['AAMk-a1'] }),
+        found('b@example.com', { mailboxId: MAILBOX_B, messageIds: ['AAMk-b1', 'AAMk-b2'] }),
+      ]),
+      { maxMailboxes: 10, maxMessages: 10 }
+    );
+    const { counts } = recheckRemoval(
+      approved,
+      reachOf([
+        found('a@example.com', { mailboxId: MAILBOX_A, messageIds: ['AAMk-a1'], folder: 'junk' }),
+        found('b@example.com', {
+          mailboxId: MAILBOX_B,
+          messageIds: ['AAMk-b1', 'AAMk-b2'],
+          folder: 'deleted',
+        }),
+      ])
+    );
+    expect(counts).toMatchObject({
+      messages: 3,
+      mailboxes: 2,
+      toMove: 1,
+      toMoveMailboxes: 1,
+      alreadyInDeletedItems: 2,
+      alreadyInDeletedItemsMailboxes: 1,
+    });
+  });
+
+  it('puts every recipient in exactly one category, so they add up to the total', () => {
+    const approved = computeRemovalScope(
+      reachOf([
+        found('a@example.com', { mailboxId: MAILBOX_A, messageIds: ['AAMk-a1'] }),
+        found('b@example.com', { mailboxId: MAILBOX_B, messageIds: ['AAMk-b1'] }),
+      ]),
+      { maxMailboxes: 10, maxMessages: 10 }
+    );
+    const now: IncidentReach = {
+      ...reachOf([
+        found('a@example.com', { mailboxId: MAILBOX_A, messageIds: ['AAMk-a1'] }),
+        // Another address of mailbox A
+        found('a.alias@example.com', { mailboxId: MAILBOX_A, messageIds: ['AAMk-a1'] }),
+        // The approved mailbox, now listed without a mailbox ID
+        { address: 'b@example.com', mailbox: 'not_checked' },
+        // Found later, never approved
+        found('c@example.com', { mailboxId: MAILBOX_C, messageIds: ['AAMk-c1'] }),
+        { address: 'desk@example.com', mailbox: 'not_checked' },
+        { address: 'gone@example.com', mailbox: 'not_found' },
+        { address: 'bounced@example.com', mailbox: 'not_delivered' },
+        found('purged@example.com', { folder: 'recoverable' }),
+        found('noid@example.com'),
+      ]),
+      unlisted: 3,
+    };
+    const { recipients, notOpened } = recheckRemoval(approved, now);
+    expect(recipients).toEqual({
+      total: 12,
+      toMove: 1,
+      alreadyInDeletedItems: 0,
+      noLongerMatched: 1,
+      onlyInRecoverableItems: 1,
+      noCopyFound: 1,
+      mailboxNotOpened: 1,
+      notDelivered: 1,
+      noIdentifiers: 1,
+      notInApprovedScope: 1,
+      sameMailbox: 1,
+      unlisted: 3,
+    });
+    expect(notOpened).toEqual(['desk@example.com']);
+  });
+
+  it('accounts for an approved mailbox the reach no longer lists', () => {
+    const approved = computeRemovalScope(
+      reachOf([found('a@example.com', { mailboxId: MAILBOX_A, messageIds: ['AAMk-a1'] })]),
+      { maxMailboxes: 10, maxMessages: 10 }
+    );
+    const { recipients } = recheckRemoval(approved, emptyReach('unavailable'));
+    expect(recipients).toMatchObject({ total: 1, noLongerMatched: 1, toMove: 0 });
+  });
 });
