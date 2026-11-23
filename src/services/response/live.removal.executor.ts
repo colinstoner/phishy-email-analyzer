@@ -52,7 +52,11 @@ import {
 } from '../graph-write/write.protocol';
 import { displayText } from './display';
 import type { RemovalExecutionOptions, RemovalExecutor } from './executors';
-import { computeLiveRemovalScope } from './removal.eligibility';
+import {
+  DEFAULT_SAME_MESSAGE_SPREAD_MINUTES,
+  computeLiveRemovalScope,
+} from './removal.eligibility';
+import { stripAngleBrackets } from '../graph/trace.operations';
 import {
   ActionResult,
   IncidentReach,
@@ -108,11 +112,28 @@ function chunk(mailboxes: RemoveMessagesMailbox[]): RemoveMessagesMailbox[][] {
  * the check the approved scope recorded for it. A copy without a recorded
  * check is not sent (counted by the caller).
  */
-function toRequest(mailbox: RemovalMailbox): {
+function toRequest(
+  mailbox: RemovalMailbox,
+  anchorMessageId: string | undefined
+): {
   request?: RemoveMessagesMailbox;
   unchecked: number;
+  notSameMessage: number;
 } {
-  const checks = new Map((mailbox.verify ?? []).map(check => [check.messageId, check]));
+  // A scope stored by the version that also admitted copies on message
+  // size may name copies with another Message-ID: never sent
+  const allChecks = mailbox.verify ?? [];
+  const sameMessage = allChecks.filter(
+    check =>
+      anchorMessageId !== undefined &&
+      stripAngleBrackets(check.internetMessageId.trim()) ===
+        stripAngleBrackets(anchorMessageId.trim())
+  );
+  const checks = new Map(sameMessage.map(check => [check.messageId, check]));
+  const stillNamed = new Set(mailbox.messageIds);
+  const notSameMessage = allChecks.filter(
+    check => !sameMessage.includes(check) && stillNamed.has(check.messageId)
+  ).length;
   const messages = mailbox.messageIds
     .map(id => checks.get(id))
     .filter((check): check is NonNullable<typeof check> => check !== undefined)
@@ -127,7 +148,8 @@ function toRequest(mailbox: RemovalMailbox): {
     }));
   return {
     ...(messages.length > 0 ? { request: { mailboxId: mailbox.mailboxId, messages } } : {}),
-    unchecked: mailbox.messageIds.length - messages.length,
+    unchecked: mailbox.messageIds.length - messages.length - notSameMessage,
+    notSameMessage,
   };
 }
 
@@ -156,6 +178,7 @@ export class LiveRemovalExecutor implements RemovalExecutor {
     const unknownMailboxes = new Set<string>();
     let notAttemptedForTime = 0;
     let unchecked = 0;
+    let notSameMessage = 0;
     let refusal: string | undefined;
 
     // 1. The same re-check the dry run uses: never wider than approved
@@ -165,13 +188,17 @@ export class LiveRemovalExecutor implements RemovalExecutor {
     // 2. Each copy with its own recorded check; none without one
     const requests: RemoveMessagesMailbox[] = [];
     for (const mailbox of still) {
-      const entry = toRequest(mailbox);
+      const entry = toRequest(mailbox, approved.live?.anchor.internetMessageId);
       if (entry.request) {
         requests.push(entry.request);
       }
       if (entry.unchecked > 0) {
         unchecked += entry.unchecked;
         countOutcome(counts, 'not_attempted', entry.unchecked);
+      }
+      if (entry.notSameMessage > 0) {
+        notSameMessage += entry.notSameMessage;
+        countOutcome(counts, 'not_attempted', entry.notSameMessage);
       }
     }
 
@@ -268,6 +295,7 @@ export class LiveRemovalExecutor implements RemovalExecutor {
       newSinceApproval: newEligible,
       noLongerMatched: recheck.noLongerMatched,
       unchecked,
+      notSameMessage,
       notAttemptedForTime,
       refusal,
       errors: list(errorMailboxes),
@@ -293,9 +321,8 @@ export class LiveRemovalExecutor implements RemovalExecutor {
       { maxMailboxes: Number.MAX_SAFE_INTEGER, maxMessages: Number.MAX_SAFE_INTEGER },
       approved.live.anchor,
       {
-        windowHours: approved.live.windowHours,
-        sizeTolerancePercent: approved.live.sizeTolerancePercent,
-        sameMessageSpreadMinutes: approved.live.sameMessageSpreadMinutes,
+        sameMessageSpreadMinutes:
+          approved.live.sameMessageSpreadMinutes ?? DEFAULT_SAME_MESSAGE_SPREAD_MINUTES,
       }
     );
     return now.mailboxes.flatMap(m => m.messageIds).filter(id => !named.has(id)).length;
@@ -318,6 +345,7 @@ export class LiveRemovalExecutor implements RemovalExecutor {
       newSinceApproval: number;
       noLongerMatched: number;
       unchecked: number;
+      notSameMessage: number;
       notAttemptedForTime: number;
       refusal?: string;
       errors: { shown: string[]; more: number };
@@ -359,6 +387,11 @@ export class LiveRemovalExecutor implements RemovalExecutor {
     if (detail.unchecked > 0) {
       lines.push(
         `${detail.unchecked} message(s) were not attempted: the approved scope recorded no check for them. They were left alone.`
+      );
+    }
+    if (detail.notSameMessage > 0) {
+      lines.push(
+        `${detail.notSameMessage} message(s) were not attempted: they were proposed because their size matched, not because they carry the reported copy's Internet Message-ID, and this version of Phishy removes only copies with that Message-ID. They were left alone.`
       );
     }
     if (detail.noLongerMatched > 0) {

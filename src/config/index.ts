@@ -90,9 +90,6 @@ export const ENV_MAPPINGS: Readonly<Record<string, string>> = {
   // Approved removals: dry_run (default) or live through the Graph write broker
   PHISHY_CAMPAIGN_RESPONSE_REMOVAL_MODE: 'campaignResponse.removal.mode',
   PHISHY_GRAPH_WRITE_BROKER_FUNCTION: 'campaignResponse.removal.writeBrokerFunctionName',
-  PHISHY_CAMPAIGN_RESPONSE_REMOVAL_WINDOW_HOURS: 'campaignResponse.removal.windowHours',
-  PHISHY_CAMPAIGN_RESPONSE_REMOVAL_SIZE_TOLERANCE_PERCENT:
-    'campaignResponse.removal.sizeTolerancePercent',
   PHISHY_CAMPAIGN_RESPONSE_REMOVAL_SAME_MESSAGE_SPREAD_MINUTES:
     'campaignResponse.removal.sameMessageSpreadMinutes',
 
@@ -358,7 +355,10 @@ export function loadGraphWriteBrokerConfig(
  * but that nothing reads. One fixed message per key that was set explicitly
  * (in the S3 file or the environment); values are never logged.
  */
-export function ignoredConfigKeyWarnings(config: PartialPhishyConfig): string[] {
+export function ignoredConfigKeyWarnings(
+  config: PartialPhishyConfig,
+  env: NodeJS.ProcessEnv = process.env
+): string[] {
   const warnings: string[] = [];
   if (config.storage?.s3Prefix !== undefined) {
     warnings.push(
@@ -374,6 +374,22 @@ export function ignoredConfigKeyWarnings(config: PartialPhishyConfig): string[] 
   }
   if (config.intelligence?.tableName !== undefined) {
     warnings.push('intelligence.tableName is set but ignored (nothing reads it). Remove it');
+  }
+  // Removed before any release: live removal has one rule (the reported
+  // copy's own Message-ID), with no size band and no separate window. The
+  // schema drops these keys; the variables have no mapping
+  const removal = (config.campaignResponse?.removal ?? {}) as Record<string, unknown>;
+  for (const [key, variable] of [
+    ['sizeTolerancePercent', 'PHISHY_CAMPAIGN_RESPONSE_REMOVAL_SIZE_TOLERANCE_PERCENT'],
+    ['windowHours', 'PHISHY_CAMPAIGN_RESPONSE_REMOVAL_WINDOW_HOURS'],
+  ]) {
+    if (removal[key] !== undefined || env[variable] !== undefined) {
+      warnings.push(
+        `campaignResponse.removal.${key} (${variable}) is set but ignored: live removal now ` +
+          'includes only copies with the reported copy’s own Internet Message-ID, within ' +
+          'campaignResponse.removal.sameMessageSpreadMinutes. Remove it'
+      );
+    }
   }
   return warnings;
 }

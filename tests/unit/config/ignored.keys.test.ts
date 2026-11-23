@@ -4,6 +4,7 @@
  */
 
 import { ignoredConfigKeyWarnings, loadConfig, PartialPhishyConfig } from '../../../src/config';
+import { PhishyConfigSchema } from '../../../src/config/schema';
 
 function config(extra: Partial<PartialPhishyConfig>): PartialPhishyConfig {
   return {
@@ -35,6 +36,37 @@ describe('ignoredConfigKeyWarnings', () => {
     expect(warnings[1]).toContain('intelligence.type is dynamodb');
     expect(warnings[2]).toContain('intelligence.tableName');
     expect(warnings.join(' ')).not.toMatch(/custom-prefix|phishy-table-example/);
+  });
+});
+
+describe('removed live-removal keys', () => {
+  it('warns about the size band and window, from the file or the environment', () => {
+    const fromFile = ignoredConfigKeyWarnings(
+      config({
+        campaignResponse: {
+          removal: { mode: 'live', sizeTolerancePercent: 1, windowHours: 6 },
+        } as never,
+      }),
+      {}
+    );
+    expect(fromFile).toHaveLength(2);
+    expect(fromFile[0]).toContain('campaignResponse.removal.sizeTolerancePercent');
+    expect(fromFile[1]).toContain('campaignResponse.removal.windowHours');
+    const fromEnv = ignoredConfigKeyWarnings(config({}), {
+      PHISHY_CAMPAIGN_RESPONSE_REMOVAL_SIZE_TOLERANCE_PERCENT: '5',
+    });
+    expect(fromEnv).toHaveLength(1);
+    expect(fromEnv[0]).toContain('PHISHY_CAMPAIGN_RESPONSE_REMOVAL_SIZE_TOLERANCE_PERCENT');
+    expect(fromEnv[0]).not.toContain('5');
+  });
+
+  it('still validates a configuration that sets them, and drops them', () => {
+    const parsed = PhishyConfigSchema.parse(
+      config({
+        campaignResponse: { removal: { mode: 'live', sizeTolerancePercent: 1, windowHours: 6 } },
+      } as never)
+    );
+    expect(parsed.campaignResponse?.removal).toEqual({ mode: 'live' });
   });
 });
 

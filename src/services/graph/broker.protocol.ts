@@ -509,6 +509,8 @@ const BlastRadiusRecipientSchema = z.strictObject({
           .optional(),
         subjectHash: z.string().regex(SUBJECT_HASH_PATTERN).optional(),
         receivedAt: z.iso.datetime().max(40).optional(),
+        // Sent by a read broker of the previous version; accepted so a
+        // deploy in either order keeps working, then dropped (unused)
         size: z
           .number()
           .int()
@@ -572,17 +574,21 @@ export const BlastRadiusLookupResultSchema = z
     errors: Count,
     cached: z.boolean(),
   })
-  .transform(result =>
-    result.report.recipients && result.report.recipients.length > MAX_LISTED_RECIPIENTS
-      ? {
-          ...result,
-          report: {
-            ...result.report,
-            recipients: result.report.recipients.slice(0, MAX_LISTED_RECIPIENTS),
-          },
-        }
-      : result
-  );
+  .transform(result => {
+    if (!result.report.recipients) {
+      return result;
+    }
+    const recipients = result.report.recipients.slice(0, MAX_LISTED_RECIPIENTS).map(recipient =>
+      recipient.copyDetails
+        ? {
+            ...recipient,
+            // An older broker's per-copy size is not used: dropped here
+            copyDetails: recipient.copyDetails.map(({ size: _size, ...detail }) => detail),
+          }
+        : recipient
+    );
+    return { ...result, report: { ...result.report, recipients } };
+  });
 
 /** The result schema for each operation */
 export const GRAPH_BROKER_RESULT_SCHEMAS = {

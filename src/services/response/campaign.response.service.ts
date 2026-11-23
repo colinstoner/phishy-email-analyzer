@@ -66,8 +66,6 @@ import {
   createRemovalExecutor,
 } from './executors';
 import {
-  DEFAULT_REMOVAL_SIZE_TOLERANCE_PERCENT,
-  DEFAULT_REMOVAL_WINDOW_HOURS,
   DEFAULT_SAME_MESSAGE_SPREAD_MINUTES,
   LiveRemovalRules,
   anchorFromReport,
@@ -399,9 +397,6 @@ export class CampaignResponseService {
   /** The live-removal eligibility rules from configuration, with conservative defaults */
   private get liveRules(): LiveRemovalRules {
     return {
-      windowHours: this.config.removal?.windowHours ?? DEFAULT_REMOVAL_WINDOW_HOURS,
-      sizeTolerancePercent:
-        this.config.removal?.sizeTolerancePercent ?? DEFAULT_REMOVAL_SIZE_TOLERANCE_PERCENT,
       sameMessageSpreadMinutes:
         this.config.removal?.sameMessageSpreadMinutes ?? DEFAULT_SAME_MESSAGE_SPREAD_MINUTES,
     };

@@ -137,9 +137,8 @@ export interface BlastRadiusRecipient {
    * so a live removal can decide whether the copy is provably the same email
    * as the incident's anchor: its Internet Message-ID, From address, the
    * SHA-256 of its normalized subject (`subjectKeyHash`; the subject text is
-   * not kept), when it arrived, and the size message trace recorded for that
-   * Message-ID and recipient (trace route only). Hostile values (the sender
-   * chose them), compared as data and never rendered.
+   * not kept) and when it arrived. Hostile values (the sender chose them),
+   * compared as data and never rendered.
    */
   copyDetails?: CopyDetail[];
   /** When the mailbox received the first matching copy (ISO, from the mailbox) */
@@ -153,8 +152,6 @@ export interface CopyDetail {
   senderAddress?: string;
   subjectHash?: string;
   receivedAt?: string;
-  /** Bytes, from the message-trace row for this recipient and Message-ID */
-  size?: number;
 }
 
 export interface BlastRadiusCoverage {
@@ -365,8 +362,6 @@ interface MailboxEntry {
   hitIds: string[];
   /** What the mailbox stored about each of those copies */
   hitDetails: CopyDetail[];
-  /** Size message trace recorded per Message-ID for this recipient (bare ID → bytes) */
-  traceSizes: Map<string, number>;
   copies: number;
   folder?: BlastRadiusFolder;
   response?: BlastRadiusResponse;
@@ -399,8 +394,6 @@ interface TraceRecipient {
   status?: string;
   /** Distinct Message-IDs on the rows that were not failed or expanded */
   messageIds: Set<string>;
-  /** The size on those rows, per bare Message-ID (the first well-formed value) */
-  sizes: Map<string, number>;
 }
 
 /** Everything a run has established so far; readable at any moment */
@@ -704,7 +697,7 @@ export class BlastRadiusService {
         row.status && DELIVERY_STATUS_PATTERN.test(row.status) ? row.status : undefined;
       let recipient = all.get(address);
       if (!recipient) {
-        recipient = { address, delivery, status, messageIds: new Set(), sizes: new Map() };
+        recipient = { address, delivery, status, messageIds: new Set() };
         all.set(address, recipient);
       } else if (DELIVERY_RANK[delivery] > DELIVERY_RANK[recipient.delivery]) {
         recipient.delivery = delivery;
@@ -715,16 +708,6 @@ export class BlastRadiusService {
       const messageId = row.messageId?.trim();
       if (delivery === 'delivered' && messageId && MESSAGE_ID_PATTERN.test(messageId)) {
         recipient.messageIds.add(addAngleBrackets(messageId));
-        const bare = stripAngleBrackets(messageId);
-        if (
-          !recipient.sizes.has(bare) &&
-          typeof row.size === 'number' &&
-          Number.isInteger(row.size) &&
-          row.size > 0 &&
-          row.size <= MAX_TRACE_SIZE_BYTES
-        ) {
-          recipient.sizes.set(bare, row.size);
-        }
       }
     }
 
@@ -752,14 +735,7 @@ export class BlastRadiusService {
         if (ids.length > MAX_MESSAGE_IDS_PER_MAILBOX) {
           progress.messageIdsCapped += 1;
         }
-        entries.push(
-          newEntry(
-            user,
-            recipient.address,
-            ids.slice(0, MAX_MESSAGE_IDS_PER_MAILBOX),
-            recipient.sizes
-          )
-        );
+        entries.push(newEntry(user, recipient.address, ids.slice(0, MAX_MESSAGE_IDS_PER_MAILBOX)));
       }
     }
 
@@ -861,7 +837,7 @@ export class BlastRadiusService {
       if (found.length > 0) {
         entry.hit = found[0];
         entry.hitIds = copyIds(found);
-        entry.hitDetails = copyDetails(found, entry.traceSizes);
+        entry.hitDetails = copyDetails(found);
         entry.copies = found.length;
       }
     } catch (error) {
@@ -940,7 +916,7 @@ export class BlastRadiusService {
       if (found.length > 0) {
         entry.hit = found[0];
         entry.hitIds = copyIds(found);
-        entry.hitDetails = copyDetails(found, entry.traceSizes);
+        entry.hitDetails = copyDetails(found);
         entry.copies = found.length;
         entry.folder = 'recoverable';
       }
@@ -1200,17 +1176,15 @@ function copyIds(found: MessageSummary[]): string[] {
   return ids.slice(0, MAX_REPORTED_COPY_IDS);
 }
 
-/** Largest message size accepted from a trace row (Exchange Online's 150 MB ceiling) */
-const MAX_TRACE_SIZE_BYTES = 150 * 1024 * 1024;
 const COPY_ADDRESS = /^[^\s<>@]{1,64}@[^\s<>@]{1,253}$/;
 
 /**
  * What the mailbox stored about each copy found, in the order and under the
  * same filter as `copyIds` (so `copyDetails[i]` describes `messageIds[i]`).
  * Each field is kept only when well formed; the subject is kept only as
- * its `subjectKeyHash`. The size comes from message trace, by Message-ID.
+ * its `subjectKeyHash`.
  */
-function copyDetails(found: MessageSummary[], traceSizes: Map<string, number>): CopyDetail[] {
+function copyDetails(found: MessageSummary[]): CopyDetail[] {
   const details: CopyDetail[] = [];
   const seen = new Set<string>();
   for (const message of found) {
@@ -1230,7 +1204,6 @@ function copyDetails(found: MessageSummary[], traceSizes: Map<string, number>): 
         ? rawSender
         : undefined;
     const received = Date.parse(message.receivedDateTime ?? '');
-    const size = validId ? traceSizes.get(stripAngleBrackets(internetMessageId)) : undefined;
     details.push({
       messageId: message.id,
       ...(validId ? { internetMessageId } : {}),
@@ -1239,7 +1212,6 @@ function copyDetails(found: MessageSummary[], traceSizes: Map<string, number>): 
         ? { subjectHash: subjectKeyHash(message.subject) }
         : {}),
       ...(Number.isFinite(received) ? { receivedAt: new Date(received).toISOString() } : {}),
-      ...(size !== undefined ? { size } : {}),
     });
   }
   return details.slice(0, MAX_REPORTED_COPY_IDS);
@@ -1262,19 +1234,13 @@ function copyIdentifiers(
   };
 }
 
-function newEntry(
-  user: DirectoryUser,
-  address: string,
-  messageIds: string[] = [],
-  traceSizes: Map<string, number> = new Map()
-): MailboxEntry {
+function newEntry(user: DirectoryUser, address: string, messageIds: string[] = []): MailboxEntry {
   return {
     user,
     address,
     messageIds,
     hitIds: [],
     hitDetails: [],
-    traceSizes,
     checked: false,
     recoverableChecked: false,
     copies: 0,

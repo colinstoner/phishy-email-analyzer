@@ -790,23 +790,22 @@ function liveBasisText(
 ): string {
   const sender = displayText(basis.anchor.senderAddress) ?? 'the reported sender';
   const subject = displayText(basis.anchor.subject, 160) ?? '(no subject)';
-  const spread = (range: { first: string; last: string } | undefined): string => {
-    const first = displayTime(range?.first, timeZone);
-    const last = displayTime(range?.last, timeZone);
-    if (!first || !last) {
-      return '';
-    }
-    return first === last ? `, arriving at ${first}` : `, arriving between ${first} and ${last}`;
-  };
-  const parts = [
-    `${basis.sameMessageIdAsAnchor} copy(ies) carry the same Internet Message-ID as the reported copy${spread(basis.sameIdReceived)} (within ${basis.sameMessageSpreadMinutes} minutes of it)`,
-    ...(basis.matchedOnSize > 0
-      ? [
-          `${basis.matchedOnSize} copy(ies) have a different Internet Message-ID and were included because their message-trace size is within ${basis.sizeTolerancePercent}% of the reported copy's${spread(basis.sizeReceived)} (within ${basis.windowHours} hour(s) of it)`,
-        ]
-      : []),
-  ];
-  return `moves ${copies} copy(ies) in ${mailboxes} mailbox(es) to each person's Deleted Items. They are ${basis.distinctMessages} distinct email(s) by Internet Message-ID: ${parts.join('; ')}. Every copy is from ${sender} with exactly the subject "${subject}". The basis is the reported email as Phishy found it in the reporter's own mailbox: the copy whose Internet Message-ID and subject the reporter's forward names in its own headers, the only message with that ID in the reporter's mailbox, which the reporter forwarded. Before moving each copy the write broker re-checks its Message-ID, sender, subject and arrival time. A legitimate email from the same sender with the same subject and that Message-ID${basis.matchedOnSize > 0 ? ', or with a size in that band,' : ''} arriving in that window would also be included: check the sender and subject before approving. Nothing is permanently deleted, and each person whose copy is moved gets a short notice.`;
+  const first = displayTime(basis.firstReceivedAt, timeZone);
+  const last = displayTime(basis.lastReceivedAt, timeZone);
+  const span =
+    first && last
+      ? first === last
+        ? `, arriving at ${first}`
+        : `, arriving between ${first} and ${last}`
+      : '';
+  // A scope stored by the version that also matched on size may name such
+  // copies; the executor will not move them, and the proposal says so
+  const legacy = (basis as { matchedOnSize?: number }).matchedOnSize ?? 0;
+  const legacyNote =
+    legacy > 0
+      ? ` ${legacy} of them were proposed by an earlier version because their size matched; they will not be moved.`
+      : '';
+  return `moves ${copies} copy(ies) in ${mailboxes} mailbox(es) to each person's Deleted Items, all carrying the same Internet Message-ID as the reported copy, from ${sender} with exactly the subject "${subject}"${span} (within ${basis.sameMessageSpreadMinutes} minutes of the reported copy).${legacyNote} The reported copy is the one in the reporter's own mailbox whose Message-ID and subject the reporter's forward names in its own headers, the only message with that ID there, which the reporter forwarded; the write broker re-checks each copy before moving it. A legitimate email from the same sender with the same subject and the same Message-ID in that window would also be moved: check the sender and subject before approving. Nothing is permanently deleted, and each person whose copy is moved gets a short notice.`;
 }
 
 interface Proposals {
