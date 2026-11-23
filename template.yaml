@@ -127,6 +127,14 @@ Parameters:
       besides the reporters (0 = wait for the report-count threshold only).
       Automatic warnings still wait for a second reporter. Used only when
       CampaignResponseEnabled is true.
+  CampaignResponseUpdateIntervalMinutes:
+    Type: Number
+    Default: 30
+    MinValue: 1
+    MaxValue: 1440
+    Description: >
+      Shortest gap, in minutes, between incident update emails to the security
+      team for one campaign. Used only when CampaignResponseEnabled is true.
   EmailCommandsEnabled:
     Type: String
     AllowedValues: ['true', 'false']
@@ -554,6 +562,7 @@ Resources:
           PHISHY_CAMPAIGN_RESPONSE_AUDIENCE: !If [UseCampaignResponse, !Ref CampaignResponseAudience, !Ref AWS::NoValue]
           PHISHY_CAMPAIGN_RESPONSE_EMPLOYEE_WARNING: !If [UseCampaignResponse, !Ref CampaignResponseEmployeeWarning, !Ref AWS::NoValue]
           PHISHY_CAMPAIGN_RESPONSE_REACH_THRESHOLD: !If [UseCampaignResponse, !Ref CampaignResponseReachThreshold, !Ref AWS::NoValue]
+          PHISHY_CAMPAIGN_RESPONSE_UPDATE_INTERVAL_MINUTES: !If [UseCampaignResponse, !Ref CampaignResponseUpdateIntervalMinutes, !Ref AWS::NoValue]
           PHISHY_EMAIL_COMMANDS_ENABLED: !If [UseEmailCommands, 'true', !Ref AWS::NoValue]
           PHISHY_ATTACHMENT_ANALYSIS_ENABLED: !If [UseAttachmentAnalysis, 'true', !Ref AWS::NoValue]
           PHISHY_REPORT_BUTTON_ENABLED: !If [UseReportButton, 'true', !Ref AWS::NoValue]

@@ -667,6 +667,12 @@ export class CampaignResponseService {
         delete summary.removalAnchor;
       }
     }
+    // This report gave the incident its anchor, on a deployment that removes
+    // live: a live removal can be proposed for the first time
+    const anchored =
+      this.removalExecutor.changesMailboxes &&
+      !stored.summary.removalAnchor &&
+      summary.removalAnchor !== undefined;
     const incident: CampaignIncident = { ...stored, reach, summary, reportCount };
     if (stored.summary.openedOnReach && input.match.shouldAlert && input.campaign.id) {
       // The reach-opened incident has now crossed the report-count threshold
@@ -698,6 +704,11 @@ export class CampaignResponseService {
         'A second person has reported it, so actions set to send automatically are no longer held for approval.'
       );
     }
+    if (anchored) {
+      changes.push(
+        "Phishy has now confirmed the reported email in a reporter's own mailbox, so a live removal can be proposed."
+      );
+    }
     if (changes.length === 0) {
       return 'unchanged';
     }
@@ -706,9 +717,11 @@ export class CampaignResponseService {
     // An incident whose first email has not gone yet (a report racing the one
     // that opened it) counts from its creation, so it is not emailed twice
     const last = (incident.lastUpdateSentAt ?? incident.createdAt).getTime();
-    if (!released && this.now().getTime() - last < intervalMs) {
+    if (!released && !anchored && this.now().getTime() - last < intervalMs) {
       // Folded into the next update; proposals are not changed without one.
-      // A release is never deferred: it is decided on this transition only
+      // A release is never deferred: it is decided on this transition only.
+      // Nor is the first anchor: it happens once per incident, and the
+      // removal it allows should not wait out the interval
       return 'update_deferred';
     }
 
@@ -1476,7 +1489,11 @@ export class CampaignResponseService {
   ): Omit<WarningContext, 'warnedCount'> {
     return {
       summary: incident.summary,
-      reportCount: incident.reportCount,
+      // The warning speaks of colleagues: count people, not reports, when known
+      reportCount:
+        incident.reportCount === 0
+          ? 0
+          : distinctCount(this.reportersOf(incident)) || incident.reportCount,
       timeZone: this.config.timeZone,
       alreadyClickedInstructions: this.config.alreadyClickedInstructions,
       incidentReference: incident.reference,
@@ -1566,10 +1583,15 @@ export class CampaignResponseService {
     }
     const body: string[] = [];
     let acted = false;
+    // True while every approval that ran was a live removal that moved nothing
+    let onlyMovedNothing = true;
     for (const command of commands) {
       try {
         const lines = await this.approve(command, approver.trim().toLowerCase(), getRemainingMs);
         acted = acted || lines.acted;
+        if (lines.acted && !lines.movedNothing) {
+          onlyMovedNothing = false;
+        }
         body.push(...lines.body, '');
       } catch (error) {
         if (error instanceof ResponseStoreUnavailableError) {
@@ -1590,7 +1612,11 @@ export class CampaignResponseService {
       }
     }
     return {
-      heading: acted ? 'Done: approval carried out' : 'Phishy did not carry out an approval',
+      heading: !acted
+        ? 'Phishy did not carry out an approval'
+        : onlyMovedNothing
+          ? 'Approved, but no message was moved'
+          : 'Done: approval carried out',
       body: body.length ? body : ['Nothing to do.'],
     };
   }
@@ -1729,7 +1755,7 @@ export class CampaignResponseService {
     command: ApprovalCommand,
     approver: string,
     getRemainingMs?: () => number | undefined
-  ): Promise<{ acted: boolean; body: string[] }> {
+  ): Promise<{ acted: boolean; body: string[]; movedNothing?: boolean }> {
     const action = await this.store.getActionByReference(command.reference);
     const expected: ResponseActionType =
       command.verb === 'WARNING' ? 'send_warning' : 'remove_messages';
@@ -1825,7 +1851,7 @@ export class CampaignResponseService {
     scope: RemovalScope,
     approver: string,
     getRemainingMs?: () => number | undefined
-  ): Promise<{ acted: boolean; body: string[] }> {
+  ): Promise<{ acted: boolean; body: string[]; movedNothing?: boolean }> {
     const proposedLive = scope.mode === 'live';
     const live = proposedLive && this.removalExecutor.changesMailboxes;
     const executor = live ? this.removalExecutor : this.dryRunExecutor;
@@ -1873,6 +1899,9 @@ export class CampaignResponseService {
       ? executed
       : await this.sendRemovalNotices(incident, approved, scope, executed, getRemainingMs);
     const body = [heading, ...modeNote, ...result.summary];
+    // A live removal that moved nothing (refused, nothing left to move): the
+    // reply's headline says so instead of reading as a removal carried out
+    const movedNothing = !result.dryRun && (result.removalOutcome?.moved ?? 0) === 0;
 
     try {
       await this.store.finishAction(
@@ -1916,13 +1945,14 @@ export class CampaignResponseService {
       });
       return {
         acted: true,
+        movedNothing,
         body: [
           ...body,
           'Phishy could not record this result in its database (see the logs). What is reported above is what happened.',
         ],
       };
     }
-    return { acted: true, body };
+    return { acted: true, movedNothing, body };
   }
 
   /**
@@ -2072,7 +2102,7 @@ export class CampaignResponseService {
     action: ResponseAction,
     incident: CampaignIncident,
     approver: string
-  ): Promise<{ acted: boolean; body: string[] }> {
+  ): Promise<{ acted: boolean; body: string[]; movedNothing?: boolean }> {
     await this.reject(
       action,
       incident.id,
@@ -2104,7 +2134,7 @@ export class CampaignResponseService {
     action: ResponseAction,
     incident: CampaignIncident,
     approver: string
-  ): Promise<{ acted: boolean; body: string[] }> {
+  ): Promise<{ acted: boolean; body: string[]; movedNothing?: boolean }> {
     await this.expire(incident);
     await this.reject(action, incident.id, 'expired', approver);
     const expiredAt =

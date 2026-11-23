@@ -354,8 +354,23 @@ export class LiveRemovalExecutor implements RemovalExecutor {
   ): string[] {
     const named = (l: { shown: string[]; more: number }): string =>
       `${l.shown.join(', ')}${l.more > 0 ? ` and ${l.more} more` : ''}`;
+    const refused = detail.refusal
+      ? `The write broker refused the request (${detail.refusal}): no further mailboxes were sent. ${
+          detail.refusal === 'write_disabled'
+            ? 'Its kill switch (PHISHY_GRAPH_WRITE_ENABLED) is off.'
+            : 'See its log.'
+        }`
+      : undefined;
+    // Lead with what happened: a removal that moved nothing must not read
+    // as a removal that was carried out
+    const lead =
+      counts.moved > 0
+        ? `Removal carried out by the Graph write broker: ${counts.moved} message(s) moved to Deleted Items in ${detail.mailboxesRemoved} mailbox(es). Nothing was permanently deleted; each person can restore the message from Deleted Items.`
+        : counts.unknown > 0
+          ? 'No message is confirmed moved, but the outcome is unknown for some (see below).'
+          : 'No message was moved. No mailbox was changed.';
     const lines = [
-      `Removal carried out by the Graph write broker: ${counts.moved} message(s) moved to Deleted Items in ${detail.mailboxesRemoved} mailbox(es). Nothing was permanently deleted; each person can restore the message from Deleted Items.`,
+      ...(refused && counts.moved === 0 ? [refused, lead] : [lead]),
       `  moved to Deleted Items: ${counts.moved}`,
       `  already in Deleted Items (left there): ${counts.alreadyDeleted}`,
       `  not found (already moved or purged; left alone): ${counts.notFound}`,
@@ -370,14 +385,8 @@ export class LiveRemovalExecutor implements RemovalExecutor {
         `The write broker did not answer in time for ${counts.unknown} message(s) in ${detail.unknown.shown.length + detail.unknown.more} mailbox(es) (${named(detail.unknown)}). Some of them may have been moved. Those people were NOT sent a removal notice. To check, look in the write broker's log for this action's line (it gives the moved count) or in those mailboxes' Deleted Items, and tell those people yourself if their copy was moved.`
       );
     }
-    if (detail.refusal) {
-      lines.push(
-        `The write broker refused the request (${detail.refusal}): no further mailboxes were sent. ${
-          detail.refusal === 'write_disabled'
-            ? 'Its kill switch (PHISHY_GRAPH_WRITE_ENABLED) is off.'
-            : 'See its log.'
-        }`
-      );
+    if (refused && counts.moved > 0) {
+      lines.push(refused);
     }
     if (detail.notAttemptedForTime > 0) {
       lines.push(

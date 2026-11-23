@@ -275,10 +275,28 @@ describe('incident email', () => {
     timeZone: 'UTC',
   });
 
+  it('counts people, not reports, when the reporters are known', () => {
+    const build = (reporters: string[], reportCount: number): string =>
+      buildIncidentEmail({
+        incident: { ...incident, reportCount, summary: { ...incident.summary, reporters } },
+        proposed: [],
+        done: [],
+        notes: [],
+        commandsEnabled: true,
+        timeZone: 'UTC',
+      }).text;
+    const two = ['one@example.com', 'two@example.com', 'ONE@example.com '];
+    expect(build(two, 3)).toContain('2 people have reported the same');
+    expect(build(two, 3)).toContain('email (3 reports in all).');
+    expect(build(two, 3)).not.toContain('3 people have reported');
+    expect(build(two, 2)).not.toContain('reports in all');
+    expect(build(['one@example.com'], 1)).toContain('1 person has reported the same');
+  });
+
   it('leads with the decision, then reach and actions, then the evidence', () => {
     const order = [
       '2 actions are waiting for your approval.',
-      '3 people have reported',
+      '3 report(s) of the same',
       'REACH',
       'WHAT PHISHY HAS DONE',
       'PROPOSED ACTIONS',
@@ -372,10 +390,10 @@ describe('incident email', () => {
     expect(update.text).toContain('None. There is nothing to approve in this email.');
     // An update leads with what changed, in both formats
     expect(update.text.indexOf('WHAT CHANGED')).toBeLessThan(
-      update.text.indexOf('9 people have reported')
+      update.text.indexOf('9 report(s) of the same')
     );
     expect(update.html.indexOf('What changed')).toBeLessThan(
-      update.html.indexOf('9 people have reported')
+      update.html.indexOf('9 report(s) of the same')
     );
   });
 

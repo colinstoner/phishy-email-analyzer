@@ -503,13 +503,29 @@ function recipientCells(recipient: BlastRadiusRecipient): string[] {
 export const LISTED_IN_INCIDENT = 25;
 const RECIPIENT_COLUMNS = ['Recipient', 'Location', 'Read', 'Replied / forwarded'];
 
+/**
+ * How many reported it, counting people when the reporters are known: three
+ * reports from two people are not "3 people".
+ */
+function reportedBy(incident: CampaignIncident, label: string): string {
+  const reports = incident.reportCount;
+  const people = new Set((incident.summary.reporters ?? []).map(a => a.trim().toLowerCase())).size;
+  if (people === 0) {
+    return `${reports} report(s) of the same ${label} email so far.`;
+  }
+  const who = `${people} ${people === 1 ? 'person has' : 'people have'}`;
+  return people >= reports
+    ? `${who} reported the same ${label} email.`
+    : `${who} reported the same ${label} email (${reports} reports in all).`;
+}
+
 function inShort(incident: CampaignIncident): string {
   const reach = incident.reach;
   const label = describeVerdict(incident.summary.verdict).label.toLowerCase();
   const opening =
     incident.trigger === 'fanout_scan' && incident.reportCount === 0
       ? `Phishy's fan-out scan saw this email reach many people before anyone reported it.`
-      : `${incident.reportCount} ${incident.reportCount === 1 ? 'person has' : 'people have'} reported the same ${label} email.`;
+      : reportedBy(incident, label);
   if (
     reach.status === 'not_enabled' ||
     (reach.status === 'unavailable' && reach.recipients.length === 0)

@@ -779,6 +779,10 @@ describe('LiveRemovalExecutor', () => {
       expect(result.summary.join('\n')).toContain(
         'kill switch (PHISHY_GRAPH_WRITE_ENABLED) is off'
       );
+      // The refusal leads; nothing reads as a removal carried out
+      expect(result.summary[0]).toContain('refused the request (write_disabled)');
+      expect(result.summary[1]).toBe('No message was moved. No mailbox was changed.');
+      expect(result.summary.join('\n')).not.toContain('Removal carried out');
     }
   });
 });
@@ -1279,6 +1283,54 @@ describe('a live removal through CampaignResponseService', () => {
     });
     expect(all.map(a => a.status)).toEqual(['completed', 'proposed']);
     expect(all[1].scopeHash).toBe(all[0].scopeHash);
+  });
+
+  it('heads the reply with what happened when an approved removal moved nothing', async () => {
+    const refused = service({
+      failure: { ok: false, failure: 'refused', refusal: 'write_disabled' },
+    });
+    await refused.service.handleCampaignReport(campaignReport([recipient(1)]));
+    const reply = await refused.service.handleApprovals(
+      approveLine(removals(refused.store)[0].reference),
+      TEAM[0]
+    );
+    expect(reply.heading).toBe('Approved, but no message was moved');
+    expect(reply.body[1]).toContain('refused the request (write_disabled)');
+
+    const moved = service();
+    await moved.service.handleCampaignReport(campaignReport([recipient(1)]));
+    const done = await moved.service.handleApprovals(
+      approveLine(removals(moved.store)[0].reference),
+      TEAM[0]
+    );
+    expect(done.heading).toBe('Done: approval carried out');
+    expect(done.body[1]).toContain('Removal carried out by the Graph write broker');
+  });
+
+  it('sends the update at once when a report first gives the incident its anchor', async () => {
+    const later = () => {
+      const next = campaignReport([recipient(1)]);
+      (next as { match: { detectionCount: number } }).match.detectionCount = 4;
+      return next;
+    };
+    const { service: svc, store, sent, advance } = service();
+    // No anchor yet: only a dry run can be proposed
+    await svc.handleCampaignReport(campaignReport([recipient(1)], {}));
+    advance(2 * 60_000);
+    expect(await svc.handleCampaignReport(later())).toBe('updated');
+    expect(removals(store).some(a => (a.scope as RemovalScope).mode === 'live')).toBe(true);
+    expect(sent[sent.length - 1].text).toContain('so a live removal can be proposed');
+    // Once per incident: the next report inside the interval is deferred
+    const again = later();
+    (again as { match: { detectionCount: number } }).match.detectionCount = 5;
+    advance(2 * 60_000);
+    expect(await svc.handleCampaignReport(again)).toBe('update_deferred');
+
+    // A dry-run deployment gains nothing from the anchor: the interval holds
+    const dry = service({ live: false });
+    await dry.service.handleCampaignReport(campaignReport([recipient(1)], {}));
+    dry.advance(2 * 60_000);
+    expect(await dry.service.handleCampaignReport(later())).toBe('update_deferred');
   });
 
   it('refuses a malformed approval and runs nothing', async () => {
