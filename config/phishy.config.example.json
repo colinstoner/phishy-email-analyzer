@@ -56,9 +56,7 @@
     "maxRemovalMessages": 1000,
     "removal": {
       "mode": "dry_run",
-      "windowHours": 6,
-      "sameMessageSpreadMinutes": 60,
-      "sizeTolerancePercent": 0
+      "sameMessageSpreadMinutes": 60
     },
     "updateIntervalMinutes": 30,
     "reachThreshold": 5,

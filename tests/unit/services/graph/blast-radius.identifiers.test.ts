@@ -149,7 +149,7 @@ describe('blast radius identifiers for campaign response', () => {
     ).toBe(true);
   });
 
-  it('records the message-trace size per copy, by the Message-ID that recipient received', async () => {
+  it('does not record message-trace sizes (nothing uses them)', async () => {
     const traced: FakeResponder = (request: RecordedRequest) => {
       if (decodeURIComponent(request.path) === '/admin/exchange/tracing/messageTraces') {
         return collection([
@@ -165,7 +165,7 @@ describe('blast radius identifiers for campaign response', () => {
             senderAddress: 'billing@example.org',
             status: 'Delivered',
             messageId: 'm1@mail.example.org',
-            size: -5, // not a size: not kept
+            size: 20480,
           },
         ]);
       }
@@ -179,12 +179,37 @@ describe('blast radius identifiers for campaign response', () => {
     });
     const report = await service.lookup(email);
     const byAddress = new Map((report.recipients ?? []).map(r => [r.address, r]));
-    expect(byAddress.get('alice@example.com')?.copyDetails?.map(d => d.size)).toEqual([
-      20480, 20480,
+    for (const address of ['alice@example.com', 'bob@example.com']) {
+      const details = byAddress.get(address)?.copyDetails ?? [];
+      expect(details.length).toBeGreaterThan(0);
+      expect(JSON.stringify(details)).not.toContain('size');
+    }
+  });
+
+  it("accepts an older read broker's per-copy size during a deploy, and drops it", () => {
+    const parsed = BlastRadiusLookupResultSchema.safeParse({
+      report: {
+        status: 'complete',
+        lookedUpAt: '2026-11-17T12:00:00.000Z',
+        recipients: [
+          {
+            address: 'a@example.com',
+            mailbox: 'found',
+            mailboxId: ALICE,
+            messageIds: ['AAMk='],
+            copyDetails: [
+              { messageId: 'AAMk=', internetMessageId: '<m1@mail.example.org>', size: 20480 },
+            ],
+          },
+        ],
+      },
+      errors: 0,
+      cached: false,
+    });
+    expect(parsed.success).toBe(true);
+    expect(parsed.success && parsed.data.report.recipients?.[0].copyDetails).toEqual([
+      { messageId: 'AAMk=', internetMessageId: '<m1@mail.example.org>' },
     ]);
-    expect(byAddress.get('bob@example.com')?.copyDetails?.every(d => d.size === undefined)).toBe(
-      true
-    );
   });
 
   it('omits a copy detail value over its bound instead of truncating it', async () => {

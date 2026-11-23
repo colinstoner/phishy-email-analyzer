@@ -176,24 +176,10 @@ const CampaignResponseConfigSchema = z.object({
       /** Name or ARN of the Graph write broker function (used only in `live` mode) */
       writeBrokerFunctionName: z.string().max(170).optional(),
       /**
-       * Live only: a size-matched copy is eligible only if it arrived within
-       * this many hours of the anchor (the reported original as the
-       * reporter's mailbox stored it). Default 6.
-       */
-      windowHours: z.number().int().min(1).max(72).optional(),
-      /**
-       * Live only: a copy with a different Internet Message-ID from the
-       * anchor's is eligible only if both message-trace sizes are known and
-       * differ by at most this percentage (same sender and exact subject
-       * still required). 0, the default, admits only the anchor's own
-       * Message-ID. Raising it (e.g. to 1) admits templated mail from the
-       * same sender with the same subject: check your own mail first.
-       */
-      sizeTolerancePercent: z.number().min(0).max(10).optional(),
-      /**
-       * Live only: a copy with the anchor's own Internet Message-ID must have
-       * arrived within this many minutes of the anchor (one Message-ID is one
-       * submission, so its deliveries cluster). Default 60.
+       * Live only: a copy, which must carry the anchor's own Internet
+       * Message-ID, must have arrived within this many minutes of the anchor
+       * (one Message-ID is one submission, so its deliveries cluster).
+       * Default 60. The write broker re-checks each copy in anchor ± this.
        */
       sameMessageSpreadMinutes: z.number().int().min(5).max(360).optional(),
     })

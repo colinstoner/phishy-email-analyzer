@@ -13,22 +13,20 @@
  *    (`retrievedOriginal.identity`: Graph ID, Internet Message-ID, From
  *    address, subject; its received time). It is bound to THIS forward by
  *    the report's own top-level headers, as SES received them: the anchor's
- *    Internet Message-ID must be the report's `In-Reply-To`, or one of its
- *    `References` (a mail client writes the forwarded message's ID there;
- *    the attacker's body text cannot set the forward's headers). It must be
- *    the only message with that Internet Message-ID in the reporter's
- *    blast-radius row, that row's first copy must be the same Graph ID with
- *    the same stored values, and Exchange's last verb on it must be
- *    "forwarded". The normalized subject must not be empty.
- * 2. A copy is eligible only when ALL hold: it has a mailbox ID and Graph
- *    ID; its From address equals the anchor's (case aside); its normalized
- *    subject equals the anchor's exactly (`subjectKeyHash`); and EITHER its
- *    Internet Message-ID is the anchor's and it arrived within
+ *    Internet Message-ID must be the report's single `In-Reply-To` ID, or,
+ *    without one, its last `References` entry; and the report's own Subject
+ *    (reply/forward prefixes removed) must match the anchor's. A
+ *    Message-ID search must find it exactly once in the reporter's mailbox;
+ *    the reporter's blast-radius row must hold it once, first, with the same
+ *    stored values; Exchange's last verb on it must be "forwarded"; its
+ *    normalized subject must not be empty.
+ * 2. One eligibility rule. A copy is eligible only when ALL hold: it has a
+ *    mailbox ID and Graph ID; its Internet Message-ID is the anchor's; its
+ *    From address equals the anchor's (case aside); its normalized subject
+ *    equals the anchor's exactly (`subjectKeyHash`); and it arrived within
  *    `sameMessageSpreadMinutes` of the anchor (one Message-ID is one
- *    submission, whose deliveries cluster), OR `sizeTolerancePercent` is
- *    above 0 (it is 0 by default), both message-trace sizes are known and
- *    within that percentage, and it arrived within `windowHours`. Missing
- *    data is never a match.
+ *    submission, whose deliveries cluster). Missing data is never a match.
+ *    There is no setting that loosens this.
  * 3. Copies that fail stay in the reach (warnings are unchanged) and are
  *    counted as excluded, never silently dropped.
  */
@@ -47,14 +45,9 @@ import type {
 } from './response.types';
 import type { RemovalLimits } from './scope';
 
-export const DEFAULT_REMOVAL_WINDOW_HOURS = 6;
-/** Off by default: only copies with the anchor's own Message-ID are eligible */
-export const DEFAULT_REMOVAL_SIZE_TOLERANCE_PERCENT = 0;
 export const DEFAULT_SAME_MESSAGE_SPREAD_MINUTES = 60;
 
 export interface LiveRemovalRules {
-  windowHours: number;
-  sizeTolerancePercent: number;
   sameMessageSpreadMinutes: number;
 }
 
@@ -226,84 +219,50 @@ export function anchorFromReport(
       subject: identity.subject,
       subjectHash,
       receivedAt: new Date(receivedAt).toISOString(),
-      ...(detail.size !== undefined ? { size: detail.size } : {}),
     },
   };
 }
 
-/** The received-time window around the anchor for one admission basis */
+/** The received-time window around the anchor: anchor ± `sameMessageSpreadMinutes` */
 export function anchorWindow(
   anchor: RemovalAnchor,
-  rules: LiveRemovalRules,
-  basis: 'same_message_id' | 'same_size' = 'same_size'
+  rules: LiveRemovalRules
 ): { from: number; to: number } {
   const at = Date.parse(anchor.receivedAt);
-  const span =
-    basis === 'same_message_id'
-      ? Math.min(rules.sameMessageSpreadMinutes * 60_000, rules.windowHours * 3_600_000)
-      : rules.windowHours * 3_600_000;
+  const span = rules.sameMessageSpreadMinutes * 60_000;
   return { from: at - span, to: at + span };
 }
 
-const within = (at: number, window: { from: number; to: number }): boolean =>
-  Number.isFinite(at) && at >= window.from && at <= window.to;
-
-/** How a copy matches the anchor, or undefined when it does not */
-export function copyEligibility(
+/** Is this copy eligible: the anchor's Message-ID, sender, exact subject, inside the window? */
+export function copyEligible(
   detail: CopyDetail | undefined,
   messageId: string,
   anchor: RemovalAnchor,
   rules: LiveRemovalRules
-): 'same_message_id' | 'same_size' | undefined {
+): boolean {
   if (detail?.messageId !== messageId) {
-    return undefined;
+    return false;
+  }
+  if (!sameId(detail.internetMessageId, anchor.internetMessageId)) {
+    return false;
   }
   if (!detail.senderAddress || detail.senderAddress !== anchor.senderAddress) {
-    return undefined;
+    return false;
   }
   if (!detail.subjectHash || detail.subjectHash !== anchor.subjectHash) {
-    return undefined;
-  }
-  if (!detail.internetMessageId) {
-    return undefined;
+    return false;
   }
   const received = Date.parse(detail.receivedAt ?? '');
-  if (sameId(detail.internetMessageId, anchor.internetMessageId)) {
-    return within(received, anchorWindow(anchor, rules, 'same_message_id'))
-      ? 'same_message_id'
-      : undefined;
-  }
-  if (
-    rules.sizeTolerancePercent > 0 &&
-    anchor.size !== undefined &&
-    detail.size !== undefined &&
-    Math.abs(detail.size - anchor.size) <= (anchor.size * rules.sizeTolerancePercent) / 100 &&
-    within(received, anchorWindow(anchor, rules, 'same_size'))
-  ) {
-    return 'same_size';
-  }
-  return undefined;
+  const window = anchorWindow(anchor, rules);
+  return Number.isFinite(received) && received >= window.from && received <= window.to;
 }
-
-interface Spread {
-  first?: number;
-  last?: number;
-}
-
-function widen(spread: Spread, at: number): void {
-  spread.first = spread.first === undefined ? at : Math.min(spread.first, at);
-  spread.last = spread.last === undefined ? at : Math.max(spread.last, at);
-}
-
-const iso = (at: number | undefined): string | undefined =>
-  at === undefined ? undefined : new Date(at).toISOString();
 
 /**
  * The live removal scope: only eligible copies, per mailbox, each with what
- * the write broker must re-verify (a same-Message-ID copy within the tight
- * spread window, a size-matched one within `windowHours`). Same caps and
- * skips as `computeRemovalScope`, plus the count of copies matched by the
- * lookup but not admitted.
+ * the write broker must re-verify (the anchor's Message-ID, sender, subject
+ * hash and the anchor ± spread window). Same caps and skips as
+ * `computeRemovalScope`, plus the count of copies the lookup matched but
+ * that are not eligible.
  */
 export function computeLiveRemovalScope(
   reach: IncidentReach,
@@ -313,18 +272,13 @@ export function computeLiveRemovalScope(
 ): RemovalScope {
   const skipped = { noIdentifiers: 0, alreadyPurged: 0, overMailboxCap: 0, overMessageCap: 0 };
   const mailboxes: RemovalMailbox[] = [];
-  const windows = {
-    same_message_id: anchorWindow(anchor, rules, 'same_message_id'),
-    same_size: anchorWindow(anchor, rules, 'same_size'),
-  };
+  const window = anchorWindow(anchor, rules);
+  const receivedFrom = new Date(window.from).toISOString();
+  const receivedTo = new Date(window.to).toISOString();
   let messageCount = 0;
   let excluded = 0;
-  let sameMessageIdAsAnchor = 0;
-  let matchedOnSize = 0;
-  const distinct = new Set<string>();
-  const overall: Spread = {};
-  const sameIdSpread: Spread = {};
-  const sizeSpread: Spread = {};
+  let first: number | undefined;
+  let last: number | undefined;
 
   for (const recipient of reach.recipients) {
     if (recipient.mailbox !== 'found') {
@@ -339,31 +293,22 @@ export function computeLiveRemovalScope(
       skipped.noIdentifiers += 1;
       continue;
     }
-    const eligible: Array<{
-      id: string;
-      check: LiveCopyCheck;
-      how: 'same_message_id' | 'same_size';
-      at: number;
-    }> = [];
+    const eligible: Array<{ check: LiveCopyCheck; at: number }> = [];
     ids.forEach((id, index) => {
       const detail = recipient.copyDetails?.[index];
-      const how = copyEligibility(detail, id, anchor, rules);
-      if (!how || !detail?.internetMessageId) {
+      if (!copyEligible(detail, id, anchor, rules) || !detail?.internetMessageId) {
         excluded += 1;
         return;
       }
-      const window = windows[how];
       eligible.push({
-        id,
-        how,
         at: Date.parse(detail.receivedAt ?? ''),
         check: {
           messageId: id,
           internetMessageId: detail.internetMessageId,
           senderAddress: anchor.senderAddress,
           subjectHash: anchor.subjectHash,
-          receivedFrom: new Date(window.from).toISOString(),
-          receivedTo: new Date(window.to).toISOString(),
+          receivedFrom,
+          receivedTo,
         },
       });
     });
@@ -379,20 +324,13 @@ export function computeLiveRemovalScope(
       continue;
     }
     for (const copy of eligible) {
-      distinct.add(bare(copy.check.internetMessageId));
-      if (copy.how === 'same_message_id') {
-        sameMessageIdAsAnchor += 1;
-        widen(sameIdSpread, copy.at);
-      } else {
-        matchedOnSize += 1;
-        widen(sizeSpread, copy.at);
-      }
-      widen(overall, copy.at);
+      first = first === undefined ? copy.at : Math.min(first, copy.at);
+      last = last === undefined ? copy.at : Math.max(last, copy.at);
     }
     mailboxes.push({
       address: recipient.address.toLowerCase(),
       mailboxId: recipient.mailboxId,
-      messageIds: eligible.map(copy => copy.id),
+      messageIds: eligible.map(copy => copy.check.messageId),
       verify: eligible.map(copy => copy.check),
       folder: recipient.folder ?? 'unknown',
       ...(recipient.isRead !== undefined ? { isRead: recipient.isRead } : {}),
@@ -402,20 +340,9 @@ export function computeLiveRemovalScope(
 
   const live: LiveRemovalBasis = {
     anchor,
-    windowHours: rules.windowHours,
-    sizeTolerancePercent: rules.sizeTolerancePercent,
     sameMessageSpreadMinutes: rules.sameMessageSpreadMinutes,
-    distinctMessages: distinct.size,
-    sameMessageIdAsAnchor,
-    matchedOnSize,
-    ...(overall.first !== undefined ? { firstReceivedAt: iso(overall.first) } : {}),
-    ...(overall.last !== undefined ? { lastReceivedAt: iso(overall.last) } : {}),
-    ...(sameIdSpread.first !== undefined
-      ? { sameIdReceived: { first: iso(sameIdSpread.first)!, last: iso(sameIdSpread.last)! } }
-      : {}),
-    ...(sizeSpread.first !== undefined
-      ? { sizeReceived: { first: iso(sizeSpread.first)!, last: iso(sizeSpread.last)! } }
-      : {}),
+    ...(first !== undefined ? { firstReceivedAt: new Date(first).toISOString() } : {}),
+    ...(last !== undefined ? { lastReceivedAt: new Date(last).toISOString() } : {}),
     excluded,
   };
   return {

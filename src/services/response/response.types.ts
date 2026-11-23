@@ -126,8 +126,6 @@ export interface RemovalAnchor {
   subjectHash: string;
   /** When the reporter's mailbox received it (ISO) */
   receivedAt: string;
-  /** Message-trace size of the reporter's copy, when the trace route ran */
-  size?: number;
 }
 
 /** Why an incident in a live deployment can only have a dry-run removal */
@@ -136,19 +134,9 @@ export type LiveUnavailableReason = 'no_anchor' | 'not_malicious' | 'no_reports'
 /** What a live removal's scope rests on, for the approver */
 export interface LiveRemovalBasis {
   anchor: RemovalAnchor;
-  windowHours: number;
-  sizeTolerancePercent: number;
-  /** A copy with the anchor's Message-ID must have arrived within this of the anchor */
+  /** Every included copy carries the anchor's Message-ID and arrived within this of the anchor */
   sameMessageSpreadMinutes: number;
-  /** Arrival spread (ISO) of the copies admitted on each basis */
-  sameIdReceived?: { first: string; last: string };
-  sizeReceived?: { first: string; last: string };
-  /** Distinct Internet Message-IDs among the included copies */
-  distinctMessages: number;
-  /** Included copies whose Internet Message-ID is the anchor's */
-  sameMessageIdAsAnchor: number;
-  /** Included copies admitted on size instead (a different Message-ID) */
-  matchedOnSize: number;
+  /** Arrival span (ISO) of the included copies */
   firstReceivedAt?: string;
   lastReceivedAt?: string;
   /** Copies the lookup matched that are not provably the same email: not included */

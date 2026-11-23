@@ -84,10 +84,10 @@ describe('GraphWriteRequestSchema', () => {
       }),
     ],
     [
-      'a window wider than six days',
+      'a window wider than twelve hours',
       request({
         mailboxes: [
-          withMessage({ receivedFrom: '2026-11-10T00:00:00Z', receivedTo: '2026-11-17T00:00:00Z' }),
+          withMessage({ receivedFrom: '2026-11-16T23:00:00Z', receivedTo: '2026-11-17T11:00:01Z' }),
         ],
       }),
     ],

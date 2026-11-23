@@ -52,7 +52,7 @@ const SUBJECT = 'Invoice 2291 overdue';
 const RECEIVED = '2026-11-17T09:14:00.000Z';
 const ACTION_ID = '9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d';
 const REPORTER = 'reporter1@example.com';
-const RULES = { windowHours: 6, sizeTolerancePercent: 1, sameMessageSpreadMinutes: 60 };
+const RULES = { sameMessageSpreadMinutes: 60 };
 const LIMITS = { maxMailboxes: 500, maxMessages: 1000 };
 
 const ANCHOR: RemovalAnchor = {
@@ -63,7 +63,6 @@ const ANCHOR: RemovalAnchor = {
   subject: SUBJECT,
   subjectHash: subjectKeyHash(SUBJECT),
   receivedAt: RECEIVED,
-  size: 20_000,
 };
 
 function detail(messageId: string, extra: Partial<CopyDetail> = {}): CopyDetail {
@@ -73,7 +72,6 @@ function detail(messageId: string, extra: Partial<CopyDetail> = {}): CopyDetail 
     senderAddress: SENDER,
     subjectHash: subjectKeyHash(SUBJECT),
     receivedAt: RECEIVED,
-    size: 20_000,
     ...extra,
   };
 }
@@ -442,17 +440,19 @@ describe('anchorFromReport', () => {
 // ── Eligibility ─────────────────────────────────────────────────────────────
 
 describe('computeLiveRemovalScope', () => {
-  it('names only copies provably the anchor email, each with its own check, and counts the rest', () => {
+  it('names only copies with the anchor Message-ID, sender and subject, each with its own check', () => {
     const reach = reachOf([
       reporterRow(),
       recipient(1), // the anchor's own Message-ID
-      recipient(2, {}, { internetMessageId: '<other-2@mail.examp1e-billing.test>', size: 20_150 }), // size within 1%
-      recipient(3, {}, { internetMessageId: '<other-3@mail.examp1e-billing.test>', size: 21_000 }), // 5% off
+      // Same sender, subject and time, another Message-ID (even one of identical
+      // size, which an earlier version could admit): never eligible
+      recipient(2, {}, { internetMessageId: '<other-2@mail.examp1e-billing.test>' }),
       recipient(4, {}, { senderAddress: 'billing@example.org' }), // another sender
       recipient(5, {}, { subjectHash: subjectKeyHash('Invoice 2291 overdue - reminder') }), // contains, not equal
-      recipient(6, {}, { receivedAt: '2026-11-17T16:00:00.000Z' }), // outside 6 h
+      recipient(6, {}, { receivedAt: '2026-11-17T16:00:00.000Z' }), // hours later
       recipient(11, {}, { receivedAt: '2026-11-17T10:30:00.000Z' }), // same ID, 76 min later
-      recipient(7, {}, { internetMessageId: '<other-7@x.test>', size: undefined }), // no size
+      recipient(12, {}, { receivedAt: '2026-11-17T10:14:00.000Z' }), // exactly 60 min later
+      recipient(7, {}, { internetMessageId: undefined }), // no Message-ID recorded
       recipient(8, { copyDetails: undefined }), // no details at all
       recipient(9, { mailboxId: undefined }), // no identifiers
       recipient(10, {}, { subjectHash: subjectKeyHash('  INVOICE   2291 overdue ') }), // same after normalization
@@ -462,52 +462,32 @@ describe('computeLiveRemovalScope', () => {
     expect(scope.mailboxes.map(m => m.address)).toEqual([
       REPORTER,
       'person1@example.com',
-      'person2@example.com',
+      'person12@example.com',
       'person10@example.com',
     ]);
-    expect(scope.mailboxes[2].verify).toEqual([
-      {
-        messageId: 'AAMkAG-2',
-        internetMessageId: '<other-2@mail.examp1e-billing.test>',
-        senderAddress: SENDER,
-        subjectHash: subjectKeyHash(SUBJECT),
-        receivedFrom: '2026-11-17T03:14:00.000Z',
-        receivedTo: '2026-11-17T15:14:00.000Z',
-      },
-    ]);
-    expect(scope.live).toMatchObject({
-      distinctMessages: 2,
-      sameMessageIdAsAnchor: 3,
-      matchedOnSize: 1,
-      excluded: 7,
-      windowHours: 6,
-      sizeTolerancePercent: 1,
+    // Every copy is re-checked by the write broker in anchor ± the spread
+    for (const mailbox of scope.mailboxes) {
+      expect(mailbox.verify).toEqual([
+        {
+          messageId: mailbox.messageIds[0],
+          internetMessageId: IMID,
+          senderAddress: SENDER,
+          subjectHash: subjectKeyHash(SUBJECT),
+          receivedFrom: '2026-11-17T08:14:00.000Z',
+          receivedTo: '2026-11-17T10:14:00.000Z',
+        },
+      ]);
+    }
+    expect(scope.live).toEqual({
+      anchor: ANCHOR,
       sameMessageSpreadMinutes: 60,
-      sameIdReceived: { first: RECEIVED, last: RECEIVED },
-      sizeReceived: { first: RECEIVED, last: RECEIVED },
-    });
-    // A same-ID copy is re-checked within the tight window, a size match within the wide one
-    expect(scope.mailboxes[1].verify?.[0]).toMatchObject({
-      receivedFrom: '2026-11-17T08:14:00.000Z',
-      receivedTo: '2026-11-17T10:14:00.000Z',
+      firstReceivedAt: RECEIVED,
+      lastReceivedAt: '2026-11-17T10:14:00.000Z',
+      excluded: 7,
     });
     expect(scope.skipped.noIdentifiers).toBe(1);
     // The reach itself is unchanged: warnings still see everyone
     expect(reach.recipients).toHaveLength(12);
-  });
-
-  it('admits only the anchor Message-ID when the size band is 0 or the anchor size is unknown', () => {
-    const reach = reachOf([
-      recipient(1),
-      recipient(2, {}, { internetMessageId: '<other-2@x.test>', size: 20_000 }),
-    ]);
-    expect(
-      computeLiveRemovalScope(reach, LIMITS, ANCHOR, { ...RULES, sizeTolerancePercent: 0 })
-        .messageCount
-    ).toBe(1);
-    expect(
-      computeLiveRemovalScope(reach, LIMITS, { ...ANCHOR, size: undefined }, RULES).messageCount
-    ).toBe(1);
   });
 
   it('a planted forwarded-header block cannot aim a live removal at another sender or subject', () => {
@@ -524,7 +504,6 @@ describe('computeLiveRemovalScope', () => {
           internetMessageId: `<payroll-${n}@hr.example.com>`,
           senderAddress: 'hr@example.com',
           subjectHash: subjectKeyHash('Payroll for November'),
-          size: 20_000,
         }
       );
     const reach = reachOf([legit(1), legit(2), legit(3)]);
@@ -925,83 +904,111 @@ describe('a live removal through CampaignResponseService', () => {
       sent,
       broker,
     } = service({
-      cfg: {
-        employeeWarning: 'auto',
-        distributionWarning: 'auto',
-        // Size matching is off by default; this operator raised it
-        removal: { mode: 'live', sizeTolerancePercent: 1 },
-      },
+      cfg: { employeeWarning: 'auto', distributionWarning: 'auto' },
     });
     await svc.handleCampaignReport(
       campaignReport([
         recipient(1),
-        recipient(
-          2,
-          {},
-          {
-            internetMessageId: '<other-2@mail.examp1e-billing.test>',
-            size: 20_100,
-            receivedAt: '2026-11-17T11:40:00.000Z',
-          }
-        ),
-        recipient(3, {}, { senderAddress: 'billing@example.org' }),
+        recipient(2, {}, { receivedAt: '2026-11-17T09:50:00.000Z' }),
+        // Same sender and subject, another Message-ID: never included
+        recipient(3, {}, { internetMessageId: '<other-3@mail.examp1e-billing.test>' }),
+        // Same Message-ID but 3 hours later: outside the 60-minute spread
+        recipient(4, {}, { receivedAt: '2026-11-17T12:14:00.000Z' }),
+        recipient(5, {}, { senderAddress: 'billing@example.org' }),
       ])
     );
     const removal = removals(store)[0];
-    expect(removal.scope).toMatchObject({ mode: 'live' });
+    const scope = removal.scope as RemovalScope;
+    expect(scope).toMatchObject({ mode: 'live' });
+    expect(scope.mailboxes.map(m => m.address)).toEqual([
+      REPORTER,
+      'person1@example.com',
+      'person2@example.com',
+    ]);
+    expect(scope.live).toMatchObject({ excluded: 3, sameMessageSpreadMinutes: 60 });
     expect(removal.status).toBe('proposed');
     expect(removal.authorization).toBe('approve');
     expect(broker.calls).toEqual([]);
     const text = sent.find(e => e.to === TEAM[0])!.text;
     expect(text).toContain('Remove remaining copies from mailboxes');
     expect(text).not.toContain('(dry run)');
-    expect(text).not.toContain('never a search');
-    expect(text).toContain('Moves 3 copy(ies) in 3 mailbox(es)');
-    expect(text).toContain('They are 2 distinct email(s) by Internet Message-ID');
     expect(text).toContain(
-      '2 copy(ies) carry the same Internet Message-ID as the reported copy, arriving at Tue, 17 Nov 2026, 09:14 UTC (within 60 minutes of it)'
+      'Moves 3 copy(ies) in 3 mailbox(es) to each person\'s Deleted Items, all carrying the same Internet Message-ID as the reported copy, from billing@examp1e-billing[.]test with exactly the subject "Invoice 2291 overdue", arriving between Tue, 17 Nov 2026, 09:14 UTC and Tue, 17 Nov 2026, 09:50 UTC (within 60 minutes of the reported copy).'
     );
     expect(text).toContain(
-      "1 copy(ies) have a different Internet Message-ID and were included because their message-trace size is within 1% of the reported copy's, arriving at Tue, 17 Nov 2026, 11:40 UTC (within 6 hour(s) of it)"
+      'A legitimate email from the same sender with the same subject and the same Message-ID in that window would also be moved'
     );
-    expect(text).not.toMatch(/strongest|is the reported email itself/);
+    expect(text).not.toMatch(/size|distinct email|strongest|is the reported email itself/);
     expect(text).toContain(
-      'from billing@examp1e-billing[.]test with exactly the subject "Invoice 2291 overdue"'
-    );
-    expect(text).toContain(
-      '1 copy(ies) matched by the lookup but not provably the same email: not included in removal'
+      '3 copy(ies) matched by the lookup but not provably the same email: not included in removal'
     );
     expect(text).toContain(`APPROVE REMOVAL ${removal.reference}`);
     // A later report does not run it either
-    await svc.handleCampaignReport(campaignReport([recipient(1), recipient(4)]));
+    await svc.handleCampaignReport(campaignReport([recipient(1), recipient(6)]));
     expect(broker.calls).toEqual([]);
   });
 
-  it('by default admits only copies with the reported Message-ID, arriving close to it', async () => {
-    const { service: svc, store, sent } = service();
+  it('a removed size setting in the configuration changes nothing', async () => {
+    const { service: svc, store } = service({
+      cfg: {
+        removal: { mode: 'live', sizeTolerancePercent: 10, windowHours: 72 } as never,
+      },
+    });
     await svc.handleCampaignReport(
       campaignReport([
         recipient(1),
-        recipient(2, {}, { receivedAt: '2026-11-17T09:50:00.000Z' }),
-        // Same sender and subject, size identical, another Message-ID: off by default
         recipient(3, {}, { internetMessageId: '<other-3@mail.examp1e-billing.test>' }),
-        // Same Message-ID but 3 hours later: outside the 60-minute spread
         recipient(4, {}, { receivedAt: '2026-11-17T12:14:00.000Z' }),
       ])
     );
     const scope = removals(store)[0].scope as RemovalScope;
-    expect(scope.mailboxes.map(m => m.address)).toEqual([
-      REPORTER,
-      'person1@example.com',
-      'person2@example.com',
+    expect(scope.mailboxes.map(m => m.address)).toEqual([REPORTER, 'person1@example.com']);
+  });
+
+  it('never executes copies a stored scope from the earlier version admitted on size', async () => {
+    const { service: svc, store, broker } = service();
+    await svc.handleCampaignReport(campaignReport([recipient(1), recipient(2)]));
+    const removal = removals(store)[0];
+    const scope = removal.scope as RemovalScope;
+    // Rewrite the stored scope as the earlier version stored it: person2's
+    // copy admitted on size with another Message-ID, and the old basis fields
+    const legacyId = '<other-2@mail.examp1e-billing.test>';
+    const person2 = scope.mailboxes.find(m => m.address === 'person2@example.com')!;
+    person2.verify = person2.verify!.map(check => ({
+      ...check,
+      internetMessageId: legacyId,
+      receivedFrom: '2026-11-17T03:14:00.000Z',
+      receivedTo: '2026-11-17T15:14:00.000Z',
+    }));
+    Object.assign(scope.live!, {
+      windowHours: 6,
+      sizeTolerancePercent: 1,
+      distinctMessages: 2,
+      sameMessageIdAsAnchor: 2,
+      matchedOnSize: 1,
+      sizeReceived: { first: RECEIVED, last: RECEIVED },
+      anchor: { ...scope.live!.anchor, size: 20_000 },
+    });
+    // The reach the approval re-checks still lists that copy
+    const legacyReach = reachOf([
+      reporterRow(),
+      recipient(1),
+      recipient(2, {}, { internetMessageId: legacyId }),
     ]);
-    expect(scope.live).toMatchObject({ sizeTolerancePercent: 0, matchedOnSize: 0, excluded: 2 });
-    const text = sent.find(e => e.to === TEAM[0])!.text;
+    store.incidents[0].reach = legacyReach;
+    // Reading it back and approving it does not throw
+    const reply = await svc.handleApprovals(approveLine(removal.reference), TEAM[0]);
+    expect(broker.calls).toHaveLength(1);
+    const sentIds = broker.calls[0].params.mailboxes.flatMap(m => m.messages.map(x => x.messageId));
+    expect(sentIds.sort()).toEqual(['AAMkAG-1', 'AAMkAG-reporter'].sort());
+    const text = reply.body.join('\n');
     expect(text).toContain(
-      '3 copy(ies) carry the same Internet Message-ID as the reported copy, arriving between Tue, 17 Nov 2026, 09:14 UTC and Tue, 17 Nov 2026, 09:50 UTC (within 60 minutes of it)'
+      '1 message(s) were not attempted: they were proposed because their size matched'
     );
-    expect(text).not.toContain('different Internet Message-ID');
-    expect(text).not.toMatch(/strongest|is the reported email itself/);
+    expect(store.actions.find(a => a.id === removal.id)?.result?.removalOutcome).toMatchObject({
+      moved: 2,
+      notAttempted: 1,
+    });
   });
 
   it('stores one anchor when two reports open the same incident at once', async () => {

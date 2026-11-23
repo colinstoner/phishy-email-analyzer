@@ -67,8 +67,8 @@ export const MAX_WRITE_MAILBOXES_PER_CALL = 50;
 export const MAX_WRITE_MESSAGES_PER_MAILBOX = MAX_REPORTED_COPY_IDS;
 /** Most messages one call may name across all its mailboxes */
 export const MAX_WRITE_MESSAGES_PER_CALL = 100;
-/** Widest received-time window a copy may be checked against (72 hours either side) */
-export const MAX_RECEIVED_WINDOW_MS = 2 * 72 * 3_600_000;
+/** Widest received-time window a copy may be checked against: 6 hours either side, the largest sameMessageSpreadMinutes (360) */
+export const MAX_RECEIVED_WINDOW_MS = 2 * 6 * 3_600_000;
 /** Shortest and longest time budget a caller may give one call */
 export const MIN_WRITE_BUDGET_MS = 1000;
 export const MAX_WRITE_BUDGET_MS = 80_000;
