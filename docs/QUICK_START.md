@@ -117,6 +117,7 @@ Set `IntelligenceDbSecretArn` (a Secrets Manager secret holding a PostgreSQL 13+
 ## Next Steps
 
 - [Full AWS Setup Guide](../AWS.md) - every SAM parameter, manual setup, optional layers
+- [Microsoft 365 setup](./MICROSOFT_365.md) - forwarding, Graph, the Report button and removal, in order
 - [Configuration Reference](./CONFIGURATION.md) - all options and feature flags
 - [Architecture](./ARCHITECTURE.md) - how a report is analyzed and what is trusted
 - [Intelligence Module](./INTELLIGENCE.md) - threat tracking

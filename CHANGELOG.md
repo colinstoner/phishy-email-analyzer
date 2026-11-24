@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A Microsoft 365 setup guide** (`docs/MICROSOFT_365.md`): the stages in order, from forwarding to Graph reads, campaign response, the Outlook Report button and approved removal, with a test after each. It documents the Report-button route for the first time: Defender delivers user reports only to a mailbox in the organization (not an outside address or a mail contact), so the reports go to a reporting mailbox and a mail-flow rule Bccs them to Phishy.
+
 ## [4.0.0] - 2026-11-23
 
 Phishy grows from an analyzer into a response tool: optional Microsoft Graph reads, a scheduled scan for mail fanning out across the organization, campaign response with security-team approvals, and an approved, reversible removal of a phishing email from mailboxes. Everything below is new or changed relative to v3.0.0. Every new layer is off by default. Migrations 005 and 006 are new and, like 002–004, are applied manually.
