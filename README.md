@@ -66,7 +66,7 @@ Each is off by default and switched on with its own setting ([feature-flag table
 | Agentic analysis | Claude may consult Phishy's own data (known indicators, active campaigns, URL structure, the profile) before its verdict | nothing extra |
 | Attachment analysis | static inspection of attachment bytes: real type, macros, forms, PDF actions, archive contents, extracted text | nothing extra (in process, no network) |
 | Checklist scoring (experimental) | a risk score computed by code from a fixed checklist; weights not yet calibrated | nothing extra |
-| Outlook Report button | Report-button submissions handled silently: analyzed, the security team told only when it matters | Microsoft 365 user-reported settings delivering to Phishy |
+| Outlook Report button | Report-button submissions handled silently: analyzed, the security team told only when it matters | a reporting mailbox and a mail-flow rule in Microsoft 365 ([setup](docs/MICROSOFT_365.md#stage-5-the-outlook-report-button)) |
 | Microsoft Graph reads | the original message's real headers, the sender's history with you, who else received a malicious email | a read-only Entra app registration with a certificate |
 | Scheduled fan-out scan | an alert (no model) when a known external sender suddenly mails many of your people, before anyone reports it | Graph, the database + migration 005 |
 
@@ -122,6 +122,7 @@ SECURITY_TEAM_DISTRIBUTION=security@example.com
 |----------|-------------|
 | [docs/QUICK_START.md](docs/QUICK_START.md) | Deploy the core |
 | [AWS.md](AWS.md) | AWS setup (SAM and manual), optional layers, costs |
+| [docs/MICROSOFT_365.md](docs/MICROSOFT_365.md) | Microsoft 365 setup from start to finish: forwarding, Graph, the Report button, removal |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Every configuration option and feature flag |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | How Phishy works: pipeline, trust boundaries, each optional layer |
 | [docs/INTELLIGENCE.md](docs/INTELLIGENCE.md) | Threat intelligence: indicators, campaigns, the audit CLI |

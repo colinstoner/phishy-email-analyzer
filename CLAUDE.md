@@ -75,7 +75,7 @@ src/
 evals/injection/                    injection-eval case set: cases.json + invented .eml files
 migrations/                         numbered SQL, applied manually past 001
 docs/                               ARCHITECTURE, CONFIGURATION, DATABASE, INJECTION_EVAL, GRAPH_PROBE,
-                                    INTELLIGENCE, QUICK_START (AWS.md and template.yaml at the root)
+                                    INTELLIGENCE, MICROSOFT_365, QUICK_START (AWS.md and template.yaml at the root)
 ```
 
 ## Roadmap context

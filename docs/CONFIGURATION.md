@@ -275,7 +275,7 @@ Sending notes: warnings are sent one per person through SES, so `maxWarningsPerC
 
 ### Outlook Report Button Intake
 
-Microsoft 365 can deliver a copy of every message an employee reports with Outlook's built-in **Report** button to a mailbox of your choice (Defender portal → Settings → Email & collaboration → User reported settings → *Send reported messages to*). If those reports reach Phishy's address, this flag makes Phishy recognize them and handle them **silently** — the employee clicked a button and is not waiting for an answer, so their experience does not change:
+Microsoft 365 can deliver a copy of every message an employee reports with Outlook's built-in **Report** button to a mailbox of your choice (Defender portal → Settings → Email & collaboration → User reported settings → *Send reported messages to*). Defender delivers only to a mailbox in your own organization, not to an outside address or a mail contact, so getting those reports to Phishy takes a reporting mailbox and a mail-flow rule: the steps are in [MICROSOFT_365.md](MICROSOFT_365.md#stage-5-the-outlook-report-button). Once those reports reach Phishy's address, this flag makes Phishy recognize them and handle them **silently** — the employee clicked a button and is not waiting for an answer, so their experience does not change:
 
 - **Reported as Phishing** — analyzed, stored, and counted toward campaign detection exactly like a forward. The reporter is **not** emailed. The security team (`SECURITY_TEAM_DISTRIBUTION`) receives the report only when the verdict is malicious or suspicious, or when the analysis could not be completed.
 - **Reported as Junk / Not junk** — counted and skipped. No analysis, no email.
