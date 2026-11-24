@@ -1984,9 +1984,8 @@ export class CampaignResponseService {
 
   /**
    * After a real (non-dry-run) removal: tell each person whose copy was
-   * actually removed, one email each. Not live today: the only removal
-   * executor is the dry run, which never reports `removed`; this runs only
-   * once the write tier exists.
+   * actually removed, one email each. The dry-run executor never reports
+   * `removed`, so this sends only after a live removal.
    *
    * - Only mailboxes the executor reported with at least one copy moved,
    *   and only ones the approved scope named: the address is the scope's

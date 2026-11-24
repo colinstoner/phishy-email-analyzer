@@ -7,7 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Everything below is new or changed relative to v3.0.0. Every new layer is off by default. Migrations 005 and 006 are new and, like 002–004, are applied manually.
+## [4.0.0] - 2026-11-23
+
+Phishy grows from an analyzer into a response tool: optional Microsoft Graph reads, a scheduled scan for mail fanning out across the organization, campaign response with security-team approvals, and an approved, reversible removal of a phishing email from mailboxes. Everything below is new or changed relative to v3.0.0. Every new layer is off by default. Migrations 005 and 006 are new and, like 002–004, are applied manually.
 
 ### Added
 
@@ -242,7 +244,8 @@ Everything below is new or changed relative to v3.0.0. Every new layer is off by
 - SES-triggered analysis of forwarded emails with Claude via the Anthropic API
 - HTML security report delivered back to the forwarder
 
-[Unreleased]: https://github.com/colinstoner/phishy-email-analyzer/compare/v3.0.0...HEAD
+[Unreleased]: https://github.com/colinstoner/phishy-email-analyzer/compare/v4.0.0...HEAD
+[4.0.0]: https://github.com/colinstoner/phishy-email-analyzer/compare/v3.0.0...v4.0.0
 [3.0.0]: https://github.com/colinstoner/phishy-email-analyzer/compare/v2.0.0...v3.0.0
 [2.0.0]: https://github.com/colinstoner/phishy-email-analyzer/releases/tag/v2.0.0
 [1.0.0]: https://github.com/colinstoner/phishy-email-analyzer/tree/0641640
