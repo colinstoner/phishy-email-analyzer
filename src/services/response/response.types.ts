@@ -13,7 +13,8 @@
  * The model is shaped so a mailbox write tier can be added later without
  * redesign: a removal action already names the exact Graph message IDs per
  * mailbox, its caps and its approver; only the executor differs (see
- * `executors.ts`). In this version the only removal executor is a dry run.
+ * `executors.ts`): the dry run by default, or the live executor that hands the
+ * approved scope to the separate Graph write broker.
  */
 
 import type {
