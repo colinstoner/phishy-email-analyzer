@@ -87,7 +87,7 @@ Outlook's built-in **Report** button sends each report to a *reporting mailbox* 
    - turn on *Monitor reported messages in Outlook* and choose the built-in Report button;
    - under *Reported message destinations*, choose a destination that includes *My reporting mailbox* and enter the mailbox from step 1.
 
-   Whether reports also go to Microsoft is your choice and does not affect Phishy. Microsoft's own requirements for the reporting mailbox, including excluding it from filtering so reports arrive unaltered, are in [User reported settings](https://learn.microsoft.com/en-us/defender-office-365/submissions-user-reported-messages-custom-mailbox).
+   Whether reports also go to Microsoft is your choice and does not affect Phishy. Microsoft's own requirements for the reporting mailbox, including identifying it as a SecOps mailbox so reports are not filtered on the way in, are in [User reported settings](https://learn.microsoft.com/en-us/defender-office-365/submissions-user-reported-messages-custom-mailbox).
 3. **Copy each report to Phishy.** Exchange admin center → *Mail flow* → *Rules* → *Add a rule* → *Create a new rule*:
    - **Name:** for example *Phishy: copy button reports*
    - **Apply this rule if:** *The recipient* → *is this person* → the reporting mailbox
